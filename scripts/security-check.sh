@@ -27,7 +27,26 @@ bad()  { printf '  [FAIL] %s\n' "$*"; RC=1; }
 warn() { printf '  [warn] %s\n' "$*"; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
+# A failed scan has to say WHY.  Trivy writes one FATAL line to stderr; keep
+# its tail so "scan failed" is a diagnosis (timeout? auth? disk?) and not a
+# shrug.  An absent or empty stderr file must never print as an empty reason.
+scan_err() {
+  local f="$1" line=""
+  if [ -s "$f" ]; then
+    line="$(grep -a FATAL "$f" | tail -n 1)"
+    [ -n "$line" ] || line="$(tail -n 1 "$f")"
+  fi
+  [ -n "$line" ] || line="no stderr captured"
+  printf '%s' "$line" | sed 's/.*FATAL[[:space:]]*//; s/^Fatal error[[:space:]]*//' | cut -c1-140
+}
+
 SKIP_SCAN=0
+# Trivy's own default is --timeout 5m.  Measured 2026-10-18: docling-serve
+# (15.1GB) dies on that with context-deadline-exceeded, and ollama (9.4GB)
+# dies the same way on the SBOM pass, so the two biggest images were
+# silently unscanned.  Image size decides this, not content -- raise it
+# on a slow disk.
+TRIVY_TIMEOUT="${TRIVY_TIMEOUT:-45m}"
 [ "${1:-}" = "--audit-only" ] && SKIP_SCAN=1
 
 printf '\nAI Stack 2026 — security check\n'
@@ -354,8 +373,10 @@ else
       -v /var/run/docker.sock:/var/run/docker.sock \
       -v "$OUT/trivy:/out" \
       aquasec/trivy:latest image --quiet --scanners vuln \
-        --severity CRITICAL,HIGH --format json --output "/out/${name}.json" \
-        "$img" >/dev/null 2>&1 || warn "    scan failed for $img"
+        --severity CRITICAL,HIGH --timeout "$TRIVY_TIMEOUT" \
+        --format json --output "/out/${name}.json" \
+        "$img" >/dev/null 2>"$OUT/trivy/${name}.err" \
+      || warn "    scan failed for $img: $(scan_err "$OUT/trivy/${name}.err")"
     if [ -f "$OUT/trivy/${name}.json" ]; then
       SCANNED=$((SCANNED + 1))
       read -r c h < <(python3 - "$OUT/trivy/${name}.json" <<'PY'
@@ -404,8 +425,9 @@ elif docker image inspect aquasec/trivy:latest >/dev/null 2>&1; then
   for img in $IMAGES; do
     name="$(printf '%s' "$img" | sed 's#[/:@]#_#g' | cut -c1-80)"
     docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$OUT/trivy:/out" \
-      aquasec/trivy:latest image --quiet --format cyclonedx \
-      --output "/out/${name}.sbom.json" "$img" >/dev/null 2>&1 || true
+      aquasec/trivy:latest image --quiet --format cyclonedx --timeout "$TRIVY_TIMEOUT" \
+      --output "/out/${name}.sbom.json" "$img" >/dev/null 2>"$OUT/trivy/${name}.sbom.err" \
+      || warn "    SBOM failed for ${img%%@*}: $(scan_err "$OUT/trivy/${name}.sbom.err")"
   done
   NSBOM=$(find "$OUT/trivy" -name '*.sbom.json' -size +1c | wc -l)
   if [ "$NSBOM" -eq "$NIMAGES" ]; then
