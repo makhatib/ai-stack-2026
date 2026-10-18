@@ -77,26 +77,60 @@ info() { printf '%s\n' "$*"; }
 [ -f "$ROOT/compose.yaml" ] || die "no compose.yaml at $ROOT"
 
 ensure_rundir() {
-  [ -d "$RUNDIR" ] && [ -w "$RUNDIR" ] && return 0
-  if mkdir -p "$RUNDIR" 2>/dev/null; then
-    # Whoever got here first created it with their own ownership.  If that was
-    # root and the operator is somebody else, hand it over: otherwise the
-    # operator's next command cannot write it, falls back to another path, and
-    # takes a different lock — the divergence pick_rundir exists to prevent.
-    local ouid ogid
-    ouid="$(stat -c %u "$ROOT" 2>/dev/null || true)"
-    ogid="$(stat -c %g "$ROOT" 2>/dev/null || true)"
-    if [ "$(id -u)" = "0" ] && [ -n "$ouid" ] && [ "$ouid" != "0" ]; then
-      chown "$ouid:$ogid" "$RUNDIR" 2>/dev/null || true
-      chmod 0770 "$RUNDIR" 2>/dev/null || true
-    fi
-    return 0
-  fi
+  # MEASURED (NOM-258, 2026-10-18).  Two defects, both found by running a real
+  # root-shell install and then typing a command as the operator.
+  #
+  # 1. Handing over the DIRECTORY is not enough.  The lock files are created
+  #    later, by `exec {fd}>>"$LIFECYCLE_LOCK"`, so a root-run install left
+  #       /run/user/1000/aistack/lifecycle.lock   root:root 0644
+  #    inside a 0770 operator-owned directory, and the operator's very next
+  #    command died with a bare
+  #       bin/aistack: line 118: .../lifecycle.lock: Permission denied
+  #    That is the same class as the root-owned .env, one layer further in:
+  #    the install succeeds and the stack is unusable by the person who owns
+  #    it.  So the lock FILES are created here and handed over too.
+  #
+  # 2. The old early return -- `[ -d "$RUNDIR" ] && [ -w "$RUNDIR" ] && return`
+  #    -- skipped the handover whenever the directory already existed.  root
+  #    can write any directory, so for root that test is always true and the
+  #    chown ran only on the very first invocation.  The handover is now
+  #    idempotent and runs every time root is the caller.
+  if ! [ -d "$RUNDIR" ] && ! mkdir -p "$RUNDIR" 2>/dev/null; then
   die "cannot create a lock directory at $RUNDIR.
 Set AISTACK_RUNDIR to a writable path on a tmpfs and try again.
 It must be a tmpfs: the locks are released by the kernel when a holder dies,
 and a reboot must clear them, so a lock file on persistent storage would
 survive a crash as state nobody cleans up."
+  fi
+
+  local ouid ogid f
+  ouid="$(stat -c %u "$ROOT" 2>/dev/null || true)"
+  ogid="$(stat -c %g "$ROOT" 2>/dev/null || true)"
+  # Create, never truncate: an existing lock may be held right now.
+  for f in "$LIFECYCLE_LOCK" "$HELPER_LOCK"; do
+    [ -e "$f" ] || : > "$f" 2>/dev/null || true
+  done
+  if [ "$(id -u)" = "0" ] && [ -n "$ouid" ] && [ "$ouid" != "0" ]; then
+    chown "$ouid:$ogid" "$RUNDIR" 2>/dev/null || true
+    chmod 0770 "$RUNDIR" 2>/dev/null || true
+    for f in "$LIFECYCLE_LOCK" "$HELPER_LOCK"; do
+      [ -e "$f" ] || continue
+      chown "$ouid:$ogid" "$f" 2>/dev/null || true
+      chmod 0660 "$f" 2>/dev/null || true
+    done
+  fi
+  # Assert the outcome rather than assuming the chown worked.  A lock we
+  # cannot write is not a lock, and failing here beats failing later with a
+  # bare "Permission denied" from a redirect.
+  [ -w "$RUNDIR" ] || die "the lock directory $RUNDIR is not writable by $(id -un).
+If a root-shell install created it, re-run that install from this commit or
+remove the directory and try again."
+  for f in "$LIFECYCLE_LOCK" "$HELPER_LOCK"; do
+    [ ! -e "$f" ] || [ -w "$f" ] || die "the lock file $f is not writable by $(id -un).
+A root-shell install created it before this fix.  Remove it and try again:
+  sudo rm -f $f"
+  done
+  return 0
 }
 
 dc() {

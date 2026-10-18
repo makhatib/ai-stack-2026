@@ -106,6 +106,46 @@ container's environment, which is exactly where the two exceptions above put
 a secret. A read-only socket proxy here would be a credential-disclosure
 endpoint wearing a least-privilege label.
 
+## Can the operator account read the secrets?
+
+Some of them, and the honest answer is that it does not matter much on a
+single-operator machine -- but the reason is worth understanding, because
+`secrets/` being `0700` does not tell the whole story.
+
+Compose **ignores** `uid`, `gid` and `mode` on a file secret. Those keys are
+Swarm-only; `docker compose config` echoes them back to you faithfully and
+then Compose bind-mounts the host file with its **host** ownership. So the
+host file mode is the only control there is, and it has to be chosen for the
+numeric id the process inside the container runs as.
+
+That numeric id collides with host groups. Measured on a fresh root-shell
+install (operator `ai`, uid/gid 1000):
+
+| File | Mode | Why | Operator |
+|---|---|---|---|
+| `authelia_*` (4 files) | `0600 root:root` | Authelia's own entrypoint, uid 0 | cannot read |
+| `postgres_superuser_password`, `app_db_passwords` | `0640 root:999` | gid 999 is `postgres` **in the container** | cannot read |
+| `n8n_encryption_key` | `0640 root:1000` | gid 1000 is `node` **in the container** | **can** read |
+| `litellm.env`, `open-webui.env` | `0640 root:1000` | read by the Docker CLI as the operator | **can** read |
+| `backup.key`, `backup.hmac` | `0600 operator` | the operator is told to copy these off-host | **can** read |
+
+Two consequences we are not going to dress up:
+
+- `gid 999` on *this* host happens to resolve to `systemd-journal`, and
+  `gid 1000` to the operator's own group. The names are an accident of the
+  host's `/etc/group`; the container only ever sees the number. If your host
+  puts a *human* in gid 999 or 1000, that human can read the files in those
+  rows. Check with `ls -l secrets/` and `getent group 999 1000`.
+- The operator is in the `docker` group, which is root-equivalent anyway.
+  Anyone who can run `docker` can read any secret in this stack regardless
+  of file modes, so these rows are not a privilege boundary and are not
+  claimed as one. They are listed so you know exactly what is where.
+
+What the modes *do* buy is containment **between services**: a compromise of
+n8n cannot read Authelia's session secret or the Postgres superuser
+password. `aistack doctor` proves that direction by asking each container,
+rather than inferring it from the mode.
+
 ## What runs as root?
 
 More than we would like, and it is written down rather than glossed.
