@@ -213,13 +213,67 @@ if [ -z "${ANS[COMPOSE_PROFILES]:-}" ]; then
 fi
 
 head2 "[8/14] Port availability"
-for port in 443 80; do
-  if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
-    die "port ${port} is already in use on this machine.
-Stop whatever holds it, or this install cannot serve. 'ss -tlnp' will name it."
+# A PORT CONFLICT IS PER ADDRESS, NOT PER PORT.
+#
+# MEASURED (NOM-258, 2026-10-18).  The first version of this check grepped
+# `ss` for the port on ANY address.  On the build host a reverse proxy held
+# 192.168.100.52:80 while this stack's own caddy held 127.0.0.1:80 — the two
+# coexisted for the entire build — and yet that check refused to install,
+# because it looked at the port and never at the address being bound.  For
+# the audience this stack is for that is the common case, not the edge: a
+# router UI, a LAN reverse proxy or another compose stack on another
+# interface's :80 produced a hard STOP for a conflict that does not exist.
+#
+# It also could not tell this stack's own caddy from a foreign process, so a
+# re-install or an in-place upgrade hit the same wall with the same dead-end
+# advice.  A real conflict is: the same address, or either side binding a
+# wildcard (0.0.0.0, ::, *).
+LISTENERS="$(ss -tlnH 2>/dev/null | awk '{print $4}' | tr '\n' ' ')"
+CONFLICT="$(python3 - "${ANS[AISTACK_BIND_ADDR]}" "$LISTENERS" <<'PY'
+import sys
+want, listeners = sys.argv[1], sys.argv[2].split()
+PORTS = {"80", "443"}
+
+def split_hostport(a):
+    # ss prints IPv6 as [::]:443 / [::1]:443 and IPv4 as 0.0.0.0:443.
+    if a.startswith("["):
+        host, _, port = a[1:].partition("]:")
+    else:
+        host, _, port = a.rpartition(":")
+    return host, port
+
+def wildcard(h):
+    return h in ("0.0.0.0", "::", "*", "")
+
+def same(a, b):
+    # ::ffff:127.0.0.1 and 127.0.0.1 are the same socket address.
+    return a.replace("::ffff:", "") == b.replace("::ffff:", "")
+
+for a in listeners:
+    host, port = split_hostport(a)
+    if port in PORTS and (wildcard(host) or wildcard(want) or same(host, want)):
+        print(f"  {port} is held on {host}")
+PY
+)"
+if [ -n "$CONFLICT" ]; then
+  say "$CONFLICT"
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^aistack-caddy$'; then
+    die "this stack is already running on this host — aistack-caddy holds the
+port(s) above. That is not a conflict to resolve, it is an install to repeat:
+
+    cd $ROOT && bin/aistack down     # keeps volumes and secrets
+    ./install.sh                     # idempotent: existing secrets are reused
+
+If the holder is NOT aistack-caddy, 'ss -tlnp' will name the process."
   fi
-  say "  ${port} free"
-done
+  die "port 80 and/or 443 is already in use on ${ANS[AISTACK_BIND_ADDR]}, the
+address this install binds. 'ss -tlnp' will name the process.
+
+A listener on a DIFFERENT address is fine and is not reported above. To put
+this stack somewhere else, re-run and answer AISTACK_BIND_ADDR with a free
+address."
+fi
+say "  80 and 443 free on ${ANS[AISTACK_BIND_ADDR]}"
 
 # ===========================================================================
 # 9   .env  — shown as a diff before it is written

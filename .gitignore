@@ -1,5 +1,9 @@
-# NEVER COMMITTED.  `secrets/` is 0700 root:root and holds every generated
-# value; `.env` holds the rendered pin block and the database passwords.
+# NEVER COMMITTED.  `secrets/` is 0700 and holds every generated value;
+# `.env` holds the rendered pin block and the database passwords.
+#
+# The mode on `secrets/` is 0700 owned by the OPERATOR, not by root: it holds
+# root-owned per-service files, and the operator has to be able to traverse it
+# or compose cannot read any env_file (MEASURED, NOM-258 — see gen-secrets.sh).
 secrets/
 .env
 .runtime/
@@ -8,3 +12,25 @@ config/authelia/users.yml
 config/image-facts.yaml.bak
 *.bak
 .backup-keys-confirmed
+
+# GENERATED, NEVER COMMITTED — and this one is load-bearing, not tidiness.
+#
+# MEASURED (NOM-258, 2026-10-18): three `security-report-*/invariants.txt`
+# files were committed, and invariant I6 scans every file `git ls-files`
+# reports for banned strings.  A saved report PRINTS I6's own description,
+# which names the banned browser sandbox flag — so the report contained it,
+# and I6 FAILED on a clean clone of HEAD.  CI red for no reason but the repo
+# shipping its own scan output.  The working tree passed only because someone
+# had deleted those files locally without committing the deletion, which is
+# the worst version of this: green where the build runs, red where anyone
+# else checks it out.
+#
+# This comment deliberately does NOT quote the flag.  It was written with the
+# literal first, and I6 failed on THIS file — correctly.  The fix is prose
+# that describes the string, not a third entry in I6's self-exclusion list.
+security-report-*/
+support-bundle-*.tar.gz
+drill-log.txt
+install.log
+__pycache__/
+*.pyc

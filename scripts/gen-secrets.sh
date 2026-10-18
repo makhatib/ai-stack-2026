@@ -29,10 +29,86 @@ umask 077
 
 log() { printf '%s\n' "$*"; }
 
+# ---------------------------------------------------------------------------
+# WHO IS THE OPERATOR?  Not "whoever root's environment says".
+#
+# MEASURED (NOM-258, 2026-10-18).  Installed from a root SHELL rather than
+# through sudo — `su -`, or an ssh login as root, which is how a large share
+# of home-server installs actually happen — SUDO_UID/SUDO_GID are unset and
+# `id -u`/`id -g` are 0, so every artefact of the install became root:root.
+# The ordinary user who then ran `aistack up` got nothing but
+#
+#     open /…/.env: permission denied
+#
+# and NO container was created, because the Docker CLI reads `.env` and every
+# `env_file` as the INVOKING user, not as the container.
+#
+# The operator is whoever owns this checkout, because that is who will run
+# `aistack`.  Prefer sudo's answer, fall back to the checkout's own owner, and
+# only then to the current process.  Returning 0 is correct when the operator
+# really is root.
+operator_uid() {
+  local uid="" ruid=""
+  [ -n "${SUDO_UID:-}" ] && uid="$SUDO_UID"
+  if [ -z "$uid" ] || [ "$uid" = "0" ]; then
+    ruid="$(stat -c %u "$ROOT" 2>/dev/null || true)"
+    if [ -n "$ruid" ] && [ "$ruid" != "0" ]; then uid="$ruid"; fi
+  fi
+  [ -n "$uid" ] || uid="$(id -u)"
+  printf '%s' "$uid"
+}
+
+operator_gid() {
+  local gid="" rgid=""
+  [ -n "${SUDO_GID:-}" ] && gid="$SUDO_GID"
+  if [ -z "$gid" ] || [ "$gid" = "0" ]; then
+    rgid="$(stat -c %g "$ROOT" 2>/dev/null || true)"
+    if [ -n "$rgid" ] && [ "$rgid" != "0" ]; then gid="$rgid"; fi
+  fi
+  [ -n "$gid" ] || gid="$(id -g)"
+  printf '%s' "$gid"
+}
+
+# THE OPERATOR MUST OWN THE THINGS ONLY THE OPERATOR READS.
+#
+# MEASURED (NOM-258, 2026-10-18), and this is the correction to the first fix
+# rather than a new case.  Giving `secrets/*.env` the operator's GROUP is
+# necessary and NOT sufficient: after a root-shell install `secrets/` itself
+# was root:root 0700, so the 0640 group mode on the files inside could never
+# be reached — the directory denied traversal first.  `.env` was root:root
+# 0600 for the same reason and failed even earlier, since compose reads it
+# before it reads any env_file.
+#
+# These paths are host artefacts that ONLY the operator's CLI reads; no
+# container mounts them (the per-service secret FILES are separate, stay
+# root-owned, and keep their measured per-service modes).  So they are owned
+# by the operator at 0700/0600 — which is what a plain `sudo ./install.sh`
+# produced all along, and is strictly narrower than root:group 0750/0640.
+claim_for_operator() {
+  local path="$1" mode="$2" uid gid
+  [ -e "$path" ] || return 0
+  uid="$(operator_uid)"; gid="$(operator_gid)"
+  if chown "${uid}:${gid}" "$path" 2>/dev/null && chmod "$mode" "$path" 2>/dev/null; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1 \
+     && sudo -n chown "${uid}:${gid}" "$path" </dev/null 2>/dev/null \
+     && sudo -n chmod "$mode" "$path" </dev/null 2>/dev/null; then
+    return 0
+  fi
+  # Unprivileged and already correct is the common case; only complain when
+  # the operator genuinely cannot reach it, because that is the failure whose
+  # only other symptom is a bare "permission denied" from compose.
+  if [ ! -r "$path" ]; then
+    log "  NOTE    cannot fix ownership of $path and $(id -un) cannot read it."
+    log "          Run: sudo bash scripts/gen-secrets.sh"
+  fi
+}
+
 if [ ! -d "$SECRETS" ]; then
   mkdir -p "$SECRETS"
 fi
-chmod 0700 "$SECRETS"
+claim_for_operator "$SECRETS" 0700
 
 # The MEASURED runtime ids of each service, from manifest.yaml `runtime_ids`.
 #
@@ -73,6 +149,25 @@ PYIDS
 # install continued and produced a stack that could not start.
 apply_mode() {
   local path="$1" consumer="$2" ids uid gid
+
+  # THE CONSUMER IS SOMETIMES THE OPERATOR, AND THAT IS NOT A SERVICE.
+  #
+  # MEASURED (NOM-258, 2026-10-18).  backup.key and backup.hmac were declared
+  # with consumer `backup-helper`, which resolved to gid 999 — but NOTHING
+  # mounts them: `scripts/backup.sh` and `scripts/restore.sh` run `openssl`
+  # ON THE HOST with `-pass file:…`, so the reader is whoever runs `aistack`.
+  # After a root-shell install that left them root:999 0640 and the operator
+  # could not read the two files this script's own closing message tells them
+  # to copy off-host — the instruction was unfollowable in the install path it
+  # was printed in, while a sudo install happened to work.
+  #
+  # If a helper container is ever given these keys it will come with a mount,
+  # and this mode has to be revisited together with it.
+  if [ "$consumer" = "operator" ]; then
+    claim_for_operator "$path" 0600
+    return 0
+  fi
+
   ids="$(service_ids "$consumer")"
 
   if [ -z "$ids" ]; then
@@ -221,8 +316,8 @@ gen authelia_storage_encryption_key authelia  hex64
 # is separate from the encryption key so POSSESSION OF THE ARCHIVE NEVER
 # CONFERS THE ABILITY TO FORGE ITS MANIFEST.  Restore refuses to start when the
 # HMAC key is absent; it does not fall back to digest-only verification.
-gen backup.key                      backup-helper hex32
-gen backup.hmac                     backup-helper hex32
+gen backup.key                      operator      hex32
+gen backup.hmac                     operator      hex32
 
 # --- the per-app database passwords ----------------------------------------
 # One file, `name=value` per line, PARSED and never sourced.
@@ -305,36 +400,9 @@ write_env_file() {
 # protected by host permissions; the SECRET still reaches the application as
 # an environment variable, which is the part the exception is about and which
 # no file mode here changes.
-# WHO IS THE OPERATOR?  Not "whoever root's environment says".
-#
-# MEASURED (NOM-258, 2026-10-18).  Installed from a root SHELL rather than
-# through sudo — `su -`, or an ssh login as root, which is how a large share
-# of home-server installs actually happen — SUDO_GID is unset and `id -g` is
-# 0, so the env_file became root:root 0640.  The ordinary user who then ran
-# `aistack up` got nothing but
-#
-#     open /…/secrets/litellm.env: permission denied
-#
-# and NO container was created, because the Docker CLI reads env_file as the
-# INVOKING user (see the note above).  The same empty-handed failure silently
-# turned `security-check`'s scan half into a clean report over zero images.
-# A tutorial-shaped install produced an unusable stack and a false all-clear.
-#
-# The operator is whoever owns this checkout, because that is who will run
-# `aistack`.  Prefer sudo's answer, fall back to the checkout's own group,
-# and only then to the current process.  Returning 0 is correct when the
-# operator really is root.
-operator_gid() {
-  local gid="" rgid=""
-  [ -n "${SUDO_GID:-}" ] && gid="$SUDO_GID"
-  if [ -z "$gid" ] || [ "$gid" = "0" ]; then
-    rgid="$(stat -c %g "$ROOT" 2>/dev/null || true)"
-    if [ -n "$rgid" ] && [ "$rgid" != "0" ]; then gid="$rgid"; fi
-  fi
-  [ -n "$gid" ] || gid="$(id -g)"
-  printf '%s' "$gid"
-}
-
+# The operator group comes from `operator_gid` at the top of this script; the
+# same measurement that fixed `secrets/` and `.env` fixes these files, and a
+# root-shell install left all three broken for one reason.
 apply_env_file_mode() {
   local file="$1" gid gname
   gid="$(operator_gid)"
@@ -387,6 +455,25 @@ fi
 chmod 0660 "$ROOT/.runtime/authelia-healthcheck.env" 2>/dev/null || true
 chown 0:0 "$ROOT/.runtime/authelia-healthcheck.env" 2>/dev/null \
   || sudo -n chown 0:0 "$ROOT/.runtime/authelia-healthcheck.env" </dev/null 2>/dev/null || true
+# The FILE stays root:root — Authelia writes it as uid 0.  The DIRECTORY is
+# the operator's, or `aistack doctor`, `support-bundle` and the ordinary
+# `ls .runtime` all stop at "permission denied" after a root-shell install.
+claim_for_operator "$ROOT/.runtime" 0700
+
+# .env AND THE INSTALL LOG, which only the operator's CLI ever reads.
+#
+# `.env` is created by install.sh step 9, BEFORE this script runs, and `cp`
+# onto an existing file keeps the existing owner — so this is reached as a
+# repair on an upgrade and as the first owner on a fresh install.  It is the
+# file compose opens first, which makes it the file whose wrong ownership
+# hides every other one: `open /…/.env: permission denied` and nothing else.
+#
+# Doing it HERE is deliberate.  `aistack doctor` names exactly one repair
+# command for this whole class — `sudo bash scripts/gen-secrets.sh` — so that
+# command has to fix the whole class, not the part this script happens to
+# create.
+claim_for_operator "$ROOT/.env" 0600
+claim_for_operator "$ROOT/install.log" 0640
 
 log ""
 log "Done.  Secrets are in: $SECRETS"

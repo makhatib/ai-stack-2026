@@ -23,15 +23,44 @@ ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 # Both candidates are tmpfs, which is what the design relies on: flock is
 # released by the kernel when the holder dies, and a reboot clears the lock
 # entirely, so there is no stale-lock state to clean up.
+#
+# AND IT IS DERIVED FROM THE OPERATOR, NOT FROM WHOEVER IS CALLING.
+#
+# MEASURED (NOM-258, 2026-10-18).  The first version picked by the CALLER's
+# privilege, which split the lock in two:
+#
+#     ai   -> /run/user/1000/aistack        (XDG_RUNTIME_DIR)
+#     root -> /run/aistack                  (/run is writable)
+#
+# `aistack up` runs as the operator; `sudo bin/aistack backup` is what
+# backup.sh itself tells you to run, because a complete backup has to read
+# root-owned per-service secrets.  So the two commands this lock exists to
+# keep apart were the two guaranteed to take DIFFERENT locks — a restore could
+# run concurrently with an up and neither would wait.  Nothing fails loudly;
+# the exclusion is simply absent, which is this comment's own "silently defeat
+# the whole mutual-exclusion design".
+#
+# The operator's runtime directory is the one path both identities agree on
+# AND both can write: it exists for the logged-in operator, and root can write
+# anywhere.  `$(id -u)` is deliberately not used here — that is the bug.
+#
+# Two defects, one fix: `[ -w /run ] || [ -d … ] && [ -w … ]` also parses as
+# `(A || B) && C`, so root chose /run/aistack only when it ALREADY existed and
+# otherwise fell through — the opposite of the intent.
 pick_rundir() {
   if [ -n "${AISTACK_RUNDIR:-}" ]; then printf '%s' "$AISTACK_RUNDIR"; return; fi
-  if [ -w /run ] || [ -d /run/aistack ] && [ -w /run/aistack ]; then
+  local ouid
+  ouid="$(stat -c %u "$ROOT" 2>/dev/null || true)"; : "${ouid:=$(id -u)}"
+  if [ -d "/run/user/$ouid" ] && [ -w "/run/user/$ouid" ]; then
+    printf '/run/user/%s/aistack' "$ouid"; return
+  fi
+  # No logind session for the operator (a service account, or a container).
+  # /run/aistack is then the shared path, and ensure_rundir hands it to the
+  # operator when root is the one who gets there first.
+  if { [ -d /run/aistack ] && [ -w /run/aistack ]; } || [ -w /run ]; then
     printf '/run/aistack'; return
   fi
-  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
-    printf '%s/aistack' "$XDG_RUNTIME_DIR"; return
-  fi
-  printf '/tmp/aistack-%s' "$(id -u)"
+  printf '/tmp/aistack-%s' "$ouid"
 }
 RUNDIR="$(pick_rundir)"
 # Exported so every script this CLI invokes agrees on where the locks live.
@@ -49,7 +78,20 @@ info() { printf '%s\n' "$*"; }
 
 ensure_rundir() {
   [ -d "$RUNDIR" ] && [ -w "$RUNDIR" ] && return 0
-  mkdir -p "$RUNDIR" 2>/dev/null && return 0
+  if mkdir -p "$RUNDIR" 2>/dev/null; then
+    # Whoever got here first created it with their own ownership.  If that was
+    # root and the operator is somebody else, hand it over: otherwise the
+    # operator's next command cannot write it, falls back to another path, and
+    # takes a different lock — the divergence pick_rundir exists to prevent.
+    local ouid ogid
+    ouid="$(stat -c %u "$ROOT" 2>/dev/null || true)"
+    ogid="$(stat -c %g "$ROOT" 2>/dev/null || true)"
+    if [ "$(id -u)" = "0" ] && [ -n "$ouid" ] && [ "$ouid" != "0" ]; then
+      chown "$ouid:$ogid" "$RUNDIR" 2>/dev/null || true
+      chmod 0770 "$RUNDIR" 2>/dev/null || true
+    fi
+    return 0
+  fi
   die "cannot create a lock directory at $RUNDIR.
 Set AISTACK_RUNDIR to a writable path on a tmpfs and try again.
 It must be a tmpfs: the locks are released by the kernel when a holder dies,

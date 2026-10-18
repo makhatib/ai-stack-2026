@@ -83,21 +83,76 @@ fi
 # `security-check`'s scan half into a clean report over zero images, because
 # the image list it iterates comes from the same failing command.  Detecting
 # it here is the difference between a one-line repair and an evening lost.
-UNREADABLE=""
-for f in "$ROOT"/secrets/*.env; do
-  [ -e "$f" ] || continue
-  [ -r "$f" ] || UNREADABLE="$UNREADABLE $(basename "$f")"
-done
-if [ -n "$UNREADABLE" ]; then
-  bad "$(id -un) cannot read env_file(s):$UNREADABLE"
-  printf '         Every aistack command will fail with a bare "permission\n'
-  printf '         denied" and create no container.  Repair:\n'
-  printf '             sudo bash scripts/gen-secrets.sh\n'
-elif ! docker compose config -q 2>/dev/null; then
-  bad "every env_file is readable, but 'docker compose config' still fails:"
-  docker compose config 2>&1 >/dev/null | head -3 | sed 's/^/         /'
+#
+# CHECK THE PATH IN THE ORDER COMPOSE WALKS IT: `.env`, then the directory,
+# then the files.  MEASURED (NOM-258, 2026-10-18): the first version of this
+# check tested only `secrets/*.env`, and after a root-shell install that glob
+# matched NOTHING — `secrets/` was itself root:root 0700, so the loop found no
+# files, reported no unreadable ones, and fell through to printing
+#     every env_file is readable, but 'docker compose config' still fails
+# which is a claim about files it was never able to look at.  A check that
+# cannot see its subject must say so, not pass the question downstream.
+REPAIR='             sudo bash scripts/gen-secrets.sh'
+if [ -e "$ROOT/.env" ] && [ ! -r "$ROOT/.env" ]; then
+  bad "$(id -un) cannot read .env ($(stat -c '%A %U:%G' "$ROOT/.env"))"
+  printf '         compose opens .env FIRST, so every aistack command fails\n'
+  printf '         with a bare "permission denied" and creates no container.\n'
+  printf '         Repair:\n%s\n' "$REPAIR"
+elif [ -d "$ROOT/secrets" ] && { [ ! -r "$ROOT/secrets" ] || [ ! -x "$ROOT/secrets" ]; }; then
+  bad "$(id -un) cannot traverse secrets/ ($(stat -c '%A %U:%G' "$ROOT/secrets"))"
+  printf '         The per-file modes inside are unreachable: the directory\n'
+  printf '         denies the lookup before the file mode is ever consulted.\n'
+  printf '         Repair:\n%s\n' "$REPAIR"
 else
-  ok "every env_file is readable by the operator ($(id -un)); compose resolves"
+  UNREADABLE=""
+  for f in "$ROOT"/secrets/*.env; do
+    [ -e "$f" ] || continue
+    [ -r "$f" ] || UNREADABLE="$UNREADABLE $(basename "$f")"
+  done
+  if [ -n "$UNREADABLE" ]; then
+    bad "$(id -un) cannot read env_file(s):$UNREADABLE"
+    printf '         Every aistack command will fail with a bare "permission\n'
+    printf '         denied" and create no container.  Repair:\n%s\n' "$REPAIR"
+  elif ! docker compose config -q 2>/dev/null; then
+    bad "every env_file is readable, but 'docker compose config' still fails:"
+    docker compose config 2>&1 >/dev/null | head -3 | sed 's/^/         /'
+  else
+    ok "every env_file is readable by the operator ($(id -un)); compose resolves"
+  fi
+fi
+
+hdr "Locks"
+# TWO LOCK DIRECTORIES IS NOT A TIDINESS PROBLEM, IT IS A LOST LOCK.
+#
+# MEASURED (NOM-258, 2026-10-18): the lock path used to be chosen by the
+# CALLER's privilege, so `aistack up` as the operator took
+# /run/user/1000/aistack while `sudo aistack backup` took /run/aistack — and
+# the backup the lock exists to serialise against never waited for anything.
+# bin/aistack now derives the path from the OPERATOR, but a host that ran the
+# earlier version still has the second directory, and a leftover lock file
+# there is the only visible trace of the window where exclusion was absent.
+if [ -z "${AISTACK_RUNDIR:-}" ]; then
+  warn "run 'bin/aistack doctor' (not scripts/doctor.sh) to check the lock"
+  warn "directory: only the CLI knows which path it picked."
+else
+  ok "lock directory: $AISTACK_RUNDIR"
+  STRAY=""
+  for d in /run/aistack /run/user/*/aistack /tmp/aistack-*; do
+    [ -d "$d" ] || continue
+    [ "$d" = "$AISTACK_RUNDIR" ] && continue
+    [ -e "$d/lifecycle.lock" ] || [ -e "$d/helper.lock" ] || continue
+    STRAY="$STRAY $d"
+  done
+  if [ -n "$STRAY" ]; then
+    bad "a SECOND lock directory holds lock files:$STRAY"
+    printf '         Commands that used it were not mutually excluded with\n'
+    printf '         commands using %s.\n' "$AISTACK_RUNDIR"
+    printf '         With the stack idle, delete the stray one(s) — they are\n'
+    printf '         tmpfs scratch, not state:\n'
+    printf '             sudo rm -rf%s\n' "$STRAY"
+  else
+    ok "no second lock directory — every identity takes the same lock"
+  fi
 fi
 
 hdr "Exposure"
