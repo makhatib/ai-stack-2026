@@ -123,28 +123,133 @@ hdr "Audit: secrets never appear in output"
 #     open-webui's keys live.  Take the values.
 #  3. The comparison goes through `grep -Ff <file>`, never `grep -F "$value"`,
 #     so no secret is ever an argv entry visible to `ps` on a shared host.
+#  4. MEASURED (NOM-258, 2026-10-18).  The blanket form of this check FAILED
+#     on a correct stack, and that is worse than it sounds.  E6 in the
+#     register declares that open-webui and litellm receive their secret as
+#     an ENVIRONMENT VARIABLE because neither upstream supports a _FILE
+#     indirection, so LITELLM_MASTER_KEY, LITELLM_SALT_KEY and
+#     WEBUI_SECRET_KEY are PRESENT in `compose config` by design.  Reporting
+#     the stack's one declared residual as an undetected leak means
+#     security-check can never go green, which trains the operator to ignore
+#     it -- the check would then be producing the outcome it exists to
+#     prevent.
+#
+#     So the E6 values are split out and held to a DIFFERENT, STRICTER
+#     assertion than "absent": they must appear at
+#     services.<e6-service>.environment.<KEY> and NOWHERE else in the
+#     rendered config, and they must never appear in `compose ps`, which is
+#     what a viewer actually copies from.  Everything else must still be
+#     absent everywhere.  The E6 service list is READ FROM THE REGISTER, not
+#     hardcoded: the register is the artefact a reviewer greps, and a second
+#     copy of that list in a script is a copy that drifts.
 LEAK=0; READ=0; TOTAL=0
-RAW="$(mktemp)"; PATS="$(mktemp)"; trap 'rm -f "$RAW" "$PATS"' EXIT
+RAW="$(mktemp)"; PATS="$(mktemp)"
+RAW6="$(mktemp)"; PATS6="$(mktemp)"
+trap 'rm -f "$RAW" "$PATS" "$RAW6" "$PATS6"' EXIT
+
+E6_FILES="$(python3 - <<'PY'
+import yaml
+reg = yaml.safe_load(open("security-exceptions.yaml")) or {}
+for e in reg.get("exceptions") or []:
+    if e.get("scope") == "deferred":
+        continue
+    if "ENVIRONMENT VARIABLE" not in (e.get("exception") or "").upper():
+        continue
+    svc = e.get("service")
+    for s in ([svc] if isinstance(svc, str) else (svc or [])):
+        print(f"{s}.env")
+PY
+)"
+
 for f in secrets/*; do
   [ -f "$f" ] || continue
   TOTAL=$((TOTAL + 1))
   body="$(sudo -n cat "$f" 2>/dev/null || cat "$f" 2>/dev/null || true)"
   [ -n "$body" ] || continue
   READ=$((READ + 1))
-  case "$(basename "$f")" in
+  base="$(basename "$f")"
+  dest="$RAW"
+  printf '%s\n' "$E6_FILES" | grep -qxF "$base" && dest="$RAW6"
+  case "$base" in
     *.env) printf '%s\n' "$body" | sed -n 's/^[A-Za-z_][A-Za-z0-9_]*=//p' ;;
     *)     printf '%s\n' "$body" ;;
-  esac >> "$RAW"
+  esac >> "$dest"
 done
 # Strip optional quoting, drop anything too short to be distinguishable from
 # ordinary text, and de-duplicate.
-sed 's/^"//; s/"$//' "$RAW" | awk 'length($0) >= 16' | sort -u > "$PATS"
+sed 's/^"//; s/"$//' "$RAW"  | awk 'length($0) >= 16' | sort -u > "$PATS"
+sed 's/^"//; s/"$//' "$RAW6" | awk 'length($0) >= 16' | sort -u > "$PATS6"
 NCHECKED=$(wc -l < "$PATS")
+N6=$(wc -l < "$PATS6")
+
 if [ "$NCHECKED" -gt 0 ]; then
   docker compose ps -a 2>/dev/null | grep -qFf "$PATS" \
     && { bad "a secret value appears in 'compose ps'"; LEAK=1; }
   docker compose config 2>/dev/null | grep -qFf "$PATS" \
     && { bad "a secret value appears in 'compose config'"; LEAK=1; }
+fi
+
+if [ "$N6" -gt 0 ]; then
+  docker compose ps -a 2>/dev/null | grep -qFf "$PATS6" \
+    && { bad "an E6 environment secret appears in 'compose ps' — E6 does NOT cover that"; LEAK=1; }
+  # Containment, not absence.  Paths only are printed; no value is ever echoed
+  # and the pattern file is passed as a PATH, so no secret is in argv either.
+  E6OUT="$(python3 - "$PATS6" <<'PY'
+import json, subprocess, sys, yaml
+pats = [l.rstrip("\n") for l in open(sys.argv[1]) if l.strip()]
+r = subprocess.run(["docker", "compose", "config", "--format", "json"],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    print("UNRESOLVED"); raise SystemExit(0)
+cfg = json.loads(r.stdout)
+reg = yaml.safe_load(open("security-exceptions.yaml")) or {}
+allowed = set()
+for e in reg.get("exceptions") or []:
+    if e.get("scope") == "deferred":
+        continue
+    if "ENVIRONMENT VARIABLE" not in (e.get("exception") or "").upper():
+        continue
+    svc = e.get("service")
+    allowed.update([svc] if isinstance(svc, str) else (svc or []))
+
+hits = []
+def walk(node, path):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            walk(v, path + [str(k)])
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            walk(v, path + [str(i)])
+    else:
+        s = str(node)
+        if any(p in s for p in pats):
+            hits.append(path)
+walk(cfg, [])
+
+ok_paths, stray = [], []
+for h in hits:
+    if len(h) >= 4 and h[0] == "services" and h[1] in allowed and h[2] == "environment":
+        ok_paths.append(f"{h[1]}.{h[3]}")
+    else:
+        stray.append(".".join(h))
+for p in sorted(set(stray)):
+    print("STRAY " + p)
+for p in sorted(set(ok_paths)):
+    print("OK " + p)
+PY
+)"
+  if printf '%s\n' "$E6OUT" | grep -q '^UNRESOLVED$'; then
+    warn "could not render compose config as JSON, so E6 containment was NOT checked"
+    RC=1
+  elif printf '%s\n' "$E6OUT" | grep -q '^STRAY '; then
+    bad "an E6 environment secret appears OUTSIDE its own service's environment:"
+    printf '%s\n' "$E6OUT" | sed -n 's/^STRAY /         /p'
+    LEAK=1
+  else
+    NE6=$(printf '%s\n' "$E6OUT" | grep -c '^OK ' || true)
+    ok "E6 residual is confined to its own services ($NE6 env keys, $N6 values)"
+    printf '%s\n' "$E6OUT" | sed -n 's/^OK /         declared by E6: /p'
+  fi
 fi
 if [ "$TOTAL" -eq 0 ]; then
   warn "NOT RUN — no file under secrets/ was even visible to $(id -un)."
@@ -159,7 +264,15 @@ elif [ "$NCHECKED" -eq 0 ]; then
   warn "enough to search for.  Nothing was compared."
   RC=1
 elif [ "$LEAK" -eq 0 ]; then
-  ok "no secret value in compose output ($NCHECKED values from $READ/$TOTAL files)"
+  # Worded to match what was actually proved.  "No secret in compose output"
+  # would be false: the E6 values are in there by design, and the claim this
+  # check can make is that every OTHER secret is absent and the E6 ones are
+  # confined to where the register says.
+  ok "no undeclared secret in compose output ($NCHECKED values from $READ/$TOTAL files)"
+  if [ "$READ" -lt "$TOTAL" ]; then
+    warn "PARTIAL: $((TOTAL - READ)) of $TOTAL secret files were unreadable by $(id -un)"
+    warn "and were therefore never compared.  Re-run with sudo for full coverage."
+  fi
 fi
 
 hdr "Audit: exceptions register"
