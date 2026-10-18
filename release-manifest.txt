@@ -1,0 +1,33 @@
+# AI Stack 2026 — the release manifest.
+#
+# THE SHIPPED COPY SURFACES: the files whose PROSE a user reads and that
+# therefore carry exposure claims.  Invariant I12's region equality and token
+# scan are derived from this list and scan these files REGARDLESS OF PATH;
+# that scan takes precedence over every path exclusion.
+#
+# WHY THIS IS A LIST OF COPY SURFACES AND NOT "EVERY TRACKED FILE".
+# The design describes the token scan over "any release-manifest file", and
+# enumerates the surfaces as the installer, README, dashboard template,
+# security FAQ and video script.  Running the token scan over source as well
+# was tried and is not viable: `public` is the name of a PostgreSQL schema and
+# of a SQL GRANT, `LAN` is a prefix of `LANGUAGE`, and `publish` appears in
+# every comment that explains the publish allowlist.  Allowlisting thirty
+# source lines by equality would make the allowlist the control, which is
+# exactly the failure mode F23 already describes.
+#
+# What is NOT weakened by this scoping: I6's banned-assurance-string grep
+# still runs over EVERY tracked file, source included.  A source comment making a
+# banned assurance claim still fails the PR.
+#
+# CI also asserts `docs/decisions/**` appears NOWHERE in this file, which is
+# what makes that directory non-shipping as a CHECKED FACT rather than an
+# intention.
+
+README.md
+.env.example
+docs/install.md
+docs/troubleshooting.md
+docs/upgrade.md
+docs/security-faq.md
+docs/backup-restore.md
+config/homepage/settings.yaml

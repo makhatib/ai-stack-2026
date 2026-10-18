@@ -1,0 +1,19 @@
+
+  [ok  ] I1    confinement: every `confined: true` service is pairwise and class-pure
+  [ok  ] I1b   trust_bridges is an EQUALITY, not a lookup
+  [ok  ] I2    no service except caddy declares a `ports:` key
+  [ok  ] I3    service count per profile matches the manifest; no helper restarts
+  [ok  ] I4    every image carries a tag AND a digest with a `:?` guard
+  [ok  ] I5    no sites.d/ template for any never-publishable service; no wildcard n8n route
+  [ok  ] I6    no docker.sock, privileged, host namespace, --no-sandbox, set -x, or banned string
+  [ok  ] I7    no untrusted_input service on egress, or on ANY bridge with internal: false
+  [ok  ] I8    parse/untrusted-*/egress bridges declare a fixed subnet and ipv6: false
+  [ok  ] I9    web-search flags false in EVERY profile; exceptions register complete
+  [ok  ] I10   the gating machinery is ABSENT (inverted invariant)
+  [ok  ] I11   every bridge's internal: flag equals what its own zone_policy mandates
+  [ok  ] I12   canonical local-mode copy: one region per surface, byte-equal, token scan outside
+  [ok  ] I12e  docs/decisions/** appears nowhere in the release manifest
+  [ok  ] I13   writer-scope containment over every byte-accepting ingress
+  [ok  ] I14   lock order: every path takes lifecycle before helper
+
+All 16 invariants pass.

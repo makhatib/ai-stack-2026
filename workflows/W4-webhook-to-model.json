@@ -1,0 +1,55 @@
+{
+  "name": "W4 — Webhook to model to stored result",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "w4-demo",
+        "authentication": "headerAuth",
+        "options": { "rawBody": false }
+      },
+      "id": "w4-trigger",
+      "name": "Webhook (header token)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "notes": "Local mode only. Public webhooks are not in v1. Caddy bounds the body to 1 MB before this node ever runs, so an unauthenticated POST costs nothing."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://litellm:4000/v1/chat/completions",
+        "sendHeaders": true,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: $json.body.prompt }], max_tokens: 256 }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "w4-model",
+      "name": "Ask the model via LiteLLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "notes": "LiteLLM is the ONLY inference front door. n8n cannot reach Ollama directly — they share no network — and that is the point."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO w4_results (prompt, answer, created_at) VALUES ($1, $2, now())",
+        "options": {}
+      },
+      "id": "w4-store",
+      "name": "Store the result",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [440, 0],
+      "notes": "Uses the n8n role, which is not a superuser and can only reach its own database."
+    }
+  ],
+  "connections": {
+    "Webhook (header token)": { "main": [[{ "node": "Ask the model via LiteLLM", "type": "main", "index": 0 }]] },
+    "Ask the model via LiteLLM": { "main": [[{ "node": "Store the result", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionTimeout": 300 },
+  "active": false
+}

@@ -1,0 +1,154 @@
+# AI Stack 2026 — the exceptions register.
+#
+# Every service merges the `x-hardened` anchor.  EVERY DEVIATION IS AN ENTRY
+# HERE THAT A REVIEWER CAN GREP FOR — there are no quiet overrides.
+#
+# Every entry carries `approved_by` and `approved_at` (a named authorised
+# reviewer) and a `review_by` date <= 180 days EVEN WHEN THE ENTRY IS
+# PERMANENT.  CI fails the build when an entry is missing approval, is past
+# `review_by`, or records a digest that no longer matches the pin — a change
+# invalidates its own evidence rather than inheriting it.
+
+schema: aistack.security-exceptions.v1
+version: 1
+
+exceptions:
+  - id: E1
+    service: caddy
+    exception: "cap_add: NET_BIND_SERVICE"
+    why: "bind 443 and 80 as a non-root process"
+    mitigation: "one capability and nothing else; C1 confirms no other cap is present"
+    scope: all
+    permanent: true
+    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
+    approved_at: 2026-10-18
+    review_by: 2027-04-16
+
+  - id: E6
+    service: [open-webui, litellm]
+    exception: "secret delivered as an ENVIRONMENT VARIABLE"
+    why: "neither upstream supports a _FILE indirection [V-253]"
+    mitigation: >-
+      Own env_file, never .env and never the shell.  MEASURED CORRECTION
+      (NOM-258): an `env_file` is read by the DOCKER CLI on the host as the
+      invoking user and injected by the daemon — the container never opens it.
+      So the design's "root-owned 0640 root:<service-gid>" is wrong in its
+      second term: the file is written 0640 root:<OPERATOR-gid>, because the
+      operator's compose invocation is what must read it.  This narrows what
+      the exception covers rather than widening it: the file is a host
+      artefact under host permissions, and the SECRET still reaches the
+      application as an environment variable, which is the part the exception
+      is actually about.
+    residual: >-
+      STATED IN FULL (F10): a compromise of either application can read that
+      application's own environment, and host and daemon administrators remain
+      inside the trust boundary.  We do not claim otherwise.  Bounded only
+      because no container can reach the Docker API; weakening that re-opens
+      this entry.
+    scope: all
+    permanent: true
+    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
+    approved_at: 2026-10-18
+    review_by: 2027-04-16
+
+  - id: E7
+    service: postgres
+    exception: "cap_add: CHOWN, SETUID, SETGID, FOWNER, DAC_READ_SEARCH"
+    why: >-
+      MEASURED by bisection against the pinned digest, NOT assumed.  The
+      official entrypoint starts as root to prepare PGDATA and then drops to
+      uid 999 via gosu.  CHOWN chowns PGDATA; SETUID and SETGID are the drop
+      itself; FOWNER is the permission fix-up; DAC_READ_SEARCH lets root
+      traverse an EXISTING PGDATA, which is 0700 owned by 999.
+    mitigation: >-
+      DAC_READ_SEARCH IS DELIBERATE AND DAC_OVERRIDE IS NOT USED.  Both
+      complete the restart path; DAC_OVERRIDE bypasses read, write AND execute
+      checks on every file, DAC_READ_SEARCH bypasses only read and
+      directory-search.  The entrypoint needs to traverse and read, not write.
+      Postgres is on one internal bridge, publishes no port, and is never
+      publishable.
+    evidence: >-
+      Bisected twice.  The first bisection used a fresh volume each time and
+      concluded four capabilities sufficed; that set starts a NEW database and
+      then fails on the FIRST RESTART.  A capability set validated only
+      against first boot is a container that works until it is restarted.
+    digest: sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+    scope: all
+    permanent: true
+    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
+    approved_at: 2026-10-18
+    review_by: 2027-04-16
+
+  - id: E9
+    service: authelia
+    exception: "writable one-file bind at /app/.healthcheck.env"
+    why: >-
+      MEASURED: Authelia writes this file at startup so that a healthcheck
+      subcommand can read its scheme, host and port.  Under `read_only: true`
+      the write fails and the process exits during startup checks, reporting
+      only "Errors occurred performing startup checks" and a Go stack.
+      Notably the subcommand it is written for — `authelia health` — DOES NOT
+      EXIST in 4.39.28, so the file is written and never read.
+    mitigation: >-
+      One file, not a directory.  A tmpfs cannot be mounted at a file path and
+      a tmpfs over /app would hide the binary.  The file holds no secret.
+      Authelia itself runs with NO added capabilities, because passing an
+      explicit command takes its entrypoint's plain-exec branch instead of the
+      chown + su-exec branch that would need SETUID and SETGID.
+    digest: sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54
+    scope: all
+    permanent: true
+    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
+    approved_at: 2026-10-18
+    review_by: 2027-04-16
+
+  - id: E10
+    service: homepage
+    exception: "config files bound individually; /app/config is a tmpfs"
+    why: >-
+      MEASURED: Homepage writes logs into /app/config/logs.  A read-only bind
+      over the whole directory makes the container fail to start, and the
+      obvious repair — a tmpfs at /app/config/logs — cannot be created
+      underneath a read-only mount.
+    mitigation: >-
+      Each config file is bound read-only by name, so the FILES are immutable
+      while the directory they sit in is writable.  That is the property we
+      actually wanted.  No secret is in any of them; Docker discovery is off
+      and there is no docker.sock in any profile.
+    scope: all
+    permanent: true
+    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
+    approved_at: 2026-10-18
+    review_by: 2027-04-16
+
+  # --- deferred: the service that needed them is not shipped ----------------
+  # A DEFERRED EXCEPTION IS NOT A CLOSED EXCEPTION.  CI treats these as out of
+  # scope rather than as satisfied, and each must be re-approved against the
+  # then-current digest before its group returns, with `review_by` restarting:
+  # 180-day-old evidence for an unshipped image is not evidence.
+  - id: E2
+    service: "each GPU image separately — comfyui, ollama(GPU), whisper(GPU)"
+    exception: "runs as root under the NVIDIA runtime"
+    scope: deferred
+    returns_with: "1.0 (voice, images)"
+    note: >-
+      PER IMAGE, NOT PER GROUP.  Each digest needs its own recorded non-root
+      probe, smallest demonstrated privilege and named reviewer BEFORE that
+      image is enabled.  Enabling one GPU image never licenses another.  GPU
+      presence is not evidence root is required.
+  - id: E3
+    service: [crawl4ai, playwright-mcp]
+    exception: "narrow seccomp permitting clone/setns/unshare"
+    scope: deferred
+    returns_with: "the `web` group"
+  - id: E5
+    service: wg-easy
+    exception: "cap_add: NET_ADMIN"
+    scope: deferred
+    returns_with: "the `remote-access` group"
+
+# DELIBERATELY NOT AN EXCEPTION: the Docker socket.
+# A read-only socket proxy was evaluated and REJECTED.  Read access to the
+# containers API returns every container's environment, which is exactly where
+# E6 puts two secrets.  A read-only socket proxy here is a credential-
+# disclosure endpoint wearing a least-privilege label.

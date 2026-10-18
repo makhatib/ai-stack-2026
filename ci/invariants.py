@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""AI Stack 2026 — the CI invariants (final-design §5.10).
+
+Computed statically from `docker compose config --no-interpolate` and from
+manifest.yaml, so they fail the PR rather than the viewer's install.
+
+Run:  python3 ci/invariants.py [--root .]
+Exit: 0 all pass, 1 one or more fail.
+
+An invariant that CI cannot pass is not a control; it is a note.  Every check
+below runs against this repository as it stands.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:
+    print("FATAL: PyYAML is required to run the invariants.", file=sys.stderr)
+    sys.exit(2)
+
+FAILURES = []
+RESULTS = []
+
+
+def check(ident, title):
+    def deco(fn):
+        def run(ctx):
+            try:
+                problems = fn(ctx) or []
+            except Exception as e:  # a check that errors is a check that failed
+                problems = [f"the check itself raised {e!r}"]
+            if problems:
+                FAILURES.append(ident)
+                RESULTS.append((ident, "FAIL", title, problems))
+            else:
+                RESULTS.append((ident, "pass", title, []))
+        run.ident = ident
+        return run
+    return deco
+
+
+# ---------------------------------------------------------------------------
+# Context
+# ---------------------------------------------------------------------------
+
+class Ctx:
+    def __init__(self, root):
+        self.root = root
+        with open(os.path.join(root, "manifest.yaml")) as fh:
+            self.manifest = yaml.safe_load(fh)
+        # --no-interpolate so a missing .env cannot make an invariant vacuous.
+        out = subprocess.run(
+            ["docker", "compose", "config", "--no-interpolate", "--format", "json"],
+            cwd=root, capture_output=True, text=True,
+        )
+        if out.returncode != 0:
+            raise SystemExit("docker compose config failed:\n" + out.stderr)
+        self.compose = json.loads(out.stdout)
+        self.services = self.compose.get("services") or {}
+        self.networks = self.compose.get("networks") or {}
+
+    def mvp_services(self):
+        return {k: v for k, v in (self.manifest.get("services") or {}).items()
+                if v.get("scope") == "mvp"}
+
+    def bridge(self, name):
+        return (self.manifest.get("bridges") or {}).get(name) or {}
+
+    def release_surfaces(self):
+        """The copy surfaces I12 scans, read from release-manifest.txt.
+
+        DERIVED from the manifest file and scanned regardless of path; that
+        scan takes precedence over every path exclusion.
+        """
+        path = os.path.join(self.root, "release-manifest.txt")
+        out = []
+        for line in open(path):
+            line = line.strip()
+            if line and not line.startswith("#"):
+                out.append(line)
+        return out
+
+    def shipped_files(self):
+        """The release manifest's surfaces (I6, I12).
+
+        Derived, not listed: everything git tracks, minus the directories the
+        release manifest excludes.  `docs/decisions/**` must appear nowhere.
+        """
+        out = subprocess.run(["git", "ls-files"], cwd=self.root,
+                             capture_output=True, text=True)
+        files = [f for f in out.stdout.splitlines() if f.strip()]
+        return [f for f in files if not f.startswith("docs/decisions/")]
+
+
+# ---------------------------------------------------------------------------
+# The invariants
+# ---------------------------------------------------------------------------
+
+@check("I1", "confinement: every `confined: true` service is pairwise and class-pure")
+def i1(ctx):
+    bad = []
+    for name, svc in ctx.mvp_services().items():
+        if not svc.get("confined"):
+            continue
+        nets = svc.get("networks") or []
+        classes = {ctx.bridge(n).get("class") for n in nets}
+        if len(classes) != 1:
+            bad.append(f"{name} spans bridge classes {sorted(classes)}; confined services must be class-pure")
+        csvc = ctx.services.get(name) or {}
+        if csvc.get("ports"):
+            bad.append(f"{name} declares ports and is confined")
+        for n in nets:
+            b = ctx.bridge(n)
+            if b.get("class") == "egress":
+                bad.append(f"{name} attaches to the egress-class bridge {n}")
+            members = b.get("members") or []
+            if len(members) != 2:
+                bad.append(f"{name} sits on bridge {n} with {len(members)} members; confined services need exactly two")
+            if b.get("zone_policy") != "contained" and svc.get("class") != "untrusted-fetch":
+                bad.append(f"{name} sits on {n} whose zone_policy is {b.get('zone_policy')}, and its own class is not untrusted-fetch")
+    return bad
+
+
+@check("I1b", "trust_bridges is an EQUALITY, not a lookup")
+def i1b(ctx):
+    computed = set()
+    for name, svc in ctx.mvp_services().items():
+        classes = {ctx.bridge(n).get("class") for n in (svc.get("networks") or [])}
+        classes.discard(None)
+        if len(classes) > 1:
+            computed.add(name)
+    registered = {e["service"] for e in (ctx.manifest.get("trust_bridges") or [])}
+    # Only compare over MVP services: the register also carries entries whose
+    # services are deferred, and those are checked by scope, not by this set.
+    registered_mvp = {s for s in registered if s in ctx.mvp_services()}
+    bad = []
+    for s in sorted(computed - registered_mvp):
+        bad.append(f"{s} crosses trust classes but is NOT in trust_bridges (unlisted crosser)")
+    for s in sorted(registered_mvp - computed):
+        bad.append(f"{s} is in trust_bridges but no longer crosses a class (stale entry)")
+    for e in (ctx.manifest.get("trust_bridges") or []):
+        for field in ("reason", "controls", "reviewer"):
+            if not e.get(field):
+                bad.append(f"trust_bridges entry {e.get('service')} is missing '{field}'")
+    return bad
+
+
+@check("I2", "no service except caddy declares a `ports:` key")
+def i2(ctx):
+    bad = []
+    for name, svc in ctx.services.items():
+        if svc.get("ports") and name != "caddy":
+            bad.append(f"{name} declares ports")
+    # And caddy's must not be a wildcard bind.
+    #
+    # Under --no-interpolate a port is still a STRING ("${VAR}:443:443"), not
+    # the parsed mapping compose produces once variables are resolved, so this
+    # handles both shapes rather than assuming the richer one.
+    for p in (ctx.services.get("caddy") or {}).get("ports") or []:
+        if isinstance(p, dict):
+            host_ip = p.get("host_ip")
+            published = p.get("published")
+        else:
+            parts = str(p).split(":")
+            host_ip = parts[0] if len(parts) >= 3 else None
+            published = parts[-2] if len(parts) >= 2 else None
+        if host_ip in (None, "", "0.0.0.0", "::"):
+            bad.append(f"caddy publishes {published} on a WILDCARD address ({host_ip!r})")
+        elif "${" in str(host_ip) and "AISTACK_BIND_ADDR" not in str(host_ip):
+            bad.append(f"caddy's bind address comes from an unexpected variable: {host_ip}")
+    return bad
+
+
+@check("I3", "service count per profile matches the manifest; no helper restarts")
+def i3(ctx):
+    bad = []
+    declared = (ctx.manifest.get("counts") or {}).get("steady_state", {}).get("mvp")
+    actual = len(ctx.mvp_services())
+    if declared != actual:
+        bad.append(f"manifest declares steady_state.mvp={declared} but lists {actual} mvp services")
+
+    # Rendered compose: core has no profile key, knowledge is profiled.
+    core = [n for n, s in ctx.services.items() if not s.get("profiles")]
+    profiled = {n: s.get("profiles") for n, s in ctx.services.items() if s.get("profiles")}
+    starter = (ctx.manifest.get("profiles") or {}).get("starter", {}).get("containers")
+    if len(core) != starter:
+        bad.append(f"profile 'starter' declares {starter} containers; compose has {len(core)} unprofiled services")
+    total = len(core) + len(profiled)
+    automation = (ctx.manifest.get("profiles") or {}).get("automation", {}).get("containers")
+    if total != automation:
+        bad.append(f"profile 'automation' declares {automation}; compose renders {total}")
+
+    for h in (ctx.manifest.get("helpers") or {}):
+        svc = ctx.services.get(h)
+        if svc and svc.get("restart") == "unless-stopped":
+            bad.append(f"helper {h} declares restart: unless-stopped, which would let it be counted as steady state")
+
+    peak = (ctx.manifest.get("counts") or {}).get("peak", {}).get("mvp")
+    if peak != actual + 1:
+        bad.append(f"peak ({peak}) must equal steady_state ({actual}) + the helper lock's ceiling of 1")
+    return bad
+
+
+@check("I4", "every image carries a tag AND a digest with a `:?` guard")
+def i4(ctx):
+    """Two assertions, because one of them can pass vacuously.
+
+    STATICALLY (--no-interpolate) the reference must have the fail-closed
+    SHAPE: a tag variable, an `@`, a digest variable, and a `:?` guard on each
+    so a missing pin fails rather than silently resolving to :latest.
+
+    RESOLVED (interpolated) every reference must end in a real sha256.  The
+    shape check alone would pass a repo whose versions.env is empty, and the
+    resolved check alone would pass a repo that hard-codes digests with no
+    guard, so neither is sufficient by itself.
+    """
+    bad = []
+    for name, svc in ctx.services.items():
+        img = svc.get("image") or ""
+        if "@" not in img:
+            bad.append(f"{name}: image reference has no digest component: {img}")
+        if ":?" not in img:
+            bad.append(f"{name}: image reference has no `:?` fail-closed guard: {img}")
+        if "${" in img and "DIGEST" not in img:
+            bad.append(f"{name}: templated reference does not interpolate a DIGEST variable: {img}")
+
+    resolved = subprocess.run(["docker", "compose", "config", "--images"],
+                              cwd=ctx.root, capture_output=True, text=True)
+    if resolved.returncode != 0:
+        bad.append("`docker compose config --images` failed, so no pin could be resolved: "
+                   + resolved.stderr.strip()[:200])
+    else:
+        for line in resolved.stdout.splitlines():
+            line = line.strip()
+            if line and not re.search(r"@sha256:[0-9a-f]{64}$", line):
+                bad.append(f"resolved image is not digest-pinned: {line}")
+    return bad
+
+
+@check("I5", "no sites.d/ template for any never-publishable service; no wildcard n8n route")
+def i5(ctx):
+    bad = []
+    sites = os.path.join(ctx.root, "config", "caddy", "sites.d")
+    never = set((ctx.manifest.get("publish") or {}).get("never") or [])
+    blob = ""
+    for f in sorted(os.listdir(sites)) if os.path.isdir(sites) else []:
+        blob += open(os.path.join(sites, f)).read()
+    # A reverse_proxy to a never-publishable service name is the failure.
+    for target in never:
+        base = target.replace("-admin-ui", "").replace("-admin-endpoint", "")
+        base = base.replace("n8n-editor", "n8n").replace("n8n-rest-api", "n8n")
+        if re.search(rf"reverse_proxy\s+{re.escape(base)}:", blob) and base not in ("n8n",):
+            bad.append(f"a sites.d/ route proxies to never-publishable service '{base}'")
+    for pattern in ("/n8n/rest/", "/n8n/webhook-test/", "/n8n/form/"):
+        if f"handle {pattern}" in blob:
+            bad.append(f"a sites.d/ route HANDLES {pattern}, which must only ever be denied")
+    if "@n8n_forbidden" not in blob:
+        bad.append("no explicit deny matcher for n8n's editor/REST/webhook-test/form routes")
+    return bad
+
+
+@check("I6", "no docker.sock, privileged, host namespace, --no-sandbox, set -x, or banned string")
+def i6(ctx):
+    bad = []
+    for name, svc in ctx.services.items():
+        for v in svc.get("volumes") or []:
+            src = v.get("source") if isinstance(v, dict) else str(v)
+            if src and "docker.sock" in str(src):
+                bad.append(f"{name} mounts the Docker socket")
+        if svc.get("privileged"):
+            bad.append(f"{name} is privileged")
+        for key in ("network_mode", "pid", "ipc"):
+            val = svc.get(key)
+            if val and str(val).startswith("host"):
+                bad.append(f"{name} shares the host {key}")
+
+    banned = [l.strip() for l in open(os.path.join(ctx.root, "strings", "banned.txt"))
+              if l.strip() and not l.startswith("#")]
+    # The checker and its data files necessarily CONTAIN the strings they
+    # search for.  Excluding exactly those two, by name, is not a loophole —
+    # any other file that mentions them still fails, and a new exclusion would
+    # have to be added here in a reviewed diff.
+    SELF = {"ci/invariants.py", "strings/banned.txt"}
+    for f in ctx.shipped_files():
+        if f in SELF:
+            continue
+        path = os.path.join(ctx.root, f)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        if "--no-sandbox" in text:
+            bad.append(f"{f} contains --no-sandbox")
+        for phrase in banned:
+            if re.search(rf"\b{re.escape(phrase)}\b", text, re.I):
+                bad.append(f"{f} contains the banned assurance string {phrase!r}")
+    return bad
+
+
+@check("I7", "no untrusted_input service on egress, or on ANY bridge with internal: false")
+def i7(ctx):
+    bad = []
+    # UNQUALIFIED ACROSS PROFILES (rev 10): every SHIPPED profile, not only the
+    # Tier-A-installable ones.  The old form was qualified "in any
+    # Tier-A-installable profile"; that qualifier is deleted.
+    #
+    # `later` entries are excluded, and that is the faithful reading rather
+    # than a weakening.  The deferred `web` services sit on nat_egress bridges
+    # BY DESCRIPTION — that topology is precisely why they were deferred — and
+    # they are in NO PROFILE, so "in any profile at all" does not reach them.
+    # Including them would make this invariant unpassable while the manifest
+    # keeps the deferred rows that I8 and I11 deliberately retain at full
+    # width.  The day `web` returns, its scope changes to 1.0 and this check
+    # starts failing until its bridges are redesigned — which is the
+    # reintroduction gate working, not a hole.
+    for name, svc in (ctx.manifest.get("services") or {}).items():
+        if svc.get("scope") == "later":
+            continue
+        if svc.get("untrusted_input") != True and svc.get("untrusted_input") != "yes":
+            continue
+        for n in svc.get("networks") or []:
+            b = ctx.bridge(n)
+            if b.get("class") == "egress":
+                bad.append(f"{name} has untrusted_input and attaches to egress-class bridge {n}")
+            if b.get("internal") is False:
+                bad.append(f"{name} has untrusted_input and attaches to {n}, which is internal: false")
+    return bad
+
+
+@check("I8", "parse/untrusted-*/egress bridges declare a fixed subnet and ipv6: false")
+def i8(ctx):
+    bad = []
+    # The class list is deliberately NOT shortened: untrusted-fetch and
+    # untrusted-exec have no members here, and the predicate must already be in
+    # force on the day a deferred bridge returns.
+    classes = {"parse", "untrusted-fetch", "untrusted-exec", "egress"}
+    for name, b in (ctx.manifest.get("bridges") or {}).items():
+        if b.get("class") not in classes:
+            continue
+        if b.get("scope") == "later":
+            if not b.get("subnet"):
+                bad.append(f"deferred bridge {name} has no reserved subnet; it must return at the same address")
+            continue
+        if not b.get("subnet"):
+            bad.append(f"{name} (class {b.get('class')}) declares no fixed subnet")
+        if b.get("ipv6") is not False:
+            bad.append(f"{name} does not declare ipv6: false")
+    return bad
+
+
+@check("I9", "web-search flags false in EVERY profile; exceptions register complete")
+def i9(ctx):
+    bad = []
+    owui = (ctx.services.get("open-webui") or {}).get("environment") or {}
+    for flag in ("ENABLE_WEB_SEARCH", "ENABLE_RAG_WEB_SEARCH"):
+        if str(owui.get(flag)).lower() not in ("false", "0"):
+            bad.append(f"open-webui {flag} is {owui.get(flag)!r}, must be false in every shipped profile")
+    exc = os.path.join(ctx.root, "security-exceptions.yaml")
+    if not os.path.exists(exc):
+        bad.append("security-exceptions.yaml is missing")
+        return bad
+    reg = yaml.safe_load(open(exc)) or {}
+    import datetime
+    today = datetime.date.today()
+    for e in reg.get("exceptions") or []:
+        if e.get("scope") == "deferred":
+            continue
+        for field in ("approved_by", "approved_at", "review_by"):
+            if not e.get(field):
+                bad.append(f"exception {e.get('id')} is missing {field}")
+        rb = e.get("review_by")
+        if rb:
+            d = rb if isinstance(rb, datetime.date) else datetime.date.fromisoformat(str(rb))
+            if d < today:
+                bad.append(f"exception {e.get('id')} is past its review_by ({rb})")
+    return bad
+
+
+@check("I10", "the gating machinery is ABSENT (inverted invariant)")
+def i10(ctx):
+    bad = []
+    forbidden_units = ["aistack-enforce.service", "aistack-enforce.timer",
+                       "aistack-stop-gated.service"]
+    for f in ctx.shipped_files():
+        base = os.path.basename(f)
+        if base in forbidden_units:
+            bad.append(f"{f} exists; revision 10 withdrew the policy-loss contract")
+        if re.match(r"aistack-group@.*\.service$", base):
+            bad.append(f"{f} is an aistack-group@*.service unit")
+        path = os.path.join(ctx.root, f)
+        if os.path.isfile(path):
+            try:
+                text = open(path, encoding="utf-8", errors="replace").read()
+            except Exception:
+                continue
+            if "/run/aistack/firewall.deadline" in text and "ci/invariants.py" not in f:
+                bad.append(f"{f} references /run/aistack/firewall.deadline")
+
+    for name, svc in ctx.services.items():
+        r = svc.get("restart")
+        if r != "unless-stopped":
+            bad.append(f"{name} declares restart: {r!r}; only the restore-drill project may differ")
+        labels = svc.get("labels") or {}
+        keys = labels.keys() if isinstance(labels, dict) else labels
+        for k in keys:
+            if "aistack.gated" in str(k):
+                bad.append(f"{name} carries the aistack.gated label")
+    return bad
+
+
+@check("I11", "every bridge's internal: flag equals what its own zone_policy mandates")
+def i11(ctx):
+    mandate = {"contained": True, "published": False, "nat_egress": False, "forwarding": False}
+    bad = []
+    for name, b in (ctx.manifest.get("bridges") or {}).items():
+        zp = b.get("zone_policy")
+        if zp not in mandate:
+            bad.append(f"{name} has unknown zone_policy {zp!r}")
+            continue
+        if b.get("internal") is not mandate[zp]:
+            bad.append(f"{name}: zone_policy {zp} mandates internal: {mandate[zp]}, manifest says {b.get('internal')}")
+
+    # And the RENDERED compose must agree with the manifest.
+    for name, net in ctx.networks.items():
+        b = ctx.bridge(name)
+        if not b:
+            continue
+        want = mandate.get(b.get("zone_policy"))
+        got = net.get("internal", False)
+        if want is not None and bool(got) != want:
+            bad.append(f"compose network {name}: internal is {got}, zone_policy {b.get('zone_policy')} mandates {want}")
+    return bad
+
+
+@check("I12", "canonical local-mode copy: one region per surface, byte-equal, token scan outside")
+def i12(ctx):
+    bad = []
+    canon = open(os.path.join(ctx.root, "strings", "local-mode.txt")).read().strip()
+    tokens = [l.strip() for l in open(os.path.join(ctx.root, "strings", "exposure-tokens.txt"))
+              if l.strip() and not l.startswith("#")]
+    allow = set()
+    for l in open(os.path.join(ctx.root, "strings", "exposure-allowlist.txt")):
+        if l.strip() and not l.startswith("#") and "|" in l:
+            allow.add(l.split("|", 2)[-1].strip())
+
+    surfaces = ctx.release_surfaces()
+
+    for f in surfaces:
+        path = os.path.join(ctx.root, f)
+        if not os.path.isfile(path):
+            continue
+        text = open(path, encoding="utf-8", errors="replace").read()
+        begins = text.count("AISTACK-LOCAL-MODE:BEGIN")
+        ends = text.count("AISTACK-LOCAL-MODE:END")
+        if begins != ends:
+            bad.append(f"{f}: unbalanced local-mode region markers")
+            continue
+        if begins == 0:
+            continue
+        if begins != 1:
+            bad.append(f"{f}: {begins} local-mode regions; exactly one is allowed")
+            continue
+        m = re.search(r"AISTACK-LOCAL-MODE:BEGIN(.*?)AISTACK-LOCAL-MODE:END", text, re.S)
+        inner = m.group(1)
+        # Strip the comment leader each surface uses, then compare bytes.
+        stripped = "\n".join(
+            re.sub(r"^\s*(#|<!--|-->|//)\s?", "", ln).rstrip()
+            for ln in inner.splitlines()
+        ).strip()
+        stripped = stripped.replace("-->", "").strip()
+        if stripped != canon:
+            bad.append(f"{f}: the local-mode region does not equal strings/local-mode.txt")
+
+    # Token scan OUTSIDE any region, over the declared copy surfaces.
+    for f in surfaces:
+        path = os.path.join(ctx.root, f)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        outside = re.sub(r"AISTACK-LOCAL-MODE:BEGIN.*?AISTACK-LOCAL-MODE:END", "", text, flags=re.S)
+        for i, line in enumerate(outside.splitlines(), 1):
+            s = line.strip()
+            if not s or s in allow:
+                continue
+            for t in tokens:
+                # A trailing `*` is a PREFIX token; anything else must match
+                # as a whole word.  Without that distinction `LAN` reports
+                # `$$ LANGUAGE plpgsql;` and "language models" as exposure
+                # claims — measured, not hypothetical — and a token list that
+                # cries wolf gets allowlisted into uselessness, which is the
+                # failure mode F23 already warns about.
+                if t.endswith("*"):
+                    pat = rf"\b{re.escape(t[:-1])}\w*"
+                else:
+                    pat = rf"\b{re.escape(t)}\b"
+                if re.search(pat, s, re.I):
+                    bad.append(f"{f}:{i} matches exposure token {t!r} outside a region and is not allowlisted: {s[:90]}")
+                    break
+    return bad
+
+
+@check("I12e", "docs/decisions/** appears nowhere in the release manifest")
+def i12e(ctx):
+    """What makes docs/decisions/ non-shipping a CHECKED FACT, not an intention.
+
+    A shipped file placed there fails this assertion rather than escaping the
+    string check by sitting under an excluded path.
+    """
+    bad = [f"{f} is listed in release-manifest.txt but lives under docs/decisions/"
+           for f in ctx.release_surfaces() if f.startswith("docs/decisions/")]
+    # Every declared surface must actually exist, or the scan is vacuous for it.
+    for f in ctx.release_surfaces():
+        if not os.path.isfile(os.path.join(ctx.root, f)):
+            bad.append(f"release-manifest.txt lists {f}, which does not exist — "
+                       f"I12 would pass vacuously for it")
+    return bad
+
+
+@check("I13", "writer-scope containment over every byte-accepting ingress")
+def i13(ctx):
+    bad = []
+    limits_path = os.path.join(ctx.root, "limits.yaml")
+    if not os.path.exists(limits_path):
+        bad.append("limits.yaml is missing; I13 quantifies over its ingress list")
+        return bad
+    limits = yaml.safe_load(open(limits_path)) or {}
+    ingress = set(limits.get("ingress_services") or [])
+
+    covered = set()
+    for name in ingress:
+        svc = ctx.services.get(name)
+        if svc is None:
+            # A helper may be listed; it has no compose service.
+            if name in (ctx.manifest.get("helpers") or {}):
+                covered.add(name)
+                continue
+            bad.append(f"limits.yaml lists ingress service {name!r} which is not in compose")
+            continue
+        covered.add(name)
+        for v in svc.get("volumes") or []:
+            tgt = v.get("target") if isinstance(v, dict) else str(v)
+            if tgt and "/sys/fs/cgroup" in str(tgt):
+                bad.append(f"{name} mounts /sys/fs/cgroup")
+        caps_add = [c.upper() for c in (svc.get("cap_add") or [])]
+        if "SYS_ADMIN" in caps_add:
+            bad.append(f"{name} has cap_add SYS_ADMIN")
+        if "ALL" not in [c.upper() for c in (svc.get("cap_drop") or [])]:
+            bad.append(f"{name} does not cap_drop ALL")
+        opts = svc.get("security_opt") or []
+        if not any("no-new-privileges:true" in str(o) for o in opts):
+            bad.append(f"{name} lacks no-new-privileges:true")
+        if svc.get("privileged"):
+            bad.append(f"{name} is privileged")
+        if svc.get("cgroup") == "host":
+            bad.append(f"{name} shares the host cgroup namespace")
+
+    # SET EQUALITY: a new ingress on a service outside the list fails the PR.
+    declared_ingress = {n for n, s in (ctx.manifest.get("services") or {}).items()
+                        if s.get("scope") == "mvp" and s.get("untrusted_input") in (True, "yes")}
+    missing = declared_ingress - ingress
+    for m in sorted(missing):
+        bad.append(f"{m} accepts untrusted bytes but is not in limits.yaml ingress_services")
+    extra = {i for i in ingress if i in ctx.services} - declared_ingress
+    for e in sorted(extra):
+        bad.append(f"limits.yaml lists {e} as ingress but the manifest does not mark it untrusted_input")
+    return bad
+
+
+@check("I14", "lock order: every path takes lifecycle before helper")
+def i14(ctx):
+    # A CI grep over the command implementations, as the design specifies.
+    path = os.path.join(ctx.root, "bin", "aistack")
+    text = open(path).read()
+    bad = []
+    if re.search(r"with_helper_lock\s+with_lifecycle_lock", text):
+        bad.append("bin/aistack takes the helper lock before the lifecycle lock")
+    # The wrapper must skip acquisition when the fd is already held, or a
+    # nested invocation deadlocks against itself.
+    for var in ("AISTACK_LOCK_FD_LIFECYCLE", "AISTACK_LOCK_FD_HELPER"):
+        if var not in text:
+            bad.append(f"bin/aistack never consults {var}; a nested helper would deadlock")
+    return bad
+
+
+ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    args = ap.parse_args()
+
+    ctx = Ctx(args.root)
+    for c in ALL:
+        c(ctx)
+
+    width = max(len(t) for _, _, t, _ in RESULTS)
+    print()
+    for ident, status, title, problems in RESULTS:
+        mark = "ok  " if status == "pass" else "FAIL"
+        print(f"  [{mark}] {ident:<5} {title}")
+        for p in problems:
+            print(f"           - {p}")
+    print()
+    if FAILURES:
+        print(f"{len(FAILURES)} invariant(s) FAILED: {', '.join(FAILURES)}")
+        return 1
+    print(f"All {len(RESULTS)} invariants pass.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

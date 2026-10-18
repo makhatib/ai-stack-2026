@@ -100,6 +100,15 @@ if [ -n "$DRILL_PROJECT" ]; then
   echo "    into throwaway project '$DRILL_PROJECT' — live volumes are not touched"
   PROJECT="$DRILL_PROJECT"
   VOL_PREFIX="$DRILL_PROJECT"
+  # MUST use compose.drill.yaml, not compose.yaml.
+  #
+  # compose.yaml pins `container_name:` and an explicit volume `name:`, and
+  # BOTH IGNORE THE PROJECT NAME. Restoring with it under a drill project
+  # therefore attaches to the LIVE volumes — we watched a drill restore a
+  # backup over the live database, with only a scrollable Docker warning to
+  # say so. compose.drill.yaml names nothing explicitly, so Compose prefixes
+  # every volume and container with the project.
+  COMPOSE_FILE_ARGS=(-f compose.drill.yaml)
 else
   if [ "$ASSUME_YES" -ne 1 ]; then
     cat <<EOF
@@ -117,9 +126,10 @@ EOF
   fi
   PROJECT="aistack"
   VOL_PREFIX="aistack"
+  COMPOSE_FILE_ARGS=(-f compose.yaml)
 fi
 
-dc() { ( cd "$ROOT" && docker compose -p "$PROJECT" "$@" ); }
+dc() { ( cd "$ROOT" && docker compose -p "$PROJECT" "${COMPOSE_FILE_ARGS[@]}" "$@" ); }
 
 # Databases first: the volume tars below include application state that
 # references rows in these dumps.
@@ -133,6 +143,24 @@ dc exec -T postgres psql -U aistack_admin -d postgres < "$WORK/payload/globals.s
 for db in authelia openwebui litellm n8n; do
   [ -f "$WORK/payload/$db.dump" ] || continue
   echo "      $db"
+  # CREATE THE DATABASE IF IT IS NOT THERE.
+  #
+  # `pg_restore -d n8n` needs `n8n` to already exist, and into a LIVE stack it
+  # always does — the init script made it. Into a FRESH drill project it does
+  # not, so every per-app restore silently did nothing and the drill asserted
+  # against four empty databases. The roles came back (pg_dumpall globals
+  # creates those) which made the failure look like a dump problem rather than
+  # a missing database.
+  #
+  # Guarded by `WHERE NOT EXISTS` rather than `IF NOT EXISTS`, which CREATE
+  # DATABASE does not support, and run through \gexec so the identifier is
+  # quoted by format() rather than interpolated by the shell.
+  dc exec -T postgres psql -v ON_ERROR_STOP=1 -U aistack_admin -d postgres \
+    -v db="$db" >/dev/null 2>&1 <<'SQL' || true
+SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'db')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db')
+\gexec
+SQL
   dc exec -T postgres pg_restore --clean --if-exists -U aistack_admin -d "$db" \
     < "$WORK/payload/$db.dump" >/dev/null 2>&1 || echo "      (pg_restore reported warnings for $db)"
 done
@@ -141,14 +169,27 @@ echo "    volumes"
 for vol in n8n-data openwebui-data caddy-data authelia-data; do
   src="$WORK/payload/aistack-${vol}.tar.gz"
   [ -f "$src" ] || continue
-  target="${VOL_PREFIX}-${vol}"
+  # Compose names a project volume `<project>_<key>` with an UNDERSCORE.
+  # Getting this wrong creates a correctly-named orphan that nothing mounts,
+  # and the drill then asserts against an empty database and passes nothing.
+  if [ -n "$DRILL_PROJECT" ]; then
+    target="${VOL_PREFIX}_${vol}"
+  else
+    target="${VOL_PREFIX}-${vol}"
+  fi
   docker volume create "$target" >/dev/null
   echo "      $target"
-  docker run --rm -v "$target:/dst" -v "$WORK/payload:/in:ro" \
-    --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  # STREAMED IN, mirroring the backup side: the host reads the file and the
+  # container only writes into the volume it is restoring. DAC_OVERRIDE is
+  # needed here and not on the backup side, because restoring genuinely has
+  # to write files owned by other uids into a directory it does not own.
+  docker run --rm -i -v "$target:/dst" \
+    --read-only --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN \
+    --security-opt no-new-privileges:true \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     docker.io/library/busybox:stable \
-    sh -c "rm -rf /dst/* /dst/.[!.]* 2>/dev/null; tar xzf /in/aistack-${vol}.tar.gz -C /dst"
+    sh -c "rm -rf /dst/* /dst/.[!.]* 2>/dev/null; tar xzf - -C /dst" \
+    < "$WORK/payload/aistack-${vol}.tar.gz"
 done
 
 echo ""

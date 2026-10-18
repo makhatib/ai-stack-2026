@@ -1,0 +1,164 @@
+# AI Stack 2026 — the restore-drill project.
+#
+# A SEPARATE COMPOSE FILE, and that is the whole point of it existing.
+#
+# WHY THE DRILL CANNOT REUSE compose.yaml — measured, NOM-258 2026-10-18.
+# The main file pins `container_name: aistack-postgres` and gives every volume
+# an explicit `name:`. Both of those IGNORE the compose project name. So
+# `docker compose -p restore-drill-… -f compose.yaml up postgres` does not
+# create a parallel project at all: it attaches to `aistack-postgres-data` —
+# THE LIVE VOLUME — and Docker says so in a warning that is easy to scroll
+# past:
+#
+#   volume "aistack-postgres-data" already exists but was created for project
+#   "aistack" (expected "restore-drill-…")
+#
+# We watched a drill restore a backup over the live database it had just been
+# taken from. Harmless that time because the contents matched; a drill of an
+# OLDER archive would have silently rolled production back.
+#
+# Nothing in this file carries an explicit `container_name` or volume `name`,
+# so Compose prefixes everything with the project name and the drill is
+# genuinely parallel. The lifecycle lock stops the two from coexisting; this
+# file stops them from SHARING STORAGE if they ever did.
+#
+# FOUR SERVICES, matching the manifest's restore_drill count.
+#
+# `restart: "no"` on every one, and the reason was never the firewall: this is
+# a throwaway project under the exclusive lifecycle lock, destroyed by the
+# drill's cleanup, and a daemon-restarted drill container is a drill that
+# outlives its own lock. CI invariant I10 asserts this project — and only this
+# project — declares it.
+
+name: restore-drill
+
+x-drill: &drill
+  restart: "no"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+  # NO PORTS ANYWHERE IN THIS FILE. The drill is never reachable.
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "2" }
+
+services:
+
+  postgres:
+    <<: *drill
+    image: ${POSTGRES_IMAGE:?pin missing}:${POSTGRES_TAG:?pin missing}@${POSTGRES_DIGEST:?pin missing}
+    cap_add: [CHOWN, SETUID, SETGID, FOWNER, DAC_READ_SEARCH]   # E7
+    networks: [drill]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /run/postgresql:rw,nosuid,size=64m
+    secrets:
+      - postgres_superuser_password
+    environment:
+      POSTGRES_USER: aistack_admin
+      POSTGRES_DB: aistack
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aistack_admin -d aistack"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # The three state-holding applications, started so the drill can assert the
+  # restored data is usable by the software that wrote it — not merely present
+  # in a dump. SCHEDULES AND SENDERS ARE DISABLED and connectors are synthetic:
+  # a drill that fires a workflow is a drill that sends somebody a real email.
+  n8n:
+    <<: *drill
+    image: ${N8N_IMAGE:?pin missing}:${N8N_TAG:?pin missing}@${N8N_DIGEST:?pin missing}
+    networks: [drill]
+    volumes:
+      - n8n-data:/home/node/.n8n
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+      - /home/node/.cache:rw,nosuid,size=256m,uid=1000,gid=1000
+    secrets:
+      - n8n_encryption_key
+    environment:
+      EXECUTIONS_MODE: regular
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?missing}
+      # Nothing may fire, and nothing may phone home.
+      N8N_DISABLED_MODULES: insights
+      EXECUTIONS_TIMEOUT: "30"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      GENERIC_TIMEZONE: ${AISTACK_TZ:-UTC}
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 1g
+
+  open-webui:
+    <<: *drill
+    image: ${OPEN_WEBUI_IMAGE:?pin missing}:${OPEN_WEBUI_TAG:?pin missing}@${OPEN_WEBUI_DIGEST:?pin missing}
+    networks: [drill]
+    volumes:
+      - openwebui-data:/app/backend/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    environment:
+      DATABASE_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD:?missing}@postgres:5432/openwebui
+      VECTOR_DB: pgvector
+      PGVECTOR_DB_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD:?missing}@postgres:5432/openwebui
+      ENABLE_WEB_SEARCH: "false"
+      ENABLE_RAG_WEB_SEARCH: "false"
+      ENABLE_SIGNUP: "false"
+      WEBUI_SECRET_KEY: drill-only-not-a-secret
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 2g
+
+  authelia:
+    <<: *drill
+    image: ${AUTHELIA_IMAGE:?pin missing}:${AUTHELIA_TAG:?pin missing}@${AUTHELIA_DIGEST:?pin missing}
+    networks: [drill]
+    volumes:
+      - authelia-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    # The drill only needs Authelia's volume restored and inspectable; it does
+    # not need a working IdP, and starting one would mean restoring its config
+    # and secrets into a throwaway project for no assertion.
+    entrypoint: ["sleep", "600"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 256m
+
+networks:
+  drill:
+    # zone_policy: contained. internal: true, NO egress bridge, no published
+    # port. The drill validates RESTORABILITY, not containment — see
+    # docs/backup-restore.md — but there is no reason to give it a route it
+    # has no use for.
+    internal: true
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.247.0/29
+
+volumes:
+  postgres-data:
+  n8n-data:
+  openwebui-data:
+  authelia-data:
+
+secrets:
+  postgres_superuser_password:
+    file: ./secrets/postgres_superuser_password
+  n8n_encryption_key:
+    file: ./secrets/n8n_encryption_key

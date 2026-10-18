@@ -1,0 +1,86 @@
+# Backup and restore
+
+```sh
+bin/aistack backup            # local rollback backup
+bin/aistack restore <archive> # verify, then restore
+bin/aistack drill run         # restore into a throwaway project and check it
+```
+
+## What it is called, and why that matters
+
+This is a **local rollback backup**. It is not disaster recovery, and the
+command will not describe itself that way. A copy of your data on the same
+machine as your data protects you from a bad upgrade, not from losing the
+machine.
+
+`bin/aistack backup --offsite <dest>` copies the archive elsewhere. That is
+still not disaster recovery until someone has **restored from that copy, on a
+different host**. Until then it is a file you hope is good.
+
+## What is in it
+
+In: every database (dumped individually, plus global roles), `secrets/`
+including the n8n encryption key, your `.env`, your pins, your `config/`, and
+the data volumes for n8n, Open WebUI, Caddy and Authelia.
+
+Out, deliberately: **every model volume**. They are re-downloadable and they
+are over 90% of the bytes. The manifest inside each archive lists what was
+excluded and why, so this is checkable rather than a promise.
+
+The n8n encryption key is in the set on purpose. Without it, every credential
+in the database dump is undecryptable, and a backup that restores a workflow
+list but none of its credentials is not a backup.
+
+## Two keys, and you must hold both
+
+`secrets/backup.key` encrypts the archive. `secrets/backup.hmac` signs its
+contents list. **Copy both off this machine, as files, through your own
+channel.** `bin/aistack backup` nags at every run until you confirm you have.
+
+They are separate on purpose: whoever holds an archive must not thereby be
+able to forge its manifest. A restore **refuses to start** without the HMAC
+key — it does not quietly fall back to checking digests, because those
+digests live inside the very manifest it would be unable to verify.
+
+## What a restore checks before it touches anything
+
+In order, and all of it before a single byte of your data is overwritten:
+
+1. Decrypt.
+2. Unpack through an extractor that audits **every member as it writes it** —
+   no absolute paths, no `..`, nothing resolving outside the target, no
+   symlinks, no hardlinks, no devices or FIFOs. The checks run during
+   extraction rather than as a pre-pass, because a pre-pass over a file
+   someone else can still modify is a race.
+3. Verify the HMAC over the manifest.
+4. Verify the member set by **equality**: every listed file present, every
+   present file listed, no duplicate paths. Recomputing the digest of each
+   *listed* member cannot detect an **added** member, and two entries with the
+   same name would silently overwrite each other on extraction. A count match
+   is not a set match.
+5. Recompute and compare every digest.
+
+Any failure refuses, and nothing has changed.
+
+## Testing that a good backup restores
+
+```sh
+bin/aistack drill run
+```
+
+Restores into a **separate throwaway project** with its own volumes and
+networks, then checks that workflows, credentials, documents and permissions
+all came back, and destroys the project.
+
+It cannot touch your live data, and that is enforced by a lock rather than by
+convention: the drill holds an exclusive lock for its whole lifetime and the
+running stack holds a shared one, so the kernel refuses to let both exist.
+Not a startup check in each direction — those can race — one lock, two modes.
+
+**What the drill proves:** a good backup restores, and a bad one is refused.
+
+**What it does not prove:** that a restored system cannot reach the network
+while it is being restored. That needs host firewall rules and is a later
+release. The honest summary for this version: *it proves a backup restores
+and proves a bad backup is refused; it does not prove a restore cannot reach
+the network.*

@@ -1,0 +1,133 @@
+# AI Stack 2026 — bounded limits, v1.
+#
+# A VERSIONED, COMMITTED, NUMERIC CONTRACT (final-design §5.8).  Every row has
+# a value, an enforcement owner, an overflow behaviour and an override ceiling
+# the installer refuses to exceed.
+#
+# Limits apply to FAILED REQUESTS AND RETRIES, not only to successful ones.
+#
+# EVERY VALUE IS [O] — A DESIGN CHOICE, NOT A MEASUREMENT.  NOM-259's L1 case
+# measures them and may propose a change through a VERSION BUMP of this file,
+# which is reviewed.  It cannot silently widen one.
+#
+# Rows whose enforcement owner is a deferred service keep their values so this
+# file does not have to be re-derived when the group returns; L1 exercises only
+# the rows whose owner ships.
+
+schema: aistack.limits.v1
+version: 1
+
+# The set I13 quantifies over: every service hosting an enumerated
+# byte-accepting ingress.  CI asserts this list and I13's covered set are THE
+# SAME SET, in both directions — a new ingress on a service outside it fails
+# the PR, which is the failure mode that matters, because the termination
+# proof quantifies over exactly this set.
+ingress_services:
+  - open-webui
+  - n8n
+  - docling-serve
+  - model-puller
+  - backup-helper
+
+limits:
+  - surface: HTTP request body, general
+    default: 1MB
+    owner: caddy request_body
+    on_overflow: "413 before any work"
+    ceiling: 8MB
+  - surface: HTTP request body, upload route
+    default: 50MB
+    owner: caddy request_body
+    on_overflow: "413 before any work"
+    ceiling: 200MB
+  - surface: "Document: file size"
+    default: 50MB
+    owner: docling-serve + caddy
+    on_overflow: "reject, no parse started"
+    retry_accounting: "counts against the per-key budget"
+    ceiling: 200MB
+  - surface: "Document: page count"
+    default: 300
+    owner: docling-serve
+    on_overflow: "reject before parse"
+    ceiling: 1000
+  - surface: "Document: parse timeout"
+    default: 120s
+    owner: "docling-serve; our wrapper kills the request if the engine has no native timeout"
+    on_overflow: "cancel, free the slot, return 504"
+    ceiling: 600s
+  - surface: "Document: decompression ratio"
+    default: "100:1, absolute cap 500MB expanded"
+    owner: "our wrapper around the archive path"
+    on_overflow: "abort the parse, log the ratio"
+    ceiling: not-overridable
+  - surface: "Model: tokens per key per day"
+    default: 200000
+    owner: litellm virtual key
+    on_overflow: "429, logged against the key"
+    retry_accounting: "failed and retried calls count"
+    ceiling: "2000000 per key and 5000000 per install"
+  - surface: "Model: requests per minute per key"
+    default: 60
+    owner: litellm virtual key
+    on_overflow: 429
+    ceiling: 240
+  - surface: "Agent: steps per run"
+    default: 12
+    owner: n8n workflow template
+    on_overflow: "halt the run, return what it has"
+    ceiling: 30
+  - surface: "Agent: tool calls per run"
+    default: 20
+    owner: n8n workflow template
+    on_overflow: halt
+    retry_accounting: "each retry is a call"
+    ceiling: 50
+  - surface: "Agent: wall clock per run"
+    default: 300s
+    owner: n8n EXECUTIONS_TIMEOUT
+    on_overflow: "cancel, mark failed"
+    ceiling: 900s
+  - surface: "Agent: retries per step"
+    default: 2
+    owner: n8n template
+    on_overflow: "fail the step; AN UNCERTAIN EXTERNAL EFFECT IS NEVER RETRIED"
+    ceiling: 3
+  - surface: Aggregate concurrency
+    default: "4 concurrent agent runs, queue depth 20; slot lease = wall clock + 60s"
+    owner: >-
+      aistack_slot — 4 + 20 FINITE ROWS in Postgres taken under
+      FOR UPDATE SKIP LOCKED. LiteLLM max_parallel_requests is an independent
+      SECOND ceiling, not the bound: a counter can be incremented twice by two
+      transactions that read the same value; a row taken with SKIP LOCKED
+      cannot be taken twice.
+    on_overflow: "FIFO queue, then 429 once the queue is full — never unbounded, never an indefinite wait"
+    ceiling: "8 / 50; CI asserts lease > wall-clock limit"
+  - surface: "Disk: write admission"
+    default: "per-filesystem reserve 10GB (floor 2GB)"
+    owner: "atomic reservation against one aistack_fs row, CONVERTED TO A CHARGE on every terminal outcome"
+    on_overflow: "refuse — 413 or 507 — BEFORE the first byte lands"
+    ceiling: "reserve may not go below 2GB"
+  - surface: "Retention: chats"
+    default: 365d
+    owner: "open-webui setting + cleanup job"
+    on_overflow: "hard delete, logged count only"
+  - surface: "Retention: uploaded documents + vectors"
+    default: 365d
+    owner: cleanup job
+    on_overflow: "hard delete, WITH THEIR EMBEDDINGS IN THE SAME TRANSACTION"
+  - surface: "Retention: audit log"
+    default: 90d
+    owner: log rotation
+    ceiling: 365d
+  - surface: Corpus size warning
+    default: "5GB or 50000 chunks"
+    owner: doctor
+    on_overflow: "warn; NO automatic deletion"
+
+# Deferred with their groups (rev 10).  Values kept; not exercised by L1.
+deferred_rows:
+  - "Crawl: pages per call / bytes per page / total time / redirect depth (crawl4ai)"
+  - "Browser: session duration / navigations / downloads (playwright-mcp)"
+  - "Audio: duration and bytes per request (whisper-cpp, 1.0)"
+  - "Tool response size, 1MB per call (agentgateway — G-AGENTS failed)"

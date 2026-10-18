@@ -34,6 +34,11 @@ pick_rundir() {
   printf '/tmp/aistack-%s' "$(id -u)"
 }
 RUNDIR="$(pick_rundir)"
+# Exported so every script this CLI invokes agrees on where the locks live.
+# Letting each one re-derive it is how a drill ends up taking a different
+# lock from the serving supervisor, which would silently defeat the whole
+# mutual-exclusion design.
+export AISTACK_RUNDIR="$RUNDIR"
 LIFECYCLE_LOCK="$RUNDIR/lifecycle.lock"
 HELPER_LOCK="$RUNDIR/helper.lock"
 
@@ -284,6 +289,25 @@ cmd_manifest() {
 
 cmd_render_strings() { "$ROOT/scripts/render-strings.sh" "$@"; }
 
+cmd_samples() {
+  case "${1:-}" in
+    load)
+      # SYNTHETIC ONLY.  These exist so the backup drill can prove CREDENTIAL
+      # DECRYPTION with real ciphertext rather than reporting "0 credentials
+      # restored", which proves nothing about the key travelling with the
+      # archive.
+      info "Importing synthetic workflows and credentials into n8n."
+      info "Every value is synthetic; see samples/README.md."
+      dc exec -T n8n n8n import:workflow --separate --input=/opt/aistack/workflows \
+        || die "workflow import failed"
+      dc exec -T n8n n8n import:credentials --input=/opt/aistack/samples/credentials.synthetic.json \
+        || die "credential import failed"
+      info "Done.  'aistack drill run' will now exercise credential decryption."
+      ;;
+    *) die "usage: aistack samples load" ;;
+  esac
+}
+
 usage() {
   cat <<'EOF'
 aistack — AI Stack 2026
@@ -310,6 +334,7 @@ aistack — AI Stack 2026
   support-bundle      a redacted artefact to send when asking for help
   remove              uninstall, with an explicit prompt about volumes
 
+  samples load        import the synthetic workflows and credentials
   manifest counts     regenerate the counts from manifest.yaml
   render-strings      re-render the frozen local-mode copy into every surface
 EOF
@@ -336,6 +361,7 @@ case "${1:-}" in
   remove) shift; cmd_remove "$@" ;;
   manifest) shift; cmd_manifest "$@" ;;
   render-strings) shift; cmd_render_strings "$@" ;;
+  samples) shift; cmd_samples "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$1' (try: aistack help)" ;;
 esac

@@ -1,0 +1,64 @@
+{
+  "name": "W2 — Chat with your PDF (Docling to pgvector)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "w2-manual",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://docling-serve:5001/v1/convert/source",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sources: [{ kind: 'file', base64_string: $json.pdf_base64, filename: 'synthetic.pdf' }], options: { to_formats: ['md'] } }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "w2-parse",
+      "name": "Parse with Docling",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "notes": "BYTES ONLY. Docling's URL fetching is disabled and it sits on a network with no route off the host. It is the component most likely to be executing something an attacker wrote, so it sees one caller and nothing else."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://litellm:4000/v1/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'local-embed', input: $json.document.md_content }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "w2-embed",
+      "name": "Embed via LiteLLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO w2_chunks (source, content, embedding) VALUES ($1, $2, $3::vector)",
+        "options": {}
+      },
+      "id": "w2-store",
+      "name": "Store chunk + embedding",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [660, 0],
+      "notes": "One datastore, one backup procedure. Retention deletes a document AND its embeddings in the SAME transaction — a vector that outlives its source is a deleted document you can still search."
+    }
+  ],
+  "connections": {
+    "Run manually": { "main": [[{ "node": "Parse with Docling", "type": "main", "index": 0 }]] },
+    "Parse with Docling": { "main": [[{ "node": "Embed via LiteLLM", "type": "main", "index": 0 }]] },
+    "Embed via LiteLLM": { "main": [[{ "node": "Store chunk + embedding", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionTimeout": 300 },
+  "active": false
+}

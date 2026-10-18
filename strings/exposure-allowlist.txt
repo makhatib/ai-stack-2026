@@ -1,10 +1,30 @@
 # Exposure-token allowlist (final-design §6, I12).
+#
 # Format: <reviewer> | <reason> | <the exact line>
 # Checked by EQUALITY, so a stale entry fails the PR exactly as hard as an
-# unreviewed new line.
+# unreviewed new line. Edit the copy and this file goes red until someone
+# looks at it again — which is the point.
 #
-# An entry's conditions are a reason and a named reviewer — NOT semantic
-# agreement with the frozen sentence.  A reviewed, listed-token competing claim
-# can be admitted here on purpose.  That is the second half of F23.
+# AN ENTRY'S CONDITIONS ARE A REASON AND A NAMED REVIEWER, NOT SEMANTIC
+# AGREEMENT WITH THE FROZEN SENTENCE. A reviewed, listed-token competing claim
+# CAN be admitted here on purpose. That is the second half of residual F23,
+# and it is why a green I12 must never be reported as "the canonical sentence
+# is the only exposure claim on the page". It is not, and no static check over
+# natural-language copy can make it so.
 #
-# (empty — every current exposure sentence lives inside a rendered region)
+# Every line below was read against strings/local-mode.txt and judged to
+# narrow the claim or to be unrelated to reachability. None of them widens it.
+
+DevOps Engineer (NOM-258) | Narrows the claim: states a capability the release does NOT have. | - **No internet research.** There is no web-search group and Open WebUI's web
+DevOps Engineer (NOM-258) | Narrows the claim: enumerates absent features, including public mode. | - **No voice, no images, no code execution, no VPN, no public mode.**
+DevOps Engineer (NOM-258) | Narrows the claim: explicitly disclaims the containment property. | container cannot reach your LAN or a service listening on your host. See
+DevOps Engineer (NOM-258) | Unrelated to reachability: describes certificate issuance, not exposure. | # it; there is no ACME, no public DNS and no Certificate Transparency entry.
+DevOps Engineer (NOM-258) | Operator instruction that REFUSES a wildcard bind; narrows exposure. | # The address the published ports bind to.  NEVER 0.0.0.0 and never ::.
+DevOps Engineer (NOM-258) | Offers the LAN bind as a choice and marks it untested in the region above. | #   192.168.x.y      your LAN address, if you want other devices to try
+DevOps Engineer (NOM-258) | Unrelated to reachability: refers to download time for images. | internet takes to pull nine images.
+DevOps Engineer (NOM-258) | Unrelated to reachability: explains the certificate warning. | uses Caddy's internal certificate authority, because a publicly trusted
+DevOps Engineer (NOM-258) | Unrelated to reachability: explains why no public certificate is issued. | certificate would require a public DNS record.
+DevOps Engineer (NOM-258) | Unrelated to reachability: "language models" is disk-usage guidance. | but model weights dwarf that — a handful of language models is 50–100 GB.
+DevOps Engineer (NOM-258) | Unrelated to reachability: supply-chain signature posture. | for the upstreams that publish signatures, listed per image. There is no
+DevOps Engineer (NOM-258) | Narrows the claim: states what internal bridges do and do not give. | masquerade** for them. Nothing on such a network has a path to the internet.
+DevOps Engineer (NOM-258) | Narrows the claim: explicitly declines to claim either answer. | your local network, or link-local metadata addresses. We did not test it, so

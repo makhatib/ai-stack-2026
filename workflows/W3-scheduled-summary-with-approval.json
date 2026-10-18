@@ -1,0 +1,74 @@
+{
+  "name": "W3 — Scheduled summary behind the approval envelope",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "days", "triggerAtHour": 8 }] } },
+      "id": "w3-cron",
+      "name": "Every morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT prompt, answer FROM w4_results WHERE created_at > now() - interval '1 day' ORDER BY created_at DESC LIMIT 50",
+        "options": {}
+      },
+      "id": "w3-read",
+      "name": "Yesterday's results",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://litellm:4000/v1/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: 'Summarise these results in five bullets:\\n' + JSON.stringify($input.all().map(i => i.json)) }], max_tokens: 512 }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "w3-summarise",
+      "name": "Summarise",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO approval_action (action_id, approver_subject, approver_groups, tool, backend_id, config_revision, recipient, scope, parameter_hash, expires_at, state) VALUES (gen_random_uuid(), $1, ARRAY['admins'], 'send_summary', 'n8n-local', $2, $3, $4::jsonb, encode(sha256($5::bytea),'hex'), now() + interval '15 minutes', 'pending') RETURNING action_id",
+        "options": {}
+      },
+      "id": "w3-request-approval",
+      "name": "Request approval (write the envelope FIRST)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [660, 0],
+      "notes": "THE RECORD IS WRITTEN BEFORE THE APPROVER IS PROMPTED. The envelope binds the approver's identity and groups AT DECISION TIME, the recipient, the scope, and a SHA-256 over the final parameters. Mutation after approval invalidates the decision. 15-minute expiry: a stale approval is not an approval."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE approval_action SET state='executing' WHERE action_id=$1 AND state='approved' AND expires_at > now() RETURNING action_id",
+        "options": {}
+      },
+      "id": "w3-execute",
+      "name": "Execute only if approved (one row, or nothing)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [880, 0],
+      "notes": "Proceeds ONLY IF one row was affected. Two concurrent executes cannot both win: the second sees a state that is no longer 'approved'. Before sending, the template re-reads the envelope in this same transaction and aborts on ANY mismatch — approver still in the group, config revision unchanged, parameter hash recomputed over what is ABOUT to be sent. If the external call times out, the workflow does NOT retry: it halts for a human. Retrying an uncertain send is how one approval becomes two payments."
+    }
+  ],
+  "connections": {
+    "Every morning": { "main": [[{ "node": "Yesterday's results", "type": "main", "index": 0 }]] },
+    "Yesterday's results": { "main": [[{ "node": "Summarise", "type": "main", "index": 0 }]] },
+    "Summarise": { "main": [[{ "node": "Request approval (write the envelope FIRST)", "type": "main", "index": 0 }]] },
+    "Request approval (write the envelope FIRST)": { "main": [[{ "node": "Execute only if approved (one row, or nothing)", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionTimeout": 300 },
+  "active": false
+}

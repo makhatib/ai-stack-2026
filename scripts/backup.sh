@@ -43,6 +43,36 @@ die() { printf 'backup: %s\n' "$*" >&2; exit 1; }
 [ -s "$ENC_KEY" ]  || die "missing $ENC_KEY — run scripts/gen-secrets.sh"
 [ -s "$HMAC_KEY" ] || die "missing $HMAC_KEY — run scripts/gen-secrets.sh"
 
+# --- can we actually read everything we are about to promise? -------------
+# Checked UP FRONT, because the alternative is what we measured: the backup
+# dumps four databases and four volumes, then dies on `tar: Cannot open:
+# Permission denied` and leaves a partial archive with a confident name.
+#
+# secrets/ and config/authelia/users.yml are deliberately root-owned so the
+# services can read them and nothing else can, which means BACKUP IS A
+# PRIVILEGED OPERATION. That is a real constraint, not an oversight, and it
+# belongs in the first ten lines rather than the last.
+UNREADABLE=()
+while IFS= read -r f; do
+  [ -r "$f" ] || UNREADABLE+=("$f")
+done < <(find "$ROOT/secrets" "$ROOT/config" -type f 2>/dev/null)
+if [ "${#UNREADABLE[@]}" -gt 0 ]; then
+  cat >&2 <<EOF
+
+backup: cannot read ${#UNREADABLE[@]} file(s) that belong in the archive, including:
+  ${UNREADABLE[0]}
+
+These are root-owned on purpose: it is what lets each service read its own
+secret and nothing else read it. Taking a complete backup therefore needs
+privilege. Run:
+
+    sudo bin/aistack backup
+
+Refusing to write a partial archive under a name that claims to be complete.
+EOF
+  exit 1
+fi
+
 mkdir -p "$DEST" "$WORK/payload"
 STAGE="$WORK/payload"
 
@@ -62,11 +92,28 @@ done
 # Model volumes are NOT here.  That is deliberate and is in the docs.
 for vol in aistack-n8n-data aistack-openwebui-data aistack-caddy-data aistack-authelia-data; do
   echo "  tar $vol"
-  docker run --rm -v "$vol:/src:ro" -v "$STAGE:/out" \
-    --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  # STREAMED TO STDOUT, and the HOST writes the file.
+  #
+  # The obvious form — bind the staging directory in and let the container
+  # write there — fails with "tar: can't open '/out/...': Permission denied",
+  # because the helper drops ALL capabilities and therefore has no
+  # DAC_OVERRIDE, so even as uid 0 it cannot write into a 0700 directory owned
+  # by the operator. Loosening the staging directory to 0777 would put
+  # database dumps in a world-writable path on a shared host, and granting
+  # DAC_OVERRIDE would hand a broad write bypass to a container that only
+  # needs to read.
+  #
+  # Streaming avoids the question: the container writes to a pipe, the shell
+  # writes the file as the user who already owns the directory.
+  # DAC_READ_SEARCH is still needed to READ volume contents owned by other
+  # uids, and it is the narrow one — read and directory-search only, no write
+  # bypass. Same reasoning as E7 on Postgres.
+  docker run --rm -i -v "$vol:/src:ro" \
+    --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --security-opt no-new-privileges:true \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     docker.io/library/busybox:stable \
-    tar czf "/out/${vol}.tar.gz" -C /src . 2>/dev/null
+    tar czf - -C /src . > "$STAGE/${vol}.tar.gz" 2>/dev/null
 done
 
 # --- config and secrets -----------------------------------------------------

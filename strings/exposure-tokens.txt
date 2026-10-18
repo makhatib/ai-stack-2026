@@ -4,14 +4,20 @@
 # exposure-allowlist.txt with a reason and a named reviewer.
 #
 # READ THIS BEFORE ADDING A SENTENCE ABOUT EXPOSURE:
+# SYNTAX: a trailing `*` means PREFIX match (publish, published, publishable);
+# anything else is a WHOLE-WORD match.  The distinction is load-bearing: a
+# bare prefix match on `LAN` reports `$$ LANGUAGE plpgsql;` and the phrase
+# "language models" as exposure claims, and a token list that cries wolf gets
+# allowlisted into uselessness.
+#
 # This is a check over a LIST, and a list is not a language.  A sentence making
 # a competing exposure claim in words this file does not contain PASSES — e.g.
 # "Every phone on your Wi-Fi can open the dashboard, guaranteed."  That residual
 # is F23 and its mitigation is a RECORDED RELEASE COPY REVIEW, labelled
 # detective rather than preventive.  Do not read a green CI run as "the
 # canonical sentence is the only exposure claim on the page".  It is not.
-publish
-expose
+publish*
+expose*
 internet
 public
 LAN
