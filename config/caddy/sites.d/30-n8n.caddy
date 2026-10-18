@@ -1,0 +1,38 @@
+# n8n — the automation engine.
+#
+# NEVER PUBLISHABLE, enforced twice (the installer refuses to write the route;
+# I5 asserts no template exists): the EDITOR, the REST API, /webhook-test/* and
+# /form/*.  Only the paths below are ever proxied, and they are matched
+# explicitly rather than by a prefix that a trailing-path trick could widen.
+#
+# Public webhooks are NOT IN v1 (S04).  Webhooks work normally in LOCAL MODE
+# with n8n header-token auth and bounded bodies.  The VPN path they also used is
+# deferred with `remote-access`.
+
+# Deny first, and by exact prefix, so a later handler cannot resurrect them.
+@n8n_forbidden path /n8n/rest/* /n8n/webhook-test/* /n8n/form/* /n8n/form-test/* /n8n/api/*
+handle @n8n_forbidden {
+	respond "Not available in this deployment" 404
+}
+
+handle /n8n/webhook/* {
+	# No forward_auth: a webhook caller is a machine with a header token, not
+	# a browser with a session.  n8n's own header-token auth is the control,
+	# and the body is bounded here so an unauthenticated POST cannot cost
+	# anything before n8n rejects it.
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy n8n:5678
+}
+
+handle /n8n* {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy n8n:5678
+}

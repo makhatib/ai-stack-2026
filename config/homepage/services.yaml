@@ -1,0 +1,19 @@
+# AI Stack 2026 — Homepage services.  GENERATED from manifest.yaml by
+# `aistack manifest render`.  Hand-edits are overwritten.
+#
+# Only the two PUBLISHABLE surfaces appear here.  The never-publishable
+# services are absent on purpose: a dashboard link to an admin UI that is not
+# routed is a 404 that teaches the viewer the service exists and invites them
+# to go looking for it.
+
+- Chat and documents:
+    - Open WebUI:
+        href: /
+        description: Chat, RAG and the document pipeline
+        icon: mdi-chat
+
+- Automation:
+    - n8n:
+        href: /n8n
+        description: Workflows. The only place a mutating action can run.
+        icon: mdi-sitemap

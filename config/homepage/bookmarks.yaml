@@ -1,0 +1,8 @@
+# DELIBERATELY EMPTY.
+#
+# MEASURED (NOM-258, 2026-10-18): Homepage's bookmark renderer constructs a
+# `new URL(href)` and throws on a RELATIVE href, which takes the whole page
+# down with a server-side render error rather than degrading to a dead link.
+# Absolute `https://<host>/...` entries would work, but they would have to
+# embed the viewer's own hostname — a value this config is generated before we
+# know — so the file ships empty and the docs are reached from the filesystem.

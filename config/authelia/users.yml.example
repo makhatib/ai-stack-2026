@@ -1,0 +1,24 @@
+# AI Stack 2026 — Authelia users.  FILE BACKEND: no self-registration surface.
+#
+# `aistack install` writes the real users.yml from this template as PHASE 1 of
+# the two-phase owner bootstrap (S05):
+#
+#   PHASE 1 (installer)  one owner account, a RANDOM temporary password that
+#                        is written to the file as an argon2id hash and NEVER
+#                        printed, and `disabled: false` with no TOTP enrolled.
+#   PHASE 2 (first login) Authelia forces a password change AND TOTP enrolment
+#                        before any protected route resolves.
+#
+# There is therefore no window in which an account exists that can reach a
+# service using a password the installer printed — because the installer never
+# prints one.  The operator sets the first password themselves through the
+# reset flow the installer opens.
+users:
+  owner:
+    displayname: "Owner"
+    # argon2id hash, written by the installer.  NEVER a plaintext password.
+    password: "__ARGON2_HASH_WRITTEN_BY_INSTALLER__"
+    email: owner@localhost
+    groups:
+      - admins
+      - owner

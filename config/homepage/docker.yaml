@@ -1,0 +1,2 @@
+# DELIBERATELY EMPTY.  Docker discovery is off; there is no docker.sock mount
+# in any profile and CI invariant I6 fails the PR that adds one.

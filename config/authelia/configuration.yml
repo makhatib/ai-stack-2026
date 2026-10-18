@@ -1,0 +1,116 @@
+# AI Stack 2026 — Authelia.  The one locked door.
+#
+# FILE BACKEND = NO SELF-REGISTRATION SURFACE, which is what makes the
+# two-phase owner bootstrap possible (S05): phase 1 writes a user with a
+# temporary password and NO second factor; phase 2 is the owner's first login,
+# which forces both a password change and TOTP enrolment before any protected
+# route resolves.  There is no window in which an account exists that can reach
+# a service with a password the installer printed — because the installer never
+# prints one.
+#
+# Forward-auth is PRIMARY.  Authelia's OIDC provider is open beta with no
+# single-logout [V-252]; OIDC is configured for the apps that speak it, but no
+# route depends on it alone.
+
+theme: light
+
+server:
+  address: "tcp://0.0.0.0:9091"
+  endpoints:
+    authz:
+      forward-auth:
+        implementation: ForwardAuth
+  buffers:
+    read: 4096
+    write: 4096
+
+log:
+  level: info
+  format: json
+  # Never a file inside the container: logs go to stderr so the json-file
+  # driver's 10m/3 rotation is the only retention knob.
+
+totp:
+  issuer: aistack
+  algorithm: sha1
+  digits: 6
+  period: 30
+  skew: 1
+
+authentication_backend:
+  # No self-registration surface.  `aistack user add` writes this file.
+  file:
+    path: /config/users.yml
+    watch: true
+    password:
+      algorithm: argon2
+      argon2:
+        variant: argon2id
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        key_length: 32
+        salt_length: 16
+  password_reset:
+    # No SMTP in the MVP, so a self-service reset would be a dead end that
+    # looks like a feature.  `aistack user reset` is the supported path.
+    disable: true
+
+access_control:
+  # DEFAULT DENY.  A route that is not named below does not resolve, which is
+  # the half of the policy a bypass has to defeat.
+  default_policy: deny
+  rules:
+    # Authelia's own endpoints must be reachable unauthenticated or there is
+    # no way to log in.
+    - domain: '{{ env "AISTACK_HOSTNAME" }}'
+      resources:
+        - "^/authelia/.*$"
+      policy: bypass
+
+    # n8n webhooks: machine callers with a header token, not browser sessions.
+    # Bounded in Caddy before they reach n8n.
+    - domain: '{{ env "AISTACK_HOSTNAME" }}'
+      resources:
+        - "^/n8n/webhook/.*$"
+      policy: bypass
+
+    # Everything a person uses needs the second factor.  `one_factor` is not
+    # used anywhere: the owner's TOTP is enrolled during bootstrap, so there is
+    # no account for which two_factor is an obstacle rather than a control.
+    - domain: '{{ env "AISTACK_HOSTNAME" }}'
+      policy: two_factor
+
+session:
+  name: aistack_session
+  same_site: lax
+  # A1-* exercises these: session expiry, inactivity, and the IdP-outage path.
+  expiration: 8h
+  inactivity: 1h
+  remember_me: 1M
+  cookies:
+    - domain: '{{ env "AISTACK_HOSTNAME" }}'
+      authelia_url: 'https://{{ env "AISTACK_HOSTNAME" }}/authelia'
+      default_redirection_url: 'https://{{ env "AISTACK_HOSTNAME" }}/'
+
+regulation:
+  # Bounded brute-force response.  Not a rate limit on the proxy — this one
+  # counts failures per user, which is the thing being attacked.
+  max_retries: 3
+  find_time: 2m
+  ban_time: 5m
+
+storage:
+  postgres:
+    address: "tcp://postgres:5432"
+    database: authelia
+    username: authelia
+    # password and encryption key arrive by _FILE indirection; see compose.
+
+notifier:
+  # No SMTP in the MVP.  The filesystem notifier writes to a path the operator
+  # reads with `aistack logs authelia` — it is NOT a mail server and the docs
+  # do not imply one.
+  disable_startup_check: true
+  filesystem:
+    filename: /data/notification.txt

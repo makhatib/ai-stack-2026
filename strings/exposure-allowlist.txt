@@ -1,0 +1,10 @@
+# Exposure-token allowlist (final-design §6, I12).
+# Format: <reviewer> | <reason> | <the exact line>
+# Checked by EQUALITY, so a stale entry fails the PR exactly as hard as an
+# unreviewed new line.
+#
+# An entry's conditions are a reason and a named reviewer — NOT semantic
+# agreement with the frozen sentence.  A reviewed, listed-token competing claim
+# can be admitted here on purpose.  That is the second half of F23.
+#
+# (empty — every current exposure sentence lives inside a rendered region)

@@ -1,0 +1,18 @@
+# AI Stack 2026 — Homepage settings.  GENERATED from manifest.yaml.
+#
+# Docker discovery is OFF and there is no docker.sock in any profile (I6).
+# That single property is the biggest privilege removed from the stack this
+# replaces: read access to the containers API returns every container's
+# environment, which is exactly where exception E6 puts two secrets.
+title: AI Stack 2026
+description: Self-hosted AI and automation
+startUrl: /dash
+theme: light
+color: slate
+headerStyle: clean
+hideVersion: true
+disableCollapse: true
+# No quick-launch: it is a search box that forwards a query somewhere.
+quicklaunch:
+  hideInternetSearch: true
+  hideVisitURL: true

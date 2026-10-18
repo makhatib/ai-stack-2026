@@ -1,0 +1,10 @@
+# Banned assurance strings (I6, S16).  The SECOND net, under the I12 region
+# equality.  A ban on a phrasing cannot prove uniqueness of a claim; it can
+# only refuse the three phrasings we know are false.
+nothing published
+zero exposure
+reachable from your LAN
+fully isolated
+completely secure
+cannot be reached
+air-gapped

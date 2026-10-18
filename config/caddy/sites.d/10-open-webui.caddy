@@ -1,0 +1,49 @@
+# Open WebUI — the product's face.  PUBLISHABLE (one of exactly two).
+#
+# Route ordering matters and is asserted by A4: the upload matcher must be
+# evaluated before the catch-all, or the 1 MB general body limit silently
+# applies to document uploads and every upload over 1 MB 413s.
+
+@owui_upload path /api/v1/files* /api/v1/files/*
+handle @owui_upload {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	# limits.yaml v1 — HTTP request body, upload route: 50 MB.
+	request_body {
+		max_size 50MB
+	}
+	reverse_proxy open-webui:8080
+}
+
+handle / {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	# limits.yaml v1 — HTTP request body, general: 1 MB.
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy open-webui:8080
+}
+
+handle /api/* {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy open-webui:8080
+}
+
+handle /ws/* {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	reverse_proxy open-webui:8080
+}

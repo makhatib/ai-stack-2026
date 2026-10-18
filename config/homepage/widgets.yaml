@@ -1,0 +1,9 @@
+# DELIBERATELY EMPTY (D4).
+#
+# NO WIDGETS AND NO HEALTH DOTS.  A widget is an outbound, credentialled call
+# from the dashboard to every service it decorates — it needs an API key for
+# each one, stored in the dashboard, which turns the front door into the place
+# that holds every key.  A health dot is the same call on a timer.
+#
+# `aistack status` and `aistack doctor` answer "is it up?" from outside the
+# browser, with no credential anywhere near the page.

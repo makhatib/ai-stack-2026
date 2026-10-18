@@ -1,0 +1,10 @@
+# NEVER COMMITTED.  `secrets/` is 0700 root:root and holds every generated
+# value; `.env` holds the rendered pin block and the database passwords.
+secrets/
+.env
+.runtime/
+backups/
+config/authelia/users.yml
+config/image-facts.yaml.bak
+*.bak
+.backup-keys-confirmed

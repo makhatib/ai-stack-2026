@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# AI Stack 2026 — the one command.
+#
+# Lifecycle, status and support live here so that no viewer ever has to type a
+# raw `docker compose` line with the right -f flags in the right order.
+#
+# TWO LOCKS, AND EVERY PATH TAKES THEM IN ONE ORDER: lifecycle, then helper
+# (final-design §2.1).  A process that already holds one passes its open file
+# descriptor down through AISTACK_LOCK_FD_LIFECYCLE / AISTACK_LOCK_FD_HELPER,
+# and the wrapper SKIPS acquisition when the variable is set — so `aistack up`
+# running a helper under its own held lock cannot deadlock against itself.
+# ci/i14_lock_order.sh greps the command implementations for the other order.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+# Where the two locks live.  NOT unconditionally /run/aistack: that needs root
+# to create, and asking for sudo to take a lock would make `aistack up` a
+# privileged operation on a stack whose whole point is that it is not one.  It
+# would also break rootless Docker, which 1.0 wants at Tier A.
+#
+# Both candidates are tmpfs, which is what the design relies on: flock is
+# released by the kernel when the holder dies, and a reboot clears the lock
+# entirely, so there is no stale-lock state to clean up.
+pick_rundir() {
+  if [ -n "${AISTACK_RUNDIR:-}" ]; then printf '%s' "$AISTACK_RUNDIR"; return; fi
+  if [ -w /run ] || [ -d /run/aistack ] && [ -w /run/aistack ]; then
+    printf '/run/aistack'; return
+  fi
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+    printf '%s/aistack' "$XDG_RUNTIME_DIR"; return
+  fi
+  printf '/tmp/aistack-%s' "$(id -u)"
+}
+RUNDIR="$(pick_rundir)"
+LIFECYCLE_LOCK="$RUNDIR/lifecycle.lock"
+HELPER_LOCK="$RUNDIR/helper.lock"
+
+die()  { printf 'aistack: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+[ -f "$ROOT/compose.yaml" ] || die "no compose.yaml at $ROOT"
+
+ensure_rundir() {
+  [ -d "$RUNDIR" ] && [ -w "$RUNDIR" ] && return 0
+  mkdir -p "$RUNDIR" 2>/dev/null && return 0
+  die "cannot create a lock directory at $RUNDIR.
+Set AISTACK_RUNDIR to a writable path on a tmpfs and try again.
+It must be a tmpfs: the locks are released by the kernel when a holder dies,
+and a reboot must clear them, so a lock file on persistent storage would
+survive a crash as state nobody cleans up."
+}
+
+dc() {
+  # One place that knows the compose invocation.  Every caller goes through it,
+  # so there is exactly one definition of "the project".
+  ( cd "$ROOT" && docker compose "$@" )
+}
+
+# --- locks ------------------------------------------------------------------
+# Order: LIFECYCLE, then HELPER.  Never the reverse.
+
+with_lifecycle_lock() {
+  # $1 = sh|ex, rest = command
+  local mode="$1"; shift
+  if [ -n "${AISTACK_LOCK_FD_LIFECYCLE:-}" ]; then
+    "$@"; return $?
+  fi
+  ensure_rundir
+  exec {fd}>>"$LIFECYCLE_LOCK"
+  local flag=-s; [ "$mode" = ex ] && flag=-x
+  flock "$flag" "$fd" || die "could not take the lifecycle lock"
+  AISTACK_LOCK_FD_LIFECYCLE="$fd" "$@"
+  local rc=$?
+  exec {fd}>&-
+  return $rc
+}
+
+with_helper_lock() {
+  # At most ONE helper exists at any instant.  `aistack up` holds this too, so
+  # no helper runs during startup verification.
+  if [ -n "${AISTACK_LOCK_FD_HELPER:-}" ]; then
+    "$@"; return $?
+  fi
+  ensure_rundir
+  exec {fd}>>"$HELPER_LOCK"
+  flock -x "$fd" || die "another helper is running; at most one may exist at a time"
+  AISTACK_LOCK_FD_HELPER="$fd" "$@"
+  local rc=$?
+  exec {fd}>&-
+  return $rc
+}
+
+# --- pins -------------------------------------------------------------------
+
+render_pins() {
+  # Render versions.env into the delimited block in .env.  I4 asserts the
+  # rendered block matches the source; `doctor` re-checks, which catches a
+  # Renovate PR merged without a re-render.
+  local env="$ROOT/.env"
+  [ -f "$env" ] || die ".env not found — run 'aistack install' first"
+  python3 - "$ROOT/versions.env" "$env" <<'PY'
+import sys, re
+src, env = sys.argv[1], sys.argv[2]
+pins = []
+for line in open(src):
+    s = line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if re.match(r'^[A-Z0-9_]+=', s):
+        pins.append(s)
+block = (
+    "# AISTACK-PINS:BEGIN\n"
+    "# RENDERED FROM versions.env BY `aistack install|update|pin`.  DO NOT EDIT.\n"
+    + "\n".join(pins) + "\n"
+    "# AISTACK-PINS:END\n"
+)
+text = open(env).read()
+pat = re.compile(r"# AISTACK-PINS:BEGIN.*?# AISTACK-PINS:END\n", re.S)
+if pat.search(text):
+    text = pat.sub(block, text)
+else:
+    text = text.rstrip("\n") + "\n\n" + block
+open(env, "w").write(text)
+print("rendered %d pins into .env" % len(pins))
+PY
+  chmod 0600 "$env"
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_up() {
+  with_lifecycle_lock sh _up "$@"
+}
+_up() {
+  # The drill must be excluded BY THE LOCK MODE, not by a count of holders.
+  # We hold shared; the drill holds exclusive; the kernel serialises them.
+  # The opposing-project check runs INSIDE the hold, which is what closes the
+  # check-then-act race.
+  if docker ps -a --format '{{.Names}}' | grep -q '^restore-drill-'; then
+    die "a restore drill is running or was left behind: $(docker ps -a --format '{{.Names}}' | grep '^restore-drill-' | tr '\n' ' ')
+Serving will not start while drill containers exist.  Run 'aistack drill clean'."
+  fi
+  info "Starting (profiles: ${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' "$ROOT/.env" 2>/dev/null | cut -d= -f2-)})"
+  dc up -d --remove-orphans
+  _health_gate
+}
+
+_health_gate() {
+  # Bounded.  A health gate that waits forever is a hang with a progress bar.
+  local deadline=$(( SECONDS + 300 )) unhealthy
+  info "Waiting for health (up to 300s)..."
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    unhealthy="$(dc ps --format json 2>/dev/null \
+      | python3 -c '
+import json,sys
+bad=[]
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: d=json.loads(line)
+    except Exception: continue
+    h=(d.get("Health") or "").lower(); s=(d.get("State") or "").lower()
+    if s!="running" or h in ("starting","unhealthy"):
+        bad.append("%s(%s%s)"%(d.get("Service"),s,"/"+h if h else ""))
+print(" ".join(bad))' 2>/dev/null || true)"
+    [ -z "$unhealthy" ] && { info "All services healthy."; return 0; }
+    sleep 5
+  done
+  # Name the service and print its last 50 REDACTED lines, plus the exact
+  # rollback command.  A health-gate failure that says only "unhealthy" sends
+  # the viewer to a screenshot of their terminal, which is the thing
+  # support-bundle exists to replace.
+  info ""
+  info "NOT HEALTHY after 300s: $unhealthy"
+  for svc in $unhealthy; do
+    svc="${svc%%(*}"
+    info ""
+    info "--- last 50 lines of $svc (redacted) ---"
+    dc logs --tail 50 "$svc" 2>&1 | "$ROOT/scripts/redact.sh" || true
+  done
+  info ""
+  info "To roll back to the previous pins:   aistack rollback"
+  info "To collect a shareable artefact:     aistack support-bundle"
+  return 1
+}
+
+cmd_down()    { with_lifecycle_lock ex dc down --remove-orphans; }
+cmd_restart() { cmd_down; cmd_up; }
+cmd_logs()    { dc logs "${@:---tail=200}" | "$ROOT/scripts/redact.sh"; }
+cmd_config()  { dc config "$@"; }
+cmd_ps()      { dc ps; }
+
+cmd_status() {
+  # Steady-state and helper counts are printed SEPARATELY, and the lifecycle
+  # mode currently held is named (final-design §2.1).  One number could not
+  # carry all three honestly.
+  local steady helpers mode
+  steady="$(dc ps --services --filter status=running 2>/dev/null | grep -vc -E '^(model-puller|backup-helper|agentgateway-verify)$' || true)"
+  helpers="$(docker ps --format '{{.Names}}' | grep -cE '^aistack-(model-puller|backup-helper|agentgateway-verify)' || true)"
+  if   [ -e "$LIFECYCLE_LOCK" ] && flock -n -x "$LIFECYCLE_LOCK" true 2>/dev/null; then mode="free"
+  elif [ -e "$LIFECYCLE_LOCK" ] && flock -n -s "$LIFECYCLE_LOCK" true 2>/dev/null; then mode="shared (serving)"
+  elif [ -e "$LIFECYCLE_LOCK" ]; then mode="exclusive (a drill holds it)"
+  else mode="free (no lock file)"; fi
+
+  printf '\nAI Stack 2026\n'
+  printf '  steady-state services running : %s\n' "${steady:-0}"
+  printf '  helpers running               : %s   (ceiling 1 — the helper lock)\n' "${helpers:-0}"
+  printf '  lifecycle lock                : %s\n' "$mode"
+  printf '  profiles                      : %s\n' "$(grep -E '^COMPOSE_PROFILES=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- || echo '(none)')"
+  printf '\n'
+  sed -n '/AISTACK-LOCAL-MODE:BEGIN/,/AISTACK-LOCAL-MODE:END/p' "$ROOT/.env" 2>/dev/null \
+    | grep -v 'AISTACK-LOCAL-MODE' | sed 's/^# \?/  /'
+  printf '\n'
+  dc ps
+}
+
+cmd_models() {
+  case "${1:-}" in
+    pull)
+      shift
+      [ $# -ge 1 ] || die "usage: aistack models pull <name>"
+      with_lifecycle_lock sh with_helper_lock _model_pull "$@"
+      ;;
+    list) docker run --rm --network aistack-inference \
+            "${OLLAMA_IMAGE}:${OLLAMA_TAG}@${OLLAMA_DIGEST}" \
+            sh -c 'OLLAMA_HOST=http://ollama:11434 ollama list' ;;
+    *) die "usage: aistack models {pull <name>|list}" ;;
+  esac
+}
+_model_pull() {
+  # Ollama itself sits on `inference`, which is internal and has NO route off
+  # the host.  The puller is a SHORT-LIVED helper on `egress` writing the same
+  # named volume.  Pulling a model from the Open WebUI UI does not work, and
+  # the docs say so rather than leaving the viewer to discover it.
+  local name="$1"
+  # shellcheck disable=SC1091
+  source "$ROOT/versions.env"
+
+  # The `egress` bridge is created HERE, for the life of the helper, rather
+  # than declared in compose.
+  #
+  # This is deliberate and it is stronger than the declared form: compose
+  # prunes a network no service references, so declaring `egress` there and
+  # attaching nothing to it produced a bridge that either did not exist or
+  # existed permanently depending on compose's mood.  Creating it per-pull
+  # means THE ONE NAT-CAPABLE BRIDGE IN THE STACK DOES NOT EXIST AT STEADY
+  # STATE AT ALL.  `edge` is then the only non-internal bridge while the stack
+  # is merely running, which is a smaller surface than the design assumed, and
+  # I11 checks the flags of whichever bridges exist.
+  if ! docker network inspect aistack-egress >/dev/null 2>&1; then
+    docker network create --subnet 172.31.246.0/29 aistack-egress >/dev/null
+  fi
+  trap 'docker network rm aistack-egress >/dev/null 2>&1 || true' RETURN
+
+  info "Pulling '$name' through the model-puller helper (egress), not through Ollama."
+  docker run --rm --name aistack-model-puller \
+    --network aistack-egress \
+    -v aistack-ollama-models:/root/.ollama \
+    --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    "${OLLAMA_IMAGE}:${OLLAMA_TAG}@${OLLAMA_DIGEST}" \
+    sh -c "ollama serve & sleep 3; ollama pull '$name'; pkill ollama"
+}
+
+cmd_pin()    { render_pins; }
+cmd_update() { "$ROOT/scripts/update.sh" "$@"; }
+cmd_rollback(){ "$ROOT/scripts/rollback.sh" "$@"; }
+cmd_backup() { with_lifecycle_lock sh with_helper_lock "$ROOT/scripts/backup.sh" "$@"; }
+cmd_restore(){ with_lifecycle_lock ex "$ROOT/scripts/restore.sh" "$@"; }
+cmd_drill()  { "$ROOT/scripts/drill.sh" "$@"; }
+cmd_doctor() { "$ROOT/scripts/doctor.sh" "$@"; }
+cmd_security_check() { "$ROOT/scripts/security-check.sh" "$@"; }
+cmd_support_bundle() { "$ROOT/scripts/support-bundle.sh" "$@"; }
+cmd_remove() { "$ROOT/scripts/remove.sh" "$@"; }
+
+cmd_manifest() {
+  case "${1:-}" in
+    counts) python3 "$ROOT/ci/manifest_counts.py" "$ROOT" ;;
+    *) die "usage: aistack manifest counts" ;;
+  esac
+}
+
+cmd_render_strings() { "$ROOT/scripts/render-strings.sh" "$@"; }
+
+usage() {
+  cat <<'EOF'
+aistack — AI Stack 2026
+
+  up                  start the stack and wait for health (bounded, 300s)
+  down                stop and remove containers
+  restart             down, then up
+  status              counts, lifecycle lock mode, and what is running
+  ps / logs / config  pass-through, with secrets redacted from logs
+
+  models pull <name>  pull a model through the egress helper (NOT via the UI)
+  models list
+
+  pin                 re-render versions.env into .env
+  update              backup, pull by digest, up, bounded health gate
+  rollback            return to the previous pins
+
+  backup              nightly-style backup, encrypted, HMAC'd inventory
+  restore <archive>   verify then restore; REFUSES without the HMAC key
+  drill run|clean     Tier-A restore drill in a throwaway project
+
+  doctor              health, pins, secret readability, host listeners
+  security-check      image scan + config audit
+  support-bundle      a redacted artefact to send when asking for help
+  remove              uninstall, with an explicit prompt about volumes
+
+  manifest counts     regenerate the counts from manifest.yaml
+  render-strings      re-render the frozen local-mode copy into every surface
+EOF
+}
+
+case "${1:-}" in
+  up) shift; cmd_up "$@" ;;
+  down) shift; cmd_down "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  ps) shift; cmd_ps "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
+  config) shift; cmd_config "$@" ;;
+  models) shift; cmd_models "$@" ;;
+  pin) shift; cmd_pin "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  rollback) shift; cmd_rollback "$@" ;;
+  backup) shift; cmd_backup "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  drill) shift; cmd_drill "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  security-check) shift; cmd_security_check "$@" ;;
+  support-bundle) shift; cmd_support_bundle "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  manifest) shift; cmd_manifest "$@" ;;
+  render-strings) shift; cmd_render_strings "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) die "unknown command '$1' (try: aistack help)" ;;
+esac

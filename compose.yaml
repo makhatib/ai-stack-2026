@@ -1,0 +1,596 @@
+# AI Stack 2026 — MVP compose.
+#
+# GENERATED-FROM: manifest.yaml.  Edit the manifest, then re-run
+# `aistack manifest render` and the CI invariants in ci/.  A service, bridge or
+# count that exists here and not there fails the PR (I1, I1b, I3, I11).
+#
+# SCOPE: 9 containers.  core 8 + knowledge 1.  The `agents` group is NOT here:
+# gate G-AGENTS failed on 2026-10-18 against the pinned agentgateway digest
+# (see gate/G-AGENTS-result.json), so per final-design §0.1/§2.1/F4 it leaves
+# both the MVP and 1.0.
+#
+# TIER A.  This file makes NO containment claim.  `internal: true` removes a
+# bridge's default route and masquerade, which is why nothing on one has a NAT'd
+# path to the internet.  It is NOT a claim about the LAN, about CGNAT or
+# link-local metadata addresses, about host services listening on 0.0.0.0 or ::,
+# or about a container connecting back to another member of its own /29.  Those
+# are Tier B and need the host firewall rules, which this file does not install
+# and the MVP does not require.
+
+name: aistack
+
+# ---------------------------------------------------------------------------
+# The hardening anchor (final-design §5.6).  EVERY service merges this.  Every
+# deviation is an entry in security-exceptions.yaml that a reviewer can grep
+# for — there are no quiet overrides.
+# ---------------------------------------------------------------------------
+x-hardened: &hardened
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  # ===========================================================================
+  # core — no profile key, always runs
+  # ===========================================================================
+
+  caddy:
+    <<: *hardened
+    image: ${CADDY_IMAGE:?pin missing}:${CADDY_TAG:?pin missing}@${CADDY_DIGEST:?pin missing}
+    container_name: aistack-caddy
+    # THE ONLY SERVICE IN THE STACK THAT DECLARES `ports:` (I2).
+    # Bound to an explicit address, never 0.0.0.0 — the installer writes
+    # AISTACK_BIND_ADDR and refuses to write a wildcard.
+    ports:
+      - "${AISTACK_BIND_ADDR:?bind address missing}:443:443"
+      - "${AISTACK_BIND_ADDR:?bind address missing}:80:80"
+    # E1: one capability, to bind 443 as non-root.  Nothing else.
+    cap_add: [NET_BIND_SERVICE]
+    networks: [edge, apps]
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config/caddy/sites.d:/etc/caddy/sites.d:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    environment:
+      AISTACK_HOSTNAME: ${AISTACK_HOSTNAME:?hostname missing}
+    depends_on:
+      authelia:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.50"
+    healthcheck:
+      # `caddy validate` proves the running config parses AND that the admin
+      # endpoint is off, which an HTTP 200 would not.
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  authelia:
+    <<: *hardened
+    image: ${AUTHELIA_IMAGE:?pin missing}:${AUTHELIA_TAG:?pin missing}@${AUTHELIA_DIGEST:?pin missing}
+    container_name: aistack-authelia
+    # NO `cap_add` AT ALL, and that took measuring rather than assuming.
+    #
+    # The official entrypoint ends with:
+    #   if [ -n "$$1" ] && [ "$$1" != "--config" ]; then exec "$$@"
+    #   elif [ "$$(id -u)" != 0 ] ...; then exec authelia "$$@"
+    #   else chown -R ... /config; exec su-exec ... authelia "$$@"; fi
+    #
+    # The default path takes the LAST branch: it chowns /config (which is a
+    # read-only mount, so it logs four errors) and then calls su-exec, which
+    # needs CAP_SETUID and CAP_SETGID and dies with
+    # "su-exec: setgroups(0): Operation not permitted" without them.
+    #
+    # Passing an explicit command whose first word is not `--config` takes the
+    # FIRST branch instead: a plain exec, as the user we are already running
+    # as. No chown, no su-exec, and therefore NO CAPABILITIES — strictly less
+    # privilege than granting the two that make the default path work.
+    command: ["authelia", "--config", "/config/configuration.yml"]
+    networks: [edge, apps, data]
+    volumes:
+      - ./config/authelia/configuration.yml:/config/configuration.yml:ro
+      - ./config/authelia/users.yml:/config/users.yml:ro
+      - authelia-data:/data
+      # MEASURED: Authelia writes /app/.healthcheck.env at startup so that
+      # `authelia health` knows its own scheme, host and port. Under
+      # `read_only: true` that write fails and the process exits during
+      # startup checks — and it does NOT say so: the only log line is
+      # "Errors occurred performing startup checks" with a Go stack.
+      #
+      # A tmpfs cannot be mounted at a file path, and a tmpfs over /app would
+      # hide the binary, so this is a writable bind of one file.
+      - ./.runtime/authelia-healthcheck.env:/app/.healthcheck.env
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    # Authelia supports _FILE indirection for every secret it needs, so none of
+    # them is an environment variable and none is in .env (E6 covers only
+    # open-webui and litellm, which do not).
+    # Authelia's pinned image runs as root (Config.User is empty and there is
+    # no entrypoint privilege drop), so 0:0 is correct here and is RECORDED
+    # rather than defaulted.  config/image-facts.yaml carries the measurement.
+    secrets:
+      - source: authelia_jwt_secret
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: authelia_session_secret
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: authelia_storage_encryption_key
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: authelia_storage_password
+        uid: "0"
+        gid: "0"
+        mode: 0400
+    environment:
+      # The config templates reference this; without it the rendered cookie
+      # domain is empty and Authelia refuses to start with "option 'domain'
+      # is required" — which does not mention the missing variable at all.
+      AISTACK_HOSTNAME: ${AISTACK_HOSTNAME:?hostname missing}
+      X_AUTHELIA_CONFIG: /config/configuration.yml
+      # REQUIRED for the `{{ env "..." }}` expressions in configuration.yml.
+      # Authelia's config templating is OPT-IN; without this the braces are
+      # passed through verbatim and the container crash-loops on
+      # 'invalid character "{" in host name' — a failure that reads like a
+      # malformed hostname rather than a disabled feature.
+      X_AUTHELIA_CONFIG_FILTERS: template
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /run/secrets/authelia_jwt_secret
+      AUTHELIA_SESSION_SECRET_FILE: /run/secrets/authelia_session_secret
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage_encryption_key
+      AUTHELIA_STORAGE_POSTGRES_PASSWORD_FILE: /run/secrets/authelia_storage_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.50"
+    healthcheck:
+      # NOT `authelia health`: that subcommand DOES NOT EXIST in 4.39.28.
+      # (The binary still writes /app/.healthcheck.env for it at startup,
+      # which is why the read-only bind above is needed even though nothing
+      # reads the file.)  The image is busybox-based, so wget is the probe.
+      test: ["CMD-SHELL", "busybox wget -q -O /dev/null http://127.0.0.1:9091/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    <<: *hardened
+    image: ${POSTGRES_IMAGE:?pin missing}:${POSTGRES_TAG:?pin missing}@${POSTGRES_DIGEST:?pin missing}
+    container_name: aistack-postgres
+    # E7 — MEASURED, not guessed (NOM-258, 2026-10-18).
+    #
+    # The official entrypoint starts as root to chown PGDATA and then drops to
+    # uid 999 via gosu.  Under `cap_drop: ALL` the chown fails with "Operation
+    # not permitted" and the container crash-loops.  Each capability below was
+    # established by bisection against the pinned digest:
+    #
+    #   CHOWN           chown PGDATA to postgres
+    #   SETUID          \ gosu's drop from root to 999
+    #   SETGID          /
+    #   FOWNER          the entrypoint's permission fix-up over PGDATA
+    #   DAC_READ_SEARCH the entrypoint's `find` over an EXISTING PGDATA
+    #
+    # TWO THINGS HERE WERE ONLY RIGHT AFTER BEING MEASURED TWICE.
+    #
+    # (1) BOTH LIFECYCLE PATHS MUST BE TESTED.  The first bisection used a
+    # fresh volume every time and concluded four capabilities were enough.
+    # That set starts a NEW database and then fails on the FIRST RESTART with
+    # "find: '/var/lib/postgresql/data/pgdata': Permission denied" — because
+    # on an existing volume PGDATA is already 0700 owned by uid 999, and root
+    # without a DAC bypass cannot traverse it.  A capability set validated
+    # only against first boot is a container that works until it is restarted.
+    #
+    # (2) DAC_READ_SEARCH, NOT DAC_OVERRIDE.  Both complete the restart path.
+    # DAC_OVERRIDE bypasses read, write AND execute checks on every file in
+    # the container; DAC_READ_SEARCH bypasses only read and directory-search.
+    # The entrypoint needs to traverse and read, not to write, so it gets the
+    # one that cannot be used to overwrite a file it does not own.
+    cap_add: [CHOWN, SETUID, SETGID, FOWNER, DAC_READ_SEARCH]
+    networks: [data]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # `CREATE EXTENSION vector` actually runs here; it is not assumed.
+      - ./config/postgres/init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /run/postgresql:rw,nosuid,size=64m
+    # uid/gid/mode BELOW ARE ADVISORY AND DOCKER COMPOSE IGNORES THEM.
+    #
+    # MEASURED, NOM-258 2026-10-18: `uid`, `gid` and `mode` on a FILE-based
+    # secret are Swarm fields.  `docker compose config` echoes them back
+    # faithfully, which makes them look honoured, and then Compose plain
+    # bind-mounts the host file with its host ownership.  We watched Postgres
+    # crash-loop on "Permission denied" with a config that rendered uid 999.
+    #
+    # So THE HOST FILE MODE IS THE ONLY CONTROL, exactly as S13 says, and
+    # scripts/gen-secrets.sh owns it: 0640 root:<measured-gid> for a non-root
+    # consumer, 0600 root:root for a root one. The values stay here because
+    # they document the required in-container ownership and because they
+    # become load-bearing the day this is run under Swarm — but nothing may
+    # rely on them, and `aistack doctor` verifies readability by ASKING THE
+    # RUNNING SERVICE rather than inferring it from either place.
+    #
+    # 999:999 is MEASURED: `getent passwd postgres` in the pinned image.
+    # NOT the image's Config.User, which is empty because the entrypoint
+    # starts as root and re-executes as postgres via gosu.
+    secrets:
+      - source: postgres_superuser_password
+        uid: "999"
+        gid: "999"
+        mode: 0400
+      - source: app_db_passwords
+        uid: "999"
+        gid: "999"
+        mode: 0400
+    environment:
+      POSTGRES_USER: aistack_admin
+      POSTGRES_DB: aistack
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      # Read by the init scripts to create ONE NON-SUPERUSER ROLE PER APP.
+      # No app ever connects as a superuser.
+      APP_DB_PASSWORDS_FILE: /run/secrets/app_db_passwords
+      PGDATA: /var/lib/postgresql/data/pgdata
+    mem_limit: 2g
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aistack_admin -d aistack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  homepage:
+    <<: *hardened
+    image: ${HOMEPAGE_IMAGE:?pin missing}:${HOMEPAGE_TAG:?pin missing}@${HOMEPAGE_DIGEST:?pin missing}
+    container_name: aistack-homepage
+    networks: [apps]
+    volumes:
+      # Static, GENERATED from manifest.yaml.  Docker discovery is off and
+      # there is no docker.sock anywhere in any profile (I6) — which is the
+      # single change that removes the original stack's worst privilege.
+      #
+      # Mounted FILE BY FILE rather than as a directory.  Homepage writes its
+      # logs into /app/config/logs, so a read-only bind over the whole
+      # directory makes the container fail to start at all — and the obvious
+      # repair, a tmpfs at /app/config/logs, cannot be created underneath a
+      # read-only mount.  Per-file binds keep every config file read-only
+      # while leaving the directory itself writable, which is the property we
+      # actually wanted: the FILES are immutable, not the inode they sit in.
+      - ./config/homepage/settings.yaml:/app/config/settings.yaml:ro
+      - ./config/homepage/services.yaml:/app/config/services.yaml:ro
+      - ./config/homepage/widgets.yaml:/app/config/widgets.yaml:ro
+      - ./config/homepage/docker.yaml:/app/config/docker.yaml:ro
+      - ./config/homepage/bookmarks.yaml:/app/config/bookmarks.yaml:ro
+    tmpfs:
+      - /app/config:rw,nosuid,size=16m
+      - /tmp:rw,noexec,nosuid,size=16m
+    environment:
+      HOMEPAGE_ALLOWED_HOSTS: ${AISTACK_HOSTNAME:?hostname missing}
+    mem_limit: 256m
+    cpus: "0.50"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  open-webui:
+    <<: *hardened
+    image: ${OPEN_WEBUI_IMAGE:?pin missing}:${OPEN_WEBUI_TAG:?pin missing}@${OPEN_WEBUI_DIGEST:?pin missing}
+    container_name: aistack-open-webui
+    # No `agents` bridge: G-AGENTS failed, so there is no gateway to call.
+    networks: [apps, gateway, data, parse-owui]
+    volumes:
+      - openwebui-data:/app/backend/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    # E6: Open WebUI has no _FILE indirection, so its secrets are environment
+    # variables — from a root-owned 0640 env_file, NEVER from .env and never
+    # from the shell.  Bounded only because no container can reach the Docker
+    # API; weakening that re-opens the exception.
+    env_file:
+      - ./secrets/open-webui.env
+    environment:
+      # The model front door is LiteLLM and only LiteLLM.
+      OPENAI_API_BASE_URL: http://litellm:4000/v1
+      ENABLE_OLLAMA_API: "false"
+      # I9: false in EVERY shipped profile.  The group that would have turned
+      # this on (`web`) is deferred, so there is no profile where true is
+      # correct.
+      ENABLE_WEB_SEARCH: "false"
+      ENABLE_RAG_WEB_SEARCH: "false"
+      # RAG goes through Docling into pgvector over the one `parse` bridge.
+      VECTOR_DB: pgvector
+      CONTENT_EXTRACTION_ENGINE: docling
+      DOCLING_SERVER_URL: http://docling-serve:5001
+      DATABASE_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD:?missing}@postgres:5432/openwebui
+      PGVECTOR_DB_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD:?missing}@postgres:5432/openwebui
+      # Authelia fronts this; Open WebUI's own signup surface stays shut.
+      ENABLE_SIGNUP: "false"
+      ENABLE_LOGIN_FORM: "false"
+      WEBUI_AUTH_TRUSTED_EMAIL_HEADER: Remote-Email
+      WEBUI_AUTH_TRUSTED_NAME_HEADER: Remote-Name
+      WEBUI_URL: https://${AISTACK_HOSTNAME:?hostname missing}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    mem_limit: 4g
+    cpus: "2.0"
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  ollama:
+    <<: *hardened
+    image: ${OLLAMA_IMAGE:?pin missing}:${OLLAMA_TAG:?pin missing}@${OLLAMA_DIGEST:?pin missing}
+    container_name: aistack-ollama
+    # `inference` is internal: Ollama has NO path to the registry from here.
+    # Model weights arrive through the short-lived model-puller helper on
+    # `egress`, writing the same named volume (final-design §5.4).
+    # Pulling a model from the Open WebUI UI does not work, and the docs say so.
+    networks: [inference]
+    volumes:
+      - ollama-models:/root/.ollama
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    environment:
+      # Default is 3; one is correct on a CPU-only box.
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_HOST: "0.0.0.0:11434"
+    mem_limit: 8g
+    cpus: "4.0"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  litellm:
+    <<: *hardened
+    image: ${LITELLM_IMAGE:?pin missing}:${LITELLM_TAG:?pin missing}@${LITELLM_DIGEST:?pin missing}
+    container_name: aistack-litellm
+    # NO `egress`.  Adding a cloud provider adds that bridge and MAKES TIER B
+    # MANDATORY — the installer preflight enforces it, this file does not
+    # quietly allow it.
+    networks: [gateway, inference, data]
+    volumes:
+      - ./config/litellm/config.yaml:/app/config.yaml:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    # E6: no _FILE indirection upstream.
+    env_file:
+      - ./secrets/litellm.env
+    environment:
+      DATABASE_URL: postgresql://litellm:${LITELLM_DB_PASSWORD:?missing}@postgres:5432/litellm
+      STORE_MODEL_IN_DB: "True"
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 1g
+    cpus: "1.0"
+    healthcheck:
+      # MEASURED: the pinned LiteLLM image has NO curl and no wget, so the
+      # obvious probe reports "unhealthy" forever while the service is fine.
+      # Python is guaranteed present — it is what the application runs on.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  n8n:
+    <<: *hardened
+    image: ${N8N_IMAGE:?pin missing}:${N8N_TAG:?pin missing}@${N8N_DIGEST:?pin missing}
+    container_name: aistack-n8n
+    # NO `egress` in the MVP, and no `agents` bridge (G-AGENTS failed).
+    networks: [apps, gateway, data]
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./workflows:/opt/aistack/workflows:ro
+      - ./samples:/opt/aistack/samples:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      # MEASURED: n8n compiles static assets into ~/.cache during startup.
+      # Under `read_only: true` that mkdir fails with ENOENT and the process
+      # exits — the named volume at /home/node/.n8n does not make its SIBLING
+      # writable, which is easy to assume and wrong.
+      - /home/node/.cache:rw,nosuid,size=256m,uid=1000,gid=1000
+    # 1000:1000 is MEASURED: the `node` user in the pinned n8n image.
+    secrets:
+      - source: n8n_encryption_key
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
+    environment:
+      # REGULAR MODE ONLY (C3).  No queue mode, no worker.
+      EXECUTIONS_MODE: regular
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?missing}
+      N8N_HOST: ${AISTACK_HOSTNAME:?hostname missing}
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${AISTACK_HOSTNAME:?hostname missing}/n8n/
+      N8N_PROXY_HOPS: "1"
+      # The MCP Server Trigger is off.  n8n is the only place a mutating action
+      # can run, and it runs it behind the approval envelope.
+      N8N_MCP_SERVER_ENABLED: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_SECURE_COOKIE: "true"
+      # limits.yaml v1: agent wall clock per run.
+      EXECUTIONS_TIMEOUT: "300"
+      EXECUTIONS_TIMEOUT_MAX: "900"
+      GENERIC_TIMEZONE: ${AISTACK_TZ:-UTC}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ===========================================================================
+  # knowledge
+  # ===========================================================================
+
+  docling-serve:
+    <<: *hardened
+    image: ${DOCLING_IMAGE:?pin missing}:${DOCLING_TAG:?pin missing}@${DOCLING_DIGEST:?pin missing}
+    container_name: aistack-docling
+    profiles: [knowledge]
+    # One pairwise /29 with Open WebUI.  `parse-agw` — its second bridge in the
+    # design — is deferred with the `agents` group, so in this build Docling has
+    # exactly one peer.
+    #
+    # What that buys, stated at its own size: Docling has NO NAT'd path to the
+    # internet at either tier, and can reach no container other than Open WebUI.
+    # It CAN attempt a connection back to Open WebUI's authenticated port — they
+    # share the /29 — and at Tier A it can attempt a connection to a host
+    # listener bound on a wildcard address.  The design makes no claim either
+    # way about LAN addresses.  A disabled URL-fetch setting constrains a
+    # HEALTHY parser; it is not containment of a compromised one.
+    networks: [parse-owui]
+    volumes:
+      - docling-models:/opt/app-root/src/.cache
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "false"
+      # It receives bytes only.
+      DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS: "false"
+      DOCLING_SERVE_MAX_SYNC_WAIT: "120"
+      UVICORN_HOST: "0.0.0.0"
+      UVICORN_PORT: "5001"
+    mem_limit: 4g
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# ---------------------------------------------------------------------------
+# Bridges.  `internal:` is mandated by each bridge's own `zone_policy` in
+# manifest.yaml, NOT by its class — ui-comfy and ui-vpn are both class `ui` and
+# need opposite flags, so a boolean per class could not work.  I11 asserts every
+# flag here equals what its zone_policy mandates.
+#
+# TWO bridges in this build are non-internal: `edge` (published) and `egress`
+# (nat_egress).  Neither carries a service with untrusted_input: yes — that is
+# invariant I7, and it is the whole of the MVP's egress story.
+# ---------------------------------------------------------------------------
+networks:
+  edge:
+    name: aistack-edge
+    # zone_policy: published — carries caddy's published ports.
+    internal: false
+  apps:
+    name: aistack-apps
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+  gateway:
+    name: aistack-gateway
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+  inference:
+    name: aistack-inference
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+  data:
+    name: aistack-data
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+  parse-owui:
+    name: aistack-parse-owui
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+    # Fixed /29 so a Tier-B rule can match it (I8).  Two addressable hosts.
+    ipam:
+      config:
+        - subnet: 172.31.244.0/29
+  # `egress` IS DELIBERATELY NOT DECLARED HERE.
+  #
+  # zone_policy: nat_egress.  Its only member is the short-lived model-puller.
+  # Compose prunes a network no service references, so declaring it here and
+  # attaching nothing to it gives a bridge whose existence depends on compose's
+  # pruning behaviour rather than on the design.  `aistack models pull` creates
+  # 172.31.246.0/29 for the life of the helper and removes it afterwards.
+  #
+  # The consequence is worth stating because it is better than the design
+  # assumed: THE ONE NAT-CAPABLE BRIDGE IN THE STACK DOES NOT EXIST WHILE THE
+  # STACK IS MERELY RUNNING.  At steady state `edge` is the only non-internal
+  # bridge.  That is still not a containment claim — see the header.
+
+volumes:
+  postgres-data:   { name: aistack-postgres-data }
+  n8n-data:        { name: aistack-n8n-data }
+  openwebui-data:  { name: aistack-openwebui-data }
+  caddy-data:      { name: aistack-caddy-data }
+  caddy-config:    { name: aistack-caddy-config }
+  authelia-data:   { name: aistack-authelia-data }
+  ollama-models:   { name: aistack-ollama-models }
+  docling-models:  { name: aistack-docling-models }
+
+# ---------------------------------------------------------------------------
+# File-based secrets at /run/secrets/<name>, for everything that supports a
+# _FILE indirection.  Postgres, n8n and Authelia all do.  Open WebUI and LiteLLM
+# do not — that is exception E6, and they use a root-owned 0640 env_file.
+#
+# File MODE is per service, not a blanket 0600 (S13): the installer writes
+# 0640 root:<service-gid> where the consumer is non-root and 0600 root:root
+# where it runs as root.  A blanket 0600 and "each service can read its own
+# secret" cannot both be true for a non-root container.
+# ---------------------------------------------------------------------------
+secrets:
+  postgres_superuser_password:
+    file: ./secrets/postgres_superuser_password
+  app_db_passwords:
+    file: ./secrets/app_db_passwords
+  n8n_encryption_key:
+    file: ./secrets/n8n_encryption_key
+  authelia_jwt_secret:
+    file: ./secrets/authelia_jwt_secret
+  authelia_session_secret:
+    file: ./secrets/authelia_session_secret
+  authelia_storage_encryption_key:
+    file: ./secrets/authelia_storage_encryption_key
+  authelia_storage_password:
+    file: ./secrets/authelia_storage_password

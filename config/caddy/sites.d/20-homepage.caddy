@@ -1,0 +1,19 @@
+# Homepage — the viewer's front door.  PUBLISHABLE (the second of exactly two).
+#
+# Static generated services.yaml, Docker discovery off, NO WIDGETS AND NO
+# HEALTH DOTS (D4): a widget is an outbound credentialled call from the
+# dashboard to every service it decorates, and a health dot is the same call on
+# a timer.  `aistack status` and `doctor` already answer that question from
+# outside the browser.
+
+handle /dash* {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	uri strip_prefix /dash
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy homepage:3000
+}

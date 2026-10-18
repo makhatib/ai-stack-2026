@@ -1,0 +1,21 @@
+# Committed exposure tokens (final-design §6, I12).
+# Any line OUTSIDE an AISTACK-LOCAL-MODE region, in any release-manifest file,
+# matching one of these fails CI unless that exact line is in
+# exposure-allowlist.txt with a reason and a named reviewer.
+#
+# READ THIS BEFORE ADDING A SENTENCE ABOUT EXPOSURE:
+# This is a check over a LIST, and a list is not a language.  A sentence making
+# a competing exposure claim in words this file does not contain PASSES — e.g.
+# "Every phone on your Wi-Fi can open the dashboard, guaranteed."  That residual
+# is F23 and its mitigation is a RECORDED RELEASE COPY REVIEW, labelled
+# detective rather than preventive.  Do not read a green CI run as "the
+# canonical sentence is the only exposure claim on the page".  It is not.
+publish
+expose
+internet
+public
+LAN
+local network
+other devices
+reachable
+accessible

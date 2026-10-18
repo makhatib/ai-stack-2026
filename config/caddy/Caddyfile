@@ -1,0 +1,87 @@
+# AI Stack 2026 — Caddy.
+#
+# STATIC.  Nothing in this stack reads docker.sock, so this file is written by
+# the installer and never by discovery.  That single property removes the
+# original stack's worst privilege.
+#
+# Official unmodified Caddy image.  NO xcaddy build anywhere in v1 (S12) —
+# which is also why there is no DNS-01 wildcard: that needed a custom build.
+
+{
+	# The admin endpoint is a full configuration-rewrite API on a plain HTTP
+	# socket.  It is off.  I6 greps for its re-enablement.
+	admin off
+
+	# local mode: Caddy's internal CA.  No ACME, no public DNS, no CT entry.
+	# `auto_https disable_redirects` is NOT set: :80 -> :443 is wanted.
+	local_certs
+
+	email {$AISTACK_ADMIN_EMAIL:admin@localhost}
+
+	servers {
+		# limits.yaml v1 — HTTP request body, general: 1 MB.  Per-route
+		# overrides for the upload path live in sites.d/.
+		max_header_size 32KB
+	}
+}
+
+# ---------------------------------------------------------------------------
+# The one inbound path.
+# ---------------------------------------------------------------------------
+{$AISTACK_HOSTNAME} {
+
+	# ---- forward-auth ------------------------------------------------------
+	# Authelia is PRIMARY.  Its OIDC provider is still open beta with no
+	# single-logout [V-252], so OIDC is the secondary path for the apps that
+	# speak it, never the only door.
+	#
+	# `copy_headers` is an ALLOWLIST: only these four come back from Authelia.
+	# Anything else a caller tried to inject is dropped by the strip below.
+	@authelia_api path /authelia/api/*
+	handle @authelia_api {
+		uri strip_prefix /authelia
+		reverse_proxy authelia:9091
+	}
+
+	handle_path /authelia/* {
+		reverse_proxy authelia:9091
+	}
+
+	# ---- inbound identity headers are stripped, unconditionally ------------
+	# A client that sends Remote-User gets it removed BEFORE forward-auth runs.
+	# Open WebUI trusts Remote-Email; without this line, so would anyone on the
+	# network.  This is the single most load-bearing block in the file.
+	request_header -Remote-User
+	request_header -Remote-Groups
+	request_header -Remote-Email
+	request_header -Remote-Name
+	request_header -X-Forwarded-User
+	request_header -X-Forwarded-Email
+
+	# ---- routes ------------------------------------------------------------
+	# One route per service, each in its own file under sites.d/.
+	# I5 asserts no sites.d/ template exists for any never-publishable service,
+	# and that no wildcard webhook / editor / REST / form route exists anywhere.
+	import sites.d/*.caddy
+
+	# ---- default deny ------------------------------------------------------
+	# Anything not matched by an imported route is refused here rather than
+	# falling through to a proxy.  A reverse proxy whose default is "try the
+	# next thing" is how an unlisted admin surface gets published.
+	handle {
+		respond "Not found" 404
+	}
+
+	log {
+		output stderr
+		format json
+		# Do not log the query string: document names and search terms are
+		# user content, and `support-bundle` would ship them.
+		level INFO
+	}
+}
+
+# Plain HTTP exists only to redirect.  There is no content on :80.
+http://{$AISTACK_HOSTNAME} {
+	redir https://{host}{uri} permanent
+}

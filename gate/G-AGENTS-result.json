@@ -1,0 +1,29 @@
+{
+  "gate": "G-AGENTS",
+  "source": "final-design NOM-257 \u00a70.1",
+  "run_at": "2026-10-18T14:02:10.500969+00:00",
+  "image": "ghcr.io/agentgateway/agentgateway@sha256:9d3e6044ddcdc0878b1787f77bd401252b95e22684203fb5e874c4c42d2ed90c",
+  "digest": "sha256:9d3e6044ddcdc0878b1787f77bd401252b95e22684203fb5e874c4c42d2ed90c",
+  "checks": {
+    "a_unknown_name_rejection": "pass",
+    "b_changed_definition_unusable": "fail",
+    "c_fail_closed_startup": "pass"
+  },
+  "verdict": "fail",
+  "consequence": "agents leaves the MVP AND 1.0: the MVP is 9 containers, 1.0 is 12. Regenerate counts from manifest.yaml.",
+  "evidence": [
+    "the gateway exposes the locked tool as 'parse_convert' (prefixMode: always)",
+    "tools.lock.json schema hash recorded from the v1 surface: sha256:bbdfc0ae79afecfa0fe1e60d81949f54fc170321ff020ccf30e5fa095c95d1e4",
+    "(a) 'parse:exfiltrate' rejected by the GATEWAY - the backend recorded no tools/call (before=0 after=0)",
+    "(a) 'exfiltrate' rejected by the GATEWAY - the backend recorded no tools/call (before=0 after=0)",
+    "backend flipped to v2 (same tool name, altered inputSchema: adds exfiltrate_to, additionalProperties true)",
+    "tools/list after the flip shows the v2 definition: yes",
+    "(b) FAIL - the gateway dispatched the v2 definition's extra argument to the backend",
+    "(b) MECHANISM: with the backend on v1, an argument forbidden by the advertised schema (additionalProperties:false) was dispatched, and the required 'document' argument was absent. agentgateway 1.6.0 performs NO argument validation against the tool inputSchema; the advertised definition is advisory to the client and the gateway enforces tool NAMES only. (backend calls before=1 after=2)",
+    "(b) detective cross-check: agentgateway-verify against the v2 surface exits 2 (expect non-zero: the recorded schema hash no longer matches). This is DETECTIVE, not the control.",
+    "verify against the matching lock -> exit 0 (expect 0)",
+    "verify against a mismatched lock -> exit 2 (expect non-zero)",
+    "verify against an unreachable gateway -> exit 3 (expect non-zero: unreachable is not 'verified')",
+    "(c) PASS - the verifier fails closed on both mismatch and unreachability"
+  ]
+}
