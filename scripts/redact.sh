@@ -19,9 +19,15 @@ ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 # so a secret is removed because it IS the secret, not because it looked like
 # one.  This is the half that a regex-only redactor misses.
 PROG="$(mktemp)"; trap 'rm -f "$PROG"' EXIT
+UNREADABLE=0
 if [ -d "$ROOT/secrets" ]; then
   while IFS= read -r f; do
     [ -s "$f" ] || continue
+    # The secrets are root-owned on purpose. If we cannot read one, we cannot
+    # blank its literal value, and the shape rules below are all that remain.
+    # COUNT IT AND SAY SO ONCE — the failure mode to avoid is a filter that
+    # quietly becomes weaker and still calls its output redacted.
+    if [ ! -r "$f" ]; then UNREADABLE=$((UNREADABLE + 1)); continue; fi
     case "$(basename "$f")" in
       *.env)
         while IFS='=' read -r _ v; do
@@ -46,5 +52,11 @@ s|postgresql://\([^:]*\):[^@]*@|postgresql://\1:<redacted>@|g
 s|Bearer [A-Za-z0-9._~+/=-]\{12,\}|Bearer <redacted>|g
 s|eyJ[A-Za-z0-9_-]\{10,\}\.[A-Za-z0-9_-]\{10,\}\.[A-Za-z0-9_-]*|<redacted-jwt>|g
 SED
+
+if [ "$UNREADABLE" -gt 0 ]; then
+  printf 'redact: WARNING — %d secret file(s) could not be read, so their literal\n' "$UNREADABLE" >&2
+  printf 'redact: values were NOT blanked. Only the shape-based rules applied.\n' >&2
+  printf 'redact: re-run with sudo for full redaction.\n' >&2
+fi
 
 exec sed -f "$PROG"

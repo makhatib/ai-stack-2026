@@ -7,6 +7,33 @@
 # command by name.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"; cd "$ROOT"
+# REFUSE RATHER THAN PRODUCE A WEAKER BUNDLE.
+#
+# The redactor blanks the LITERAL VALUE of every secret, which it can only do
+# if it can read them — and they are root-owned precisely so that nothing else
+# can. Run unprivileged, the filter silently falls back to shape rules alone
+# and still produces a file called "support-bundle", which someone will then
+# email to a stranger.
+#
+# A bundle that is less redacted than it claims is worse than no bundle.
+UNREADABLE=()
+while IFS= read -r f; do [ -r "$f" ] || UNREADABLE+=("$f"); done \
+  < <(find "$ROOT/secrets" -type f 2>/dev/null)
+if [ "${#UNREADABLE[@]}" -gt 0 ]; then
+  cat >&2 <<EOF
+
+support-bundle: refusing to run.
+
+${#UNREADABLE[@]} secret file(s) cannot be read by $(id -un), so the redactor
+could not blank their literal values and the bundle would be less redacted
+than its name implies. The files are root-owned on purpose.
+
+    sudo bin/aistack support-bundle
+
+EOF
+  exit 1
+fi
+
 OUT="$ROOT/support-bundle-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 

@@ -73,6 +73,33 @@ if docker ps --format '{{.Names}}' | grep -q '^aistack-n8n$'; then
   fi
 fi
 
+# THE ONE FAILURE THAT STOPS EVERY COMMAND, WITH THE LEAST USEFUL MESSAGE.
+# An `env_file` is read by the Docker CLI as the INVOKING user, not by the
+# container.  If the operator cannot read it, `aistack up` creates nothing and
+# prints only
+#     open /…/secrets/litellm.env: permission denied
+# MEASURED (NOM-258): installing from a root shell rather than through sudo
+# left these files root:root 0640 and did exactly that — and it also turned
+# `security-check`'s scan half into a clean report over zero images, because
+# the image list it iterates comes from the same failing command.  Detecting
+# it here is the difference between a one-line repair and an evening lost.
+UNREADABLE=""
+for f in "$ROOT"/secrets/*.env; do
+  [ -e "$f" ] || continue
+  [ -r "$f" ] || UNREADABLE="$UNREADABLE $(basename "$f")"
+done
+if [ -n "$UNREADABLE" ]; then
+  bad "$(id -un) cannot read env_file(s):$UNREADABLE"
+  printf '         Every aistack command will fail with a bare "permission\n'
+  printf '         denied" and create no container.  Repair:\n'
+  printf '             sudo bash scripts/gen-secrets.sh\n'
+elif ! docker compose config -q 2>/dev/null; then
+  bad "every env_file is readable, but 'docker compose config' still fails:"
+  docker compose config 2>&1 >/dev/null | head -3 | sed 's/^/         /'
+else
+  ok "every env_file is readable by the operator ($(id -un)); compose resolves"
+fi
+
 hdr "Exposure"
 sed -n '/AISTACK-LOCAL-MODE:BEGIN/,/AISTACK-LOCAL-MODE:END/p' .env 2>/dev/null \
   | grep -v 'AISTACK-LOCAL-MODE' | sed 's/^# \?/  /'

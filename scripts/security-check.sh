@@ -110,18 +110,57 @@ else
 fi
 
 hdr "Audit: secrets never appear in output"
-# The canary test: a value that IS a secret must not survive into any place a
-# viewer might copy from.
-LEAK=0
+# A value that IS a secret must not survive into any place a viewer might copy
+# from.  Three corrections over the obvious version of this check:
+#
+#  1. IT ONLY PROVES ANYTHING FOR SECRETS IT COULD READ.  The files are
+#     root-owned on purpose, so unprivileged this loop reads nothing, compares
+#     nothing, and still printed "no secret value found" — a clean line for a
+#     check that never ran.  Count what was read; report NOT RUN at zero.
+#     Same rule the scan half already follows.
+#  2. An `.env` file is a LIST of secrets, not one secret, and the old version
+#     skipped those files whole — which is exactly where litellm's and
+#     open-webui's keys live.  Take the values.
+#  3. The comparison goes through `grep -Ff <file>`, never `grep -F "$value"`,
+#     so no secret is ever an argv entry visible to `ps` on a shared host.
+LEAK=0; READ=0; TOTAL=0
+RAW="$(mktemp)"; PATS="$(mktemp)"; trap 'rm -f "$RAW" "$PATS"' EXIT
 for f in secrets/*; do
   [ -f "$f" ] || continue
-  case "$(basename "$f")" in *.env) continue ;; esac
-  v="$(sudo -n cat "$f" 2>/dev/null || cat "$f" 2>/dev/null || true)"
-  [ -n "$v" ] && [ "${#v}" -ge 16 ] || continue
-  if docker compose ps -a 2>/dev/null | grep -qF "$v"; then bad "a secret value appears in 'compose ps'"; LEAK=1; fi
-  if docker compose config 2>/dev/null | grep -qF "$v"; then bad "a secret value appears in 'compose config'"; LEAK=1; fi
+  TOTAL=$((TOTAL + 1))
+  body="$(sudo -n cat "$f" 2>/dev/null || cat "$f" 2>/dev/null || true)"
+  [ -n "$body" ] || continue
+  READ=$((READ + 1))
+  case "$(basename "$f")" in
+    *.env) printf '%s\n' "$body" | sed -n 's/^[A-Za-z_][A-Za-z0-9_]*=//p' ;;
+    *)     printf '%s\n' "$body" ;;
+  esac >> "$RAW"
 done
-[ "$LEAK" -eq 0 ] && ok "no secret value found in compose output"
+# Strip optional quoting, drop anything too short to be distinguishable from
+# ordinary text, and de-duplicate.
+sed 's/^"//; s/"$//' "$RAW" | awk 'length($0) >= 16' | sort -u > "$PATS"
+NCHECKED=$(wc -l < "$PATS")
+if [ "$NCHECKED" -gt 0 ]; then
+  docker compose ps -a 2>/dev/null | grep -qFf "$PATS" \
+    && { bad "a secret value appears in 'compose ps'"; LEAK=1; }
+  docker compose config 2>/dev/null | grep -qFf "$PATS" \
+    && { bad "a secret value appears in 'compose config'"; LEAK=1; }
+fi
+if [ "$TOTAL" -eq 0 ]; then
+  warn "NOT RUN — no file under secrets/ was even visible to $(id -un)."
+  warn "An empty or unreadable secrets/ is not a stack with no secrets."
+  RC=1
+elif [ "$READ" -eq 0 ]; then
+  warn "NOT RUN — none of the $TOTAL secret files is readable by $(id -un), so"
+  warn "nothing was compared.  Re-run with sudo.  This is NOT a clean result."
+  RC=1
+elif [ "$NCHECKED" -eq 0 ]; then
+  warn "NOT RUN — $READ/$TOTAL file(s) read, but no value in them was long"
+  warn "enough to search for.  Nothing was compared."
+  RC=1
+elif [ "$LEAK" -eq 0 ]; then
+  ok "no secret value in compose output ($NCHECKED values from $READ/$TOTAL files)"
+fi
 
 hdr "Audit: exceptions register"
 python3 - <<'PY' || RC=1
@@ -155,8 +194,37 @@ PY
 # PART 2 — IMAGE SCAN.  Mostly upstream's to fix.
 # ===========================================================================
 hdr "Scan: Trivy over the exact pinned digests"
+# RESOLVE THE IMAGE LIST ONCE, AND PROVE IT IS NOT EMPTY.
+#
+# MEASURED, not hypothesised — this is what the script did before this guard.
+# `docker compose config --images` exits 1 and prints NOTHING when the
+# invoking user cannot read secrets/*.env, and the Docker CLI reads an
+# env_file as the invoking user (E6).  So for an ordinary operator the `for`
+# loop below iterated an EMPTY list: it scanned no image, left both counters
+# at zero, wrote no JSON, and printed
+#
+#     TOTAL across all images: CRITICAL=0 HIGH=0
+#
+# A clean bill of health for a scan that never happened — in the one script
+# whose own header says an unrun scan must never be summarised as clean.
+# The SBOM half did the same, reporting "[ ok ] SBOMs written" over an empty
+# directory.  Both now count what they actually did and compare it to what
+# they were asked to do.
+if IMAGES="$(docker compose config --images 2>/dev/null)" && [ -n "$IMAGES" ]; then
+  NIMAGES=$(printf '%s\n' "$IMAGES" | grep -c .)
+else
+  IMAGES=""; NIMAGES=0
+fi
+
 if [ "$SKIP_SCAN" -eq 1 ]; then
   warn "SKIPPED (--audit-only). NOT a clean result — nothing was scanned."
+elif [ "$NIMAGES" -eq 0 ]; then
+  warn "NOT RUN — the image list could not be resolved as $(id -un), so NO"
+  warn "IMAGE WAS SCANNED. secrets/*.env is root-owned and the Docker CLI"
+  warn "reads env_file as the invoking user; run: sudo bin/aistack security-check"
+  warn "This is NOT a clean result and must not be summarised as one."
+  echo "scan: NOT RUN (image list empty as $(id -un))" > "$OUT/trivy-NOT-RUN.txt"
+  RC=1
 elif ! docker image inspect aquasec/trivy:latest >/dev/null 2>&1 && ! docker pull -q aquasec/trivy:latest >/dev/null 2>&1; then
   warn "TRIVY COULD NOT BE OBTAINED, SO NO IMAGE WAS SCANNED."
   warn "This is reported as NOT RUN. It is NOT a clean result, and it must"
@@ -165,8 +233,8 @@ elif ! docker image inspect aquasec/trivy:latest >/dev/null 2>&1 && ! docker pul
   RC=1
 else
   mkdir -p "$OUT/trivy"
-  TOTAL_CRIT=0; TOTAL_HIGH=0
-  for img in $(docker compose config --images); do
+  TOTAL_CRIT=0; TOTAL_HIGH=0; SCANNED=0
+  for img in $IMAGES; do
     name="$(printf '%s' "$img" | sed 's#[/:@]#_#g' | cut -c1-80)"
     printf '  scanning %s\n' "${img%%@*}"
     docker run --rm \
@@ -176,6 +244,7 @@ else
         --severity CRITICAL,HIGH --format json --output "/out/${name}.json" \
         "$img" >/dev/null 2>&1 || warn "    scan failed for $img"
     if [ -f "$OUT/trivy/${name}.json" ]; then
+      SCANNED=$((SCANNED + 1))
       read -r c h < <(python3 - "$OUT/trivy/${name}.json" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))
@@ -192,7 +261,19 @@ PY
       printf '    CRITICAL=%s HIGH=%s\n' "$c" "$h"
     fi
   done
-  printf '\n  TOTAL across all images: CRITICAL=%s HIGH=%s\n' "$TOTAL_CRIT" "$TOTAL_HIGH"
+  # The count is part of the result.  A total without it is unreadable.
+  printf '\n  SCANNED %s of %s images: CRITICAL=%s HIGH=%s\n' \
+    "$SCANNED" "$NIMAGES" "$TOTAL_CRIT" "$TOTAL_HIGH"
+  if [ "$SCANNED" -eq 0 ]; then
+    warn "NOT RUN — every scan failed. The totals above describe nothing."
+    RC=1
+  elif [ "$SCANNED" -ne "$NIMAGES" ]; then
+    warn "PARTIAL — $((NIMAGES - SCANNED)) image(s) were not scanned. The"
+    warn "totals cover only the $SCANNED that were. NOT a clean result."
+    RC=1
+  else
+    ok "every pinned image was scanned"
+  fi
   if [ "$TOTAL_CRIT" -gt 0 ]; then
     warn "Critical findings exist. These are UPSTREAM images; the action is"
     warn "to check each finding's fixed-version and bump the pin, not to"
@@ -203,14 +284,26 @@ fi
 hdr "Scan: SBOM"
 if [ "$SKIP_SCAN" -eq 1 ]; then
   warn "SKIPPED (--audit-only)."
+elif [ "$NIMAGES" -eq 0 ]; then
+  warn "NOT RUN — no image list (see above). No SBOM was produced."
 elif docker image inspect aquasec/trivy:latest >/dev/null 2>&1; then
-  for img in $(docker compose config --images); do
+  mkdir -p "$OUT/trivy"
+  for img in $IMAGES; do
     name="$(printf '%s' "$img" | sed 's#[/:@]#_#g' | cut -c1-80)"
     docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$OUT/trivy:/out" \
       aquasec/trivy:latest image --quiet --format cyclonedx \
       --output "/out/${name}.sbom.json" "$img" >/dev/null 2>&1 || true
   done
-  ok "SBOMs written to $OUT/trivy/*.sbom.json"
+  NSBOM=$(find "$OUT/trivy" -name '*.sbom.json' -size +1c | wc -l)
+  if [ "$NSBOM" -eq "$NIMAGES" ]; then
+    ok "$NSBOM SBOMs written to $OUT/trivy/*.sbom.json"
+  elif [ "$NSBOM" -eq 0 ]; then
+    warn "NO SBOM WAS WRITTEN. Reported as NOT RUN, not as done."
+    RC=1
+  else
+    warn "only $NSBOM of $NIMAGES SBOMs were written — PARTIAL."
+    RC=1
+  fi
 else
   warn "no SBOM produced"
 fi

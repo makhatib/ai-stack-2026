@@ -305,10 +305,41 @@ write_env_file() {
 # protected by host permissions; the SECRET still reaches the application as
 # an environment variable, which is the part the exception is about and which
 # no file mode here changes.
+# WHO IS THE OPERATOR?  Not "whoever root's environment says".
+#
+# MEASURED (NOM-258, 2026-10-18).  Installed from a root SHELL rather than
+# through sudo — `su -`, or an ssh login as root, which is how a large share
+# of home-server installs actually happen — SUDO_GID is unset and `id -g` is
+# 0, so the env_file became root:root 0640.  The ordinary user who then ran
+# `aistack up` got nothing but
+#
+#     open /…/secrets/litellm.env: permission denied
+#
+# and NO container was created, because the Docker CLI reads env_file as the
+# INVOKING user (see the note above).  The same empty-handed failure silently
+# turned `security-check`'s scan half into a clean report over zero images.
+# A tutorial-shaped install produced an unusable stack and a false all-clear.
+#
+# The operator is whoever owns this checkout, because that is who will run
+# `aistack`.  Prefer sudo's answer, fall back to the checkout's own group,
+# and only then to the current process.  Returning 0 is correct when the
+# operator really is root.
+operator_gid() {
+  local gid="" rgid=""
+  [ -n "${SUDO_GID:-}" ] && gid="$SUDO_GID"
+  if [ -z "$gid" ] || [ "$gid" = "0" ]; then
+    rgid="$(stat -c %g "$ROOT" 2>/dev/null || true)"
+    if [ -n "$rgid" ] && [ "$rgid" != "0" ]; then gid="$rgid"; fi
+  fi
+  [ -n "$gid" ] || gid="$(id -g)"
+  printf '%s' "$gid"
+}
+
 apply_env_file_mode() {
-  local file="$1" gid
-  # When running under sudo, the operator is SUDO_GID, not root.
-  gid="${SUDO_GID:-$(id -g)}"
+  local file="$1" gid gname
+  gid="$(operator_gid)"
+  gname="$(getent group "$gid" 2>/dev/null | cut -d: -f1)"
+  log "  MODE    $(basename "$file") -> 0640 root:${gname:-$gid} (the operator group, so compose can read it)"
   if chown "0:${gid}" "$file" 2>/dev/null && chmod 0640 "$file" 2>/dev/null; then
     return 0
   fi
