@@ -365,7 +365,7 @@ elif ! docker image inspect aquasec/trivy:latest >/dev/null 2>&1 && ! docker pul
   RC=1
 else
   mkdir -p "$OUT/trivy"
-  TOTAL_CRIT=0; TOTAL_HIGH=0; SCANNED=0
+  TOTAL_CRIT=0; TOTAL_HIGH=0; SCANNED=0; LAYER_GAPS=0
   for img in $IMAGES; do
     name="$(printf '%s' "$img" | sed 's#[/:@]#_#g' | cut -c1-80)"
     printf '  scanning %s\n' "${img%%@*}"
@@ -379,20 +379,45 @@ else
       || warn "    scan failed for $img: $(scan_err "$OUT/trivy/${name}.err")"
     if [ -f "$OUT/trivy/${name}.json" ]; then
       SCANNED=$((SCANNED + 1))
-      read -r c h < <(python3 - "$OUT/trivy/${name}.json" <<'PY'
+      # trivy exits 0 and writes a valid report even when it skipped a whole
+      # layer.  Measured on docling-serve v1.37.0: its base is CentOS Stream 9,
+      # trivy logs `WARN Unsupported os family="centos-stream"`, returns no
+      # os-pkgs result at all, and a naive count then reads 0 CRITICAL for an
+      # OS layer nothing ever looked at.  --quiet hides that warning, so the
+      # gap is detected from the report instead: an OS was identified but no
+      # os-pkgs result came back.  trivy's own legend separates '-' (not
+      # scanned) from '0' (clean); this summary has to separate them too.
+      read -r c h osgap osfam < <(python3 - "$OUT/trivy/${name}.json" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))
-except Exception: print("0 0"); raise SystemExit
+except Exception: print("0 0 unreadable -"); raise SystemExit
 c=h=0
-for r in d.get("Results") or []:
+results=d.get("Results") or []
+for r in results:
     for v in r.get("Vulnerabilities") or []:
         if v.get("Severity")=="CRITICAL": c+=1
         elif v.get("Severity")=="HIGH": h+=1
-print(c,h)
+fam=((d.get("Metadata") or {}).get("OS") or {}).get("Family") or ""
+gap="none"
+if fam and not any(r.get("Class")=="os-pkgs" for r in results): gap="os"
+print(c,h,gap,fam or "-")
 PY
 )
       TOTAL_CRIT=$((TOTAL_CRIT + c)); TOTAL_HIGH=$((TOTAL_HIGH + h))
       printf '    CRITICAL=%s HIGH=%s\n' "$c" "$h"
+      if [ "$osgap" = "os" ]; then
+        LAYER_GAPS=$((LAYER_GAPS + 1))
+        warn "    OS LAYER NOT SCANNED for ${img%%@*}: trivy has no data"
+        warn "    source for os=$osfam, so it returned no OS package result."
+        warn "    The counts above cover language packages ONLY. The OS layer"
+        warn "    is an UNKNOWN here, and must not be summarised as clean."
+        RC=1
+      elif [ "$osgap" = "unreadable" ]; then
+        LAYER_GAPS=$((LAYER_GAPS + 1))
+        warn "    REPORT UNREADABLE for ${img%%@*}. Counted as 0/0, which"
+        warn "    proves nothing. NOT a clean result."
+        RC=1
+      fi
     fi
   done
   # The count is part of the result.  A total without it is unreadable.
@@ -405,8 +430,11 @@ PY
     warn "PARTIAL — $((NIMAGES - SCANNED)) image(s) were not scanned. The"
     warn "totals cover only the $SCANNED that were. NOT a clean result."
     RC=1
+  elif [ "$LAYER_GAPS" -gt 0 ]; then
+    warn "PARTIAL — all $SCANNED images were scanned, but $LAYER_GAPS had a"
+    warn "layer trivy could not cover (see above). NOT a clean result."
   else
-    ok "every pinned image was scanned"
+    ok "every pinned image was scanned, every layer covered"
   fi
   if [ "$TOTAL_CRIT" -gt 0 ]; then
     warn "Critical findings exist. These are UPSTREAM images; the action is"
