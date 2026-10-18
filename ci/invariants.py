@@ -207,7 +207,7 @@ def i3(ctx):
     return bad
 
 
-@check("I4", "every image carries a tag AND a digest with a `:?` guard")
+@check("I4", "every image carries a tag AND a digest, resolvable from committed versions.env")
 def i4(ctx):
     """Two assertions, because one of them can pass vacuously.
 
@@ -215,12 +215,53 @@ def i4(ctx):
     SHAPE: a tag variable, an `@`, a digest variable, and a `:?` guard on each
     so a missing pin fails rather than silently resolving to :latest.
 
-    RESOLVED (interpolated) every reference must end in a real sha256.  The
-    shape check alone would pass a repo whose versions.env is empty, and the
-    resolved check alone would pass a repo that hard-codes digests with no
-    guard, so neither is sufficient by itself.
+    RESOLVED against the COMMITTED `versions.env` every reference must end in a
+    real sha256.  The shape check alone would pass a repo whose versions.env is
+    empty, and the resolved check alone would pass a repo that hard-codes
+    digests with no guard, so neither is sufficient by itself.
+
+    Resolution deliberately does NOT go through `docker compose config
+    --images`.  Measured 2026-10-18: on a clean clone of the tip that command
+    exits non-zero with
+
+        required variable AISTACK_HOSTNAME is missing a value
+
+    because --images interpolates the OPERATOR's `.env`, which a fresh
+    checkout does not have.  So CI was red on a clean clone and green on the
+    build host -- the one place its answer did not matter.  And when it did
+    run it proved the local machine's pins, not the committed ones.  Reading
+    versions.env is both clone-clean and the stronger claim: it is the file a
+    reviewer actually diffs when a pin moves.
     """
     bad = []
+    vpath = os.path.join(ctx.root, "versions.env")
+    if not os.path.isfile(vpath):
+        return ["versions.env is absent, so no committed pin could be resolved"]
+    pins = {}
+    with open(vpath) as fh:
+        for line in fh:
+            m = re.match(r"^([A-Z0-9_]+)=(.*)$", line.strip())
+            if m:
+                pins[m.group(1)] = m.group(2)
+
+    def resolve(name, img):
+        """Substitute ${VAR}, ${VAR:?msg} and ${VAR:-default} from versions.env."""
+        missing = []
+
+        def sub(m):
+            var, op, arg = m.group(1), m.group(2), m.group(3)
+            if pins.get(var):
+                return pins[var]
+            if op == ":-":
+                return arg
+            missing.append(var)
+            return "<unset:%s>" % var
+
+        out = re.sub(r"\$\{([A-Z0-9_]+)(:\?|:-)?([^}]*)\}", sub, img)
+        for var in missing:
+            bad.append(f"{name}: {var} has no value in the committed versions.env")
+        return out
+
     for name, svc in ctx.services.items():
         img = svc.get("image") or ""
         if "@" not in img:
@@ -229,17 +270,9 @@ def i4(ctx):
             bad.append(f"{name}: image reference has no `:?` fail-closed guard: {img}")
         if "${" in img and "DIGEST" not in img:
             bad.append(f"{name}: templated reference does not interpolate a DIGEST variable: {img}")
-
-    resolved = subprocess.run(["docker", "compose", "config", "--images"],
-                              cwd=ctx.root, capture_output=True, text=True)
-    if resolved.returncode != 0:
-        bad.append("`docker compose config --images` failed, so no pin could be resolved: "
-                   + resolved.stderr.strip()[:200])
-    else:
-        for line in resolved.stdout.splitlines():
-            line = line.strip()
-            if line and not re.search(r"@sha256:[0-9a-f]{64}$", line):
-                bad.append(f"resolved image is not digest-pinned: {line}")
+        resolved = resolve(name, img)
+        if not re.search(r"@sha256:[0-9a-f]{64}$", resolved):
+            bad.append(f"resolved image is not digest-pinned: {resolved}")
     return bad
 
 

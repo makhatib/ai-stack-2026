@@ -43,10 +43,70 @@ while IFS= read -r line; do
 done < <(grep -E '^[A-Z0-9_]+=' versions.env)
 [ "$MISMATCH" -eq 0 ] && ok "the rendered .env pin block matches versions.env"
 
-for img in $(docker compose config --images 2>/dev/null); do
-  case "$img" in *@sha256:*) ;; *) bad "not digest-pinned: $img" ;; esac
-done
-ok "every rendered image reference carries a digest"
+# Three states, not two.  The old form ran the loop with stderr discarded and
+# then printed its `ok` UNCONDITIONALLY, so a compose render that failed
+# outright -- which is exactly what happens when .env is missing a variable --
+# produced an empty loop and a clean bill of health.  "I could not check" is
+# not "I checked".
+IMGS="$(docker compose config --images 2>/dev/null)"
+if [ -z "$IMGS" ]; then
+  bad "could not render image references, so no pin could be checked (try: docker compose config)"
+else
+  UNPINNED=0
+  for img in $IMGS; do
+    case "$img" in *@sha256:*) ;; *) bad "not digest-pinned: $img"; UNPINNED=1 ;; esac
+  done
+  [ "$UNPINNED" -eq 0 ] && ok "every rendered image reference carries a digest"
+fi
+
+# The rendered reference and the RUNNING container are different claims, and
+# only the second one is serving traffic.  A merged pin bump that nobody
+# `up`-ed leaves the old image running while every file on disk says
+# otherwise, and the check above would still pass.  So ask the container.
+# Take the container NAME from compose, never derive it.  Measured: deriving
+# "aistack-$svc" silently skipped docling-serve, whose container_name is
+# `aistack-docling` -- the not-running guard swallowed a name mismatch and the
+# check reported a confident "all 8" while 9 were up.  A check that quietly
+# examines fewer things than it claims is worse than no check.
+PINMAP="$(docker compose config --format json 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for n,s in sorted((d.get("services") or {}).items()):
+    img=s.get("image") or ""
+    if img: print(n, s.get("container_name") or n, img)
+')"
+DRIFT=0; CHECKED=0; LIVE=0
+while IFS=" " read -r svc c ref; do
+  [ -n "$svc" ] || continue
+  docker ps --format '{{.Names}}' | grep -q "^${c}$" || continue
+  LIVE=$((LIVE+1))
+  running="$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null)"
+  want="$(docker image inspect -f '{{.Id}}' "$ref" 2>/dev/null)"
+  if [ -z "$running" ] || [ -z "$want" ]; then
+    warn "$svc: cannot compare running image to its pin (image not present locally?)"
+    continue
+  fi
+  CHECKED=$((CHECKED+1))
+  if [ "$running" != "$want" ]; then
+    bad "$svc is RUNNING ${running#sha256:} but its pin resolves to ${want#sha256:} -- recreate it: docker compose up -d $svc"
+    DRIFT=1
+  fi
+done <<EOF
+$PINMAP
+EOF
+# Reconcile the count against compose's own view, so a future skip cannot pass
+# as a pass.
+EXPECTED="$(docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)"
+if [ "$CHECKED" -eq 0 ]; then
+  warn "no running container could be compared against its pin"
+else
+  if [ -n "$EXPECTED" ] && [ "$LIVE" -ne "$EXPECTED" ]; then
+    bad "compared $LIVE running containers but compose reports $EXPECTED running -- some service was skipped, so this section is incomplete"
+  elif [ "$DRIFT" -eq 0 ]; then
+    ok "all $CHECKED running containers were created from the image their pin names"
+  fi
+fi
 
 hdr "Secrets"
 # VERIFIED BY ASKING THE SERVICE, not inferred from the file mode.  A mode
