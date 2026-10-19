@@ -34,3 +34,9 @@ drill-log.txt
 install.log
 __pycache__/
 *.pyc
+
+# The gate's default output.  `ci/scan-gate.py` writes gate.json unless GATE_JSON
+# names somewhere else, so simply running the gate dirties the tree.  Ignored for
+# the same reason as security-report-*/ above: it is scan output, and committing
+# scan output is what turned CI red on a clean clone once already.
+gate.json
