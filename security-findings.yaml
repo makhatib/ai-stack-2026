@@ -164,9 +164,32 @@ dispositions:
     cve_instances: 6
     why_not_reachable: >-
       These are reached through n8n's Git node and template rendering.  CHECKED,
-      not assumed: all four shipped workflows (W1-W4) use only httpRequest,
-      postgres, manualTrigger, scheduleTrigger and webhook nodes — no git, ssh,
-      executeCommand or code node appears anywhere in workflows/*.json.  The one
+      not assumed, and CORRECTED on 2026-10-19: all four shipped workflow files
+      (W1-W4 — three executable, W2 deferred by NOM-321/NOM-323, but its file
+      still ships and is still imported) use httpRequest, postgres, set,
+      readWriteFile, manualTrigger, scheduleTrigger, webhook — and `code`.  No
+      git, ssh or executeCommand node appears anywhere in workflows/*.json.
+
+      The `code` nodes are new as of NOM-302, and an earlier revision of this
+      line claimed there were none, which was wrong the moment the templates
+      were rewritten.  It does not change the disposition, and that is MEASURED
+      rather than reasoned: a probe workflow whose code node calls require()
+      for each package was imported, executed and deleted, and n8n's sandbox
+      refused all four attempts —
+
+        handlebars    -> DENIED: Module 'handlebars' is disallowed
+        simple-git    -> DENIED: Module 'simple-git' is disallowed
+        fs            -> DENIED: Module 'fs' is disallowed
+        child_process -> DENIED: Module 'child_process' is disallowed
+
+      That holds because NODE_FUNCTION_ALLOW_EXTERNAL and
+      NODE_FUNCTION_ALLOW_BUILTIN are unset in this stack (measured in the
+      running container, not read off a compose file).  Setting either one
+      reopens this disposition and must re-run this probe.
+
+      The disposition covers the files on disk, so W2's deferral does not
+      narrow it: a deferred template is still a template an operator can open
+      and run by hand.  The one
       route that is deliberately NOT behind Authelia, /n8n/webhook/*, reaches
       only W4, which is httpRequest + postgres.  The editor and REST API, which
       are what it would take to ADD a Git node, are behind Authelia forward_auth

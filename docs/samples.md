@@ -1,17 +1,23 @@
-# The four demos, and how to check them
+# The demos, and how to check them
 
 <!-- AISTACK-LOCAL-MODE:BEGIN -->
 Not published to the internet. Reachable on this machine; reachable from other devices on your network if your network allows it — we have not tested that.
 <!-- AISTACK-LOCAL-MODE:END -->
 
-This stack ships four n8n templates:
+This stack ships **four n8n templates, three of which run**:
 
-| | Demo | What it claims |
-|---|---|---|
-| **W1** | Research over a local corpus | a question is embedded, the nearest chunks are fetched from pgvector, and the model answers from those chunks and cites them |
-| **W2** | Chat with your PDF | a PDF is parsed by Docling, embedded through LiteLLM, and stored next to the corpus |
-| **W3** | Scheduled summary behind the approval envelope | a daily summary is written, a human decides it, and only then is it dispatched — once |
-| **W4** | Webhook to model to stored result | a POST with a header token is answered by the local model and the result is stored |
+| | Demo | What it claims | |
+|---|---|---|---|
+| **W1** | Research over a local corpus | a question is embedded, the nearest chunks are fetched from pgvector, and the model answers from those chunks and cites them | runs |
+| **W2** | Chat with your PDF | a PDF is parsed by Docling, embedded through LiteLLM, and stored next to the corpus | **deferred** |
+| **W3** | Scheduled summary behind the approval envelope | a daily summary is written, a human decides it, and only then is it dispatched — once | runs |
+| **W4** | Webhook to model to stored result | a POST with a header token is answered by the local model and the result is stored | runs |
+
+W2 is **deferred by decision**, not broken and not pending anybody: n8n has no
+route to Docling, and this release will not add one to make a demo pass. The
+measurement and the decision are in [section 3](#3-w2-is-deferred-and-this-is-why).
+Its template is still imported and still bound, so it is ready the day that
+route is bought by a product requirement.
 
 **An import is not a demo.** `aistack samples load` imports the templates and
 exits 0; for most of 2026-10-18 that was all anyone had checked, and not one
@@ -46,8 +52,9 @@ bin/aistack samples setup
    with its own small budget, and a random 48-hex-character token for W4's
    webhook — writes them `0600` under `secrets/` and imports them into n8n with
    fixed ids, which is what lets the templates bind to them by id;
-4. **imports the four workflows** with fixed ids, asserts all four are inactive,
-   and asserts a re-import leaves four rather than eight;
+4. **imports all four workflows** with fixed ids, asserts all four are inactive,
+   and asserts a re-import leaves four rather than eight. Four are imported and
+   bound, including the deferred W2; three are executable;
 5. **embeds the corpus** in `samples/corpus/` and generates
    `samples/fixtures/synthetic.pdf` from `make-synthetic-pdf.py`.
 
@@ -69,14 +76,22 @@ exceed `EXECUTIONS_TIMEOUT_MAX` (900s, from `limits.yaml`). That is why the
 demo templates ask for at most 160 tokens — enough to show a cited answer,
 small enough to finish on a machine that is also doing something else.
 
-Each case prints `PASS`, `FAIL` or `BLOCKED` with the evidence underneath it.
-Exit codes, so this can be the last line of a release check:
+Each case prints `PASS`, `FAIL`, `DEFERRED` or `BLOCKED` with the evidence
+underneath it. Exit codes, so this can be the last line of a release check:
 
 | code | meaning |
 |---|---|
-| 0 | every case passed |
+| 0 | nothing failed. Every executable case passed; a **deferred** case may be reported and counted — see W2 below |
 | 1 | at least one case **failed** |
-| 2 | nothing failed, but at least one case is **blocked** — see W2 below |
+| 2 | nothing failed, but at least one case is **blocked** |
+
+**`DEFERRED` and `BLOCKED` are different states and the difference is the
+point.** Blocked means an *open* question: the demo cannot reach something and
+nobody has decided what to do about it. Deferred means somebody with the
+authority to decide looked at it and said no. A release check that goes red for
+a recorded decision is a release check people start passing with `|| true`, so a
+deferral exits 0 — while still printing, counting and naming itself on every
+run. Nothing in this release is blocked; `run all` exits 0 with one deferral.
 
 Every assertion reads the database rather than the n8n CLI's output, which has
 two consequences worth knowing: a run a person did by hand in the n8n editor is
@@ -92,15 +107,19 @@ the distances really are ascending — so the `ORDER BY` ran, rather than row
 order being luck — and that a non-empty answer was recorded in `w1_runs`
 alongside the sources it cited.
 
-**W4 — webhook to model to stored result.** Four requests, one of which is
-supposed to work:
+**W4 — webhook to model to stored result.** Six requests, one of which is
+supposed to work. The harness accepts either `401` or `403` for a rejected
+credential — which one you get is n8n's choice, not the template's — and this
+stack answers `403`:
 
-| request | expected |
-|---|---|
-| right token | `200`, the model's answer stored in `w4_results` |
-| no token | `401`, nothing stored |
-| wrong token | `401`, nothing stored |
-| right token, no `prompt` in the body | refused, nothing stored, no inference paid for |
+| request | expected | measured |
+|---|---|---|
+| right token | the model's answer stored in `w4_results` | `200` |
+| no token | nothing stored | `403` |
+| wrong token | nothing stored | `403` |
+| right header name, empty value | nothing stored | `403` |
+| the right token in the **wrong header** | nothing stored | `403` |
+| right token, no `prompt` in the body | refused, nothing stored, no inference paid for | `500` |
 
 W4's webhook has to be *registered* by a running n8n before any of that can be
 tested, and n8n registers webhooks only when a main process starts —
@@ -120,7 +139,7 @@ to assert before the measurement corrected it.
 What keeps the demo off the proxy today is **not** this harness's choice of
 container. It is that Caddy forwards `/n8n/webhook/*` without stripping the
 prefix, so n8n has no route for what arrives — a bug standing in for a control
-(see the findings on [NOM-302](/NOM/issues/NOM-302)). W4.8 therefore asserts
+(measured and routed on [NOM-321](/NOM/issues/NOM-321)). W4.8 therefore asserts
 the property that does matter: once the demo is unpublished, the live instance
 answers `404` again.
 
@@ -165,28 +184,63 @@ bin/aistack samples run W3          # now dispatches, once, and proves it
   claim affects zero rows.
 - Run it once more and it does nothing at all: today's summary has already gone.
 
-## 3. W2 is BLOCKED, and this is why
+## 3. W2 is DEFERRED, and this is why
 
-`samples run W2` reports `BLOCKED`, not `PASS` and not `FAIL`. The template is
-complete — its document is generated, its embed and store nodes are bound, and
-its SQL is parameterised — but its parse step cannot complete in this release:
+`samples run W2` reports `DEFERRED` — not `PASS`, not `FAIL`, and not
+`BLOCKED`. The template is complete: its document is generated, its embed and
+store nodes are bound, and its SQL is parameterised. Its parse step cannot
+complete in this release, because n8n has no route to Docling:
 
 ```
-$ docker exec aistack-n8n getent hosts docling-serve
-(no output: the name does not resolve)
+$ docker exec aistack-n8n wget -T5 -O- http://docling-serve:5001/health
+wget: bad address 'docling-serve:5001'
 ```
+
+The harness measures the same thing with its own in-container HTTP probe, and
+it fires that probe **twice** — once at Docling, once at LiteLLM, which n8n is
+supposed to reach:
+
+```
+litellm:4000/health/liveliness  -> status 200, "I'm alive!"
+docling-serve:5001/health       -> status 0,   ERROR getaddrinfo EAI_AGAIN docling-serve
+```
+
+The second line is only a measurement because the first one succeeded. If the
+control probe fails, `W2.3` reports `FAIL` and says no conclusion about Docling
+can be drawn from that run — a probe that cannot report success is not evidence
+of anything. (The first version of this gate ran `getent`, which is not in the
+n8n image at all: empty output, the same answer whatever the topology. Review
+caught it.)
 
 Docling sits on a pairwise /29 whose only other member is Open WebUI; n8n is on
 `apps`, `gateway` and `data`. There is no route between them, by design:
 Docling is the component most likely to be processing a file an attacker wrote,
 and n8n is the component holding every credential in the stack.
 
-Closing that gap means giving the parser a second peer, and that peer would be
-the automation engine. It is a change to `manifest.yaml`'s zone policy and to
-what invariant I7 asserts — the Tech Lead's call, not a workflow edit. The
-template is written so that it starts working the day such a bridge exists:
-`samples run W2` detects the route, and grades W2 like W1 the moment it is
-there.
+### The decision
+
+This is settled, not waiting on anyone. **No new Docling peer is added to make
+a demo pass** ([NOM-321](/NOM/issues/NOM-321)):
+
+- `parse-n8n` — a bridge from the automation engine to the parser — is
+  **rejected**. `docling-serve` is `confined` on a `pairwise` /29, so a third
+  member fails invariant I1 outright, and this release's own precedent (the
+  reserved `parse-agw`) says a new consumer of Docling gets its own pairwise
+  bridge rather than a seat on an existing one.
+- The indirect route — n8n → Open WebUI `/api/v1/files` → Docling — is
+  **rejected too**. It needs `Remote-Email` self-injection or an API key this
+  offline harness cannot mint, so it is not a workaround.
+- A parser peer returns only through the reserved `parse-agw` bridge, with a
+  passed G-AGENTS or its own named gate — bought by a product requirement, not
+  by a demo's completeness.
+- W2 therefore defers with the `agents` group, like W6, and
+  [NOM-323](/NOM/issues/NOM-323) fixes the shipped profile at three executable
+  n8n demos: W1, W3 and W4.
+
+The template is still written so that it starts working the day such a bridge
+exists: the probe above detects the route and the harness grades W2 like W1 the
+moment it is there. If that branch ever fires, read NOM-321 first — the route
+appearing is either a product decision or a mistake, and the harness says so.
 
 ## 4. Take it away
 

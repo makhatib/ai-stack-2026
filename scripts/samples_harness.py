@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""AI Stack 2026 — run the W1-W4 demos and CHECK WHAT THEY PRODUCED (NOM-302).
+"""AI Stack 2026 — run the n8n demos and CHECK WHAT THEY PRODUCED (NOM-302).
 
 `aistack samples load` used to import four workflows and report success.  QA
 then found that none of them could run, and that is the distinction this file
 exists to hold: an import is a file landing in a database, a demo is a run with
 an output somebody checked.
+
+FOUR TEMPLATES ARE IMPORTED; THREE ARE EXECUTABLE.  W1, W3 and W4 run and are
+graded here.  W2 is DEFERRED by decision -- n8n has no route to Docling and
+NOM-321 rejected adding one to make a demo pass -- so this file reports it as a
+deferral with the measurement, and never as a pass.  P2 (the approval envelope)
+is exercised on its own, against the shipped DDL.
 
 HOW IT CHECKS, AND WHY NOT THE OBVIOUS WAY.  Every assertion reads the
 DATABASE, not the n8n CLI's stdout.  Three reasons, in order of how much they
@@ -29,10 +35,14 @@ any kind.  "Delivered" in W3 means a row in w3_delivered; there is no mail, no
 chat and no webhook out of this stack in this release.
 
 EXIT CODES, because a harness that only prints is a harness people skim:
-  0  every case passed
+  0  nothing failed.  Every executable case passed; a DEFERRED case may be
+     reported and counted (today that is W2 -- a decision, not a defect, so it
+     does not colour the exit code.  See w2() below.)
   1  at least one case FAILED
-  2  no failures, but at least one case is BLOCKED (something the demo cannot
-     reach from where it stands -- today that is W2, see w2() below)
+  2  no failures, but at least one case is BLOCKED -- an OPEN question, where
+     the demo cannot reach something and nobody has decided about it yet.
+     Nothing in this release is in that state; the code stays because the
+     difference between "undecided" and "decided no" is the point.
 """
 
 import json
@@ -265,12 +275,12 @@ RESULTS = []
 
 def record(case, title, status, detail=""):
     RESULTS.append((case, title, status, detail))
-    mark = {"PASS": "PASS   ", "FAIL": "FAIL   ", "BLOCKED": "BLOCKED",
-            "INFO": "info   "}[status]
+    mark = {"PASS": "PASS    ", "FAIL": "FAIL    ", "BLOCKED": "BLOCKED ",
+            "DEFERRED": "DEFERRED", "INFO": "info    "}[status]
     print("  %s %-6s %s" % (mark, case, title))
     for line in str(detail).splitlines():
         if line.strip():
-            print("           %s" % line)
+            print("            %s" % line)
     sys.stdout.flush()
 
 
@@ -608,36 +618,73 @@ def w2():
         return "the embed and store nodes are bound; the parse node needs no credential"
     ok &= case("W2.2", "W2's credential-bearing nodes are bound")(bindings)
 
-    # The one case in this harness that cannot pass, and it reports BLOCKED
-    # rather than FAIL because nothing is broken -- the demo is asking for a
-    # route the release deliberately does not have.
-    rc, out, err = docker("exec", "aistack-n8n", "getent", "hosts", "docling-serve")
-    dns = (out or "").strip()
-    status = None
-    if dns:
+    # The one case in this harness that cannot pass, and it reports DEFERRED
+    # rather than FAIL because nothing is broken -- the demo asks for a route
+    # the release decided not to have (NOM-321, NOM-323).
+    #
+    # PROBED WITH A CONTROL, because the first version of this gate was the
+    # `ollama sh` bug again.  It ran `getent hosts docling-serve` inside the
+    # n8n image, which has no `getent`: the exec fails with rc=127 on stderr,
+    # stdout is empty, and "empty stdout" was then read as "the name does not
+    # resolve" -- the same answer whatever the topology, which made the
+    # routable branch below unreachable.  A probe that cannot report success
+    # is not a measurement.  So: the harness's own in-container HTTP helper
+    # (node, which n8n is built on, not busybox), fired twice -- once at a
+    # service n8n is SUPPOSED to reach, once at Docling.  The control is what
+    # makes Docling's answer mean something.
+    def probe(host, port, path):
         try:
-            status, _ = http_in("aistack-n8n", "docling-serve", 5001, "/health",
-                                method="GET", timeout_ms=10000)
-        except Fail:
-            status = None
-    if dns and status == 200:
+            return http_in("aistack-n8n", host, port, path,
+                           method="GET", timeout_ms=10000)
+        except Fail as exc:
+            return 0, "probe helper failed: %s" % exc
+
+    ctrl_status, ctrl_body = probe("litellm", 4000, "/health/liveliness")
+    doc_status, doc_body = probe("docling-serve", 5001, "/health")
+    measured = ("from aistack-n8n, same HTTP helper for both:\n"
+                "  litellm:4000/health/liveliness       -> status %s, %s\n"
+                "  docling-serve:5001/health            -> status %s, %s"
+                % (ctrl_status, (ctrl_body or "").strip()[:80] or "(empty)",
+                   doc_status, (doc_body or "").strip()[:80] or "(empty)"))
+
+    if ctrl_status != 200:
+        # The control did not answer either, so this run measured nothing about
+        # Docling.  That is a FAIL of the probe, not a deferral of the demo:
+        # reporting a deferral here would be inventing the finding again.
+        ok = False
+        record("W2.3", "the reachability probe itself could not report success",
+               "FAIL",
+               measured + "\nThe control probe is supposed to return 200 from a "
+               "healthy stack.\nNo conclusion about Docling can be drawn from "
+               "this run.  Check that\nthe stack is up ('bin/aistack doctor') "
+               "and re-run.")
+    elif doc_status == 200:
         record("W2.3", "n8n can reach Docling", "INFO",
-               "docling-serve resolves to %s and answers /health -- the "
-               "topology changed since NOM-302; W2 should now be executed and "
-               "graded like W1." % dns)
+               measured + "\nDocling answers /health from n8n -- the topology "
+               "changed since NOM-302.\nW2 is executed and graded like W1 "
+               "below.  If that route was added on\npurpose, NOM-321's decision "
+               "needs re-reading; it rejected a parser peer\nadded to make this "
+               "demo pass.")
         ok &= case("W2.4", "W2 runs end to end (Docling -> LiteLLM -> pgvector)")(
             _w2_execute)
     else:
-        record("W2.3", "n8n -> Docling is not routable (demo BLOCKED)", "BLOCKED",
-               "docker exec aistack-n8n getent hosts docling-serve -> %s\n"
-               "docling-serve is on the parse-owui /29; n8n is on apps+gateway+data.\n"
-               "W2's parse step cannot complete, so this harness does NOT execute\n"
-               "W2 and does NOT report it as a pass.  Everything else in the\n"
-               "template is bound and ready.  Closing the gap means giving the\n"
-               "untrusted-input parser a second peer -- the engine that holds\n"
-               "every credential -- which is a manifest/zone change and the Tech\n"
-               "Lead's call, not a workflow edit."
-               % (dns or "(no output: the name does not resolve)"))
+        record("W2.3", "W2 is DEFERRED by decision: n8n has no route to Docling",
+               "DEFERRED",
+               measured + "\n"
+               "docling-serve is confined on the pairwise parse-owui /29 with "
+               "Open WebUI as\nits only peer; n8n is on apps+gateway+data.  W2's "
+               "parse step therefore\ncannot complete, so this harness does not "
+               "execute W2 and does not report\nit as a pass.  Everything else "
+               "in the template is bound and ready.\n"
+               "\n"
+               "This is DECIDED, not open.  NOM-321: no new Docling peer to make "
+               "a demo\npass -- parse-n8n rejected, and the n8n -> Open WebUI -> "
+               "Docling route\nrejected with it.  A parser peer returns only via "
+               "the reserved parse-agw\nwith a passed G-AGENTS or its own named "
+               "gate, bought by a product\nrequirement.  NOM-323: the profile "
+               "ships three executable n8n demos --\nW1, W3, W4 -- and W2 defers "
+               "with the agents group, like W6.\n"
+               "See docs/samples.md section 3.")
     return bool(ok)
 
 
@@ -673,9 +720,14 @@ def _w2_execute():
 # if n8n is running".  The dedicated `n8n webhook` process is not an option
 # either; it refuses outside queue mode.  So something has to start.  A
 # throwaway main costs one container and leaves the long-running instance
-# untouched, which is also what makes W4.6 a real assertion: while the demo is
-# published and being served here, the instance the reverse proxy talks to
-# still has no route for it.
+# unrestarted and unreconfigured, which is the whole of what it buys.
+#
+# IT DOES NOT CONTAIN THE ROUTE.  An earlier version of this comment claimed
+# that while the demo is served here, the instance behind the reverse proxy
+# still has no route for it.  W4.6 measured the opposite and now asserts it:
+# registration is shared state in webhook_entity, so a published webhook
+# answers on EVERY running main.  The container boundary is an operational
+# convenience, not a containment boundary -- see live_serves_it_too().
 W4_HELPER = "aistack-samples-w4"
 
 
@@ -1007,11 +1059,10 @@ def proxy_probe(token, prompt):
         if status == 404 and "Cannot POST /n8n" in body:
             detail += ("\nThe 404 is a PATH MISMATCH, not a control: Caddy "
                        "forwards /n8n/webhook/* without stripping the prefix, "
-                       "so n8n has no route for what it receives.\nA FINDING "
-                       "for the Tech Lead, recorded on NOM-302: that route is "
-                       "also the one Caddy proxies WITHOUT forward-auth, so "
-                       "the edit that makes webhooks work is also an exposure "
-                       "decision.")
+                       "so n8n has no route for what it receives.\nFiled and "
+                       "routed on NOM-321: that route is also the one Caddy "
+                       "proxies WITHOUT forward-auth, so the edit that makes "
+                       "webhooks work is also an exposure decision.")
         elif status == 200:
             detail += ("\nThe demo webhook IS answerable through the proxy "
                        "while published. That is wider than the release "
@@ -1402,19 +1453,32 @@ def cmd_run(argv):
     passed = [r for r in RESULTS if r[2] == "PASS"]
     failed = [r for r in RESULTS if r[2] == "FAIL"]
     blocked = [r for r in RESULTS if r[2] == "BLOCKED"]
+    deferred = [r for r in RESULTS if r[2] == "DEFERRED"]
     banner("Summary")
-    print("  %d passed, %d failed, %d blocked" % (len(passed), len(failed),
-                                                  len(blocked)))
+    print("  %d passed, %d failed, %d blocked, %d deferred"
+          % (len(passed), len(failed), len(blocked), len(deferred)))
     for cid, title, _, _ in failed:
-        print("  FAIL    %-6s %s" % (cid, title))
+        print("  FAIL     %-6s %s" % (cid, title))
     for cid, title, _, _ in blocked:
-        print("  BLOCKED %-6s %s" % (cid, title))
+        print("  BLOCKED  %-6s %s" % (cid, title))
+    for cid, title, _, _ in deferred:
+        print("  DEFERRED %-6s %s" % (cid, title))
     if failed:
         return 1
     if blocked:
-        print("\n  Nothing FAILED.  A BLOCKED case is a demo this release cannot")
-        print("  reach from where it stands; the reason is printed above it.")
+        print("\n  Nothing FAILED.  A BLOCKED case is an OPEN question: something")
+        print("  the demo cannot reach and nobody has yet decided about.")
         return 2
+    if deferred:
+        # Exit 0, deliberately.  A DEFERRED case is not an open question and
+        # not a defect: somebody with the authority to decide looked at it and
+        # said no (W2 -> NOM-321, NOM-323).  A release check that goes red for
+        # a decision is a release check people start passing with `|| true`.
+        # The deferral is still printed, and still counted, on every run.
+        print("\n  Complete, with a deferral.  Nothing failed and nothing is")
+        print("  blocked; a DEFERRED case is one this release decided not to")
+        print("  ship -- the decision and its reason are printed above it.")
+        return 0
     return 0
 
 

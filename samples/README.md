@@ -20,7 +20,7 @@ password anyone forgot to rotate.
   whose every byte is accounted for in source.
 
 ```sh
-bin/aistack samples setup      # make the four demos runnable
+bin/aistack samples setup      # make the demos runnable (W1, W3, W4)
 bin/aistack samples run all    # run them and check the outputs
 bin/aistack samples teardown   # remove everything setup created
 
@@ -31,4 +31,9 @@ bin/aistack samples load       # import ONLY — what the backup drill needs
 it lands credential ciphertext in n8n so a restore has something real to
 decrypt. **It does not make the demos runnable**, which is the whole of
 NOM-302: it imported four workflows, exited 0, and not one of them could run.
-See [docs/samples.md](../docs/samples.md).
+
+Four templates are still imported; **three are executable** — W1, W3 and W4.
+W2 is deferred by decision ([NOM-321](/NOM/issues/NOM-321),
+[NOM-323](/NOM/issues/NOM-323)): n8n has no route to Docling and the release
+will not add one to make a demo pass. `samples run` reports it as `DEFERRED`
+with the measurement. See [docs/samples.md](../docs/samples.md).

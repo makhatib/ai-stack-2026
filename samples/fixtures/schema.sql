@@ -1,4 +1,8 @@
--- AI Stack 2026 — the demo schema for W1–W4.
+-- AI Stack 2026 — the demo schema for the W1–W4 templates.
+--
+-- Three of those four run (W1, W3, W4); W2 is deferred by decision (NOM-321,
+-- NOM-323).  Its table stays, because `w2_chunks` is also where W1's corpus
+-- lives — the embedding store is shared, the parse step is what was deferred.
 --
 -- Applied by `aistack samples setup` into the `aistack_demo` DATABASE, not into
 -- any database an application already uses.

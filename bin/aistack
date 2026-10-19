@@ -555,7 +555,8 @@ aistack — AI Stack 2026
   remove              uninstall, with an explicit prompt about volumes
 
   samples setup       preload weights, build the demo database, bind the
-                      synthetic credentials, import the four templates
+                      synthetic credentials, import the templates (four
+                      imported; W1/W3/W4 executable, W2 deferred)
   samples run [case]  run W1/W3/W4/P2 and CHECK the outputs (default: all)
   samples approve ID  the human decision step in W3's approval envelope
   samples teardown    remove everything 'samples setup' created

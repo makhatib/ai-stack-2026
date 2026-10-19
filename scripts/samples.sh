@@ -7,9 +7,16 @@
 # human decision anywhere in W3's approval path.  An import that succeeds is
 # not a demo that works, so this script is the difference between the two.
 #
+# Four templates are imported; THREE are executable (W1, W3, W4).  W2 is
+# deferred by decision — NOM-321 rejected giving Docling a second peer to make
+# a demo pass, and NOM-323 fixed the profile at three n8n demos.  setup still
+# imports and binds all four, because the deferred one is a template somebody
+# may want the day that route is bought by a product requirement.
+#
 #   setup      preload the named weights, build the demo database, mint the
 #              demo credentials, import the workflows (idempotently)
-#   run        execute W1/W3/W4 and CHECK THE OUTPUT, negative cases included
+#   run        execute W1/W3/W4 and CHECK THE OUTPUT, negative cases included;
+#              report W2 as DEFERRED with the measurement behind it
 #   approve    the human decision step in W3, as a separate privilege path
 #   teardown   drop everything setup created
 #
