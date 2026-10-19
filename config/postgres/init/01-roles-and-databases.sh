@@ -131,8 +131,10 @@ create_app() {
 # Deriving both from one file is what makes healthcheck.sh's comment true
 # rather than aspirational, and it makes `db-init` a genuine repair for list
 # drift instead of a no-op.  The same extraction appears in healthcheck.sh; CI
-# invariant I15 holds them together and fails the build on any new literal
-# copy, and tests/app-list-coupling.sh measures it against a real cluster.
+# invariant I15 holds them together — it fails the build on a copy of this
+# list in a `for ... in` loop, a bare assignment or a SQL `IN (...)` set, and
+# on any named consumer that stops deriving — and
+# tests/app-list-coupling.sh measures it against a real cluster.
 APPS="$(sed -n 's/^\([A-Za-z0-9_][A-Za-z0-9_]*\)=.*/\1/p' "$PW_FILE" | sort -u)"
 if [ -z "$APPS" ]; then
   cat >&2 <<EOF

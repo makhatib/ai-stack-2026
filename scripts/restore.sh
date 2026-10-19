@@ -146,10 +146,29 @@ dc exec -T postgres psql -U aistack_admin -d postgres < "$WORK/payload/globals.s
 # archive rather than silently dropping the fifth, and step 3/4 above has
 # already verified this payload for set equality, digests and HMAC before
 # anything here overwrites a byte.
+#
+# WHAT THIS RESTORE PUT BACK, written out for the caller that asks.
+# scripts/drill.sh asserts one non-superuser role per restored database, and it
+# has to assert over THE SAME SET this loop walks.  Re-deriving that set there
+# from a literal `IN (...)` list is how a hardcoded `R = 4` certified a
+# five-app archive whose fifth role never came back: the fifth app could
+# neither be counted present nor counted missing.  Unset in normal operation,
+# in which case nothing is written and nothing changes.
+RESTORED_DBS_FILE="${AISTACK_RESTORED_DBS_FILE:-}"
+if [ -n "$RESTORED_DBS_FILE" ]; then
+  : > "$RESTORED_DBS_FILE" \
+    || die "cannot write AISTACK_RESTORED_DBS_FILE=$RESTORED_DBS_FILE"
+fi
 for dump in "$WORK"/payload/*.dump; do
   [ -f "$dump" ] || continue
   db="$(basename "$dump" .dump)"
   echo "      $db"
+  # Recorded BEFORE the restore of this database is attempted, so a dump that
+  # fails to load is still a database the drill expects a role for.  An
+  # expectation that shrinks when the thing it measures fails is not one.
+  if [ -n "$RESTORED_DBS_FILE" ]; then
+    printf '%s\n' "$db" >> "$RESTORED_DBS_FILE"
+  fi
   # CREATE THE DATABASE IF IT IS NOT THERE.
   #
   # `pg_restore -d n8n` needs `n8n` to already exist, and into a LIVE stack it

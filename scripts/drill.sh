@@ -101,7 +101,13 @@ if [ -n "$LIVE" ]; then
 fi
 ok "lifecycle lock held EXCLUSIVE; no serving container or bridge exists"
 
-trap 'echo; echo "Destroying the drill project..."; clean; exec {LFD}>&-' EXIT
+# WHERE restore.sh WRITES WHAT IT RESTORED.  Assertion 4 below asserts one
+# non-superuser role per restored database, and it must assert over the set
+# the restore actually walked rather than over a list retyped here.
+RESTORED_DBS="$(mktemp "${TMPDIR:-/tmp}/aistack-drill-dbs.XXXXXX")"
+export AISTACK_RESTORED_DBS_FILE="$RESTORED_DBS"
+
+trap 'echo; echo "Destroying the drill project..."; clean; rm -f "$RESTORED_DBS"; exec {LFD}>&-' EXIT
 
 # --- restore into the throwaway project ------------------------------------
 echo
@@ -187,14 +193,60 @@ else
   [ "$V" = "1" ] && ok "pgvector extension restored in the openwebui database" \
                  || bad "pgvector extension missing after restore"
 
-  # 4. user permissions — the non-superuser roles must come back as
-  #    non-superusers, or the restore has quietly escalated every app.
-  S=$(q postgres "SELECT count(*) FROM pg_roles WHERE rolname IN ('authelia','openwebui','litellm','n8n') AND rolsuper;")
-  R=$(q postgres "SELECT count(*) FROM pg_roles WHERE rolname IN ('authelia','openwebui','litellm','n8n');")
-  if [ "${R:-0}" = "4" ] && [ "${S:-1}" = "0" ]; then
-    ok "all four app roles restored, none of them a superuser"
+  # 4. user permissions — every app role must come back, and come back as a
+  #    non-superuser, or the restore has lost an app or quietly escalated one.
+  #
+  # BOTH THE NAMES AND THE COUNT ARE DERIVED.  This assertion used to read:
+  #
+  #   R=$(q postgres "... WHERE rolname IN ('authelia','openwebui','litellm','n8n');")
+  #   [ "${R:-0}" = "4" ] && ok "all four app roles restored"
+  #
+  # — a literal list AND a literal count.  On a five-app deployment whose
+  # fifth role did not come back, R is still 4 and S is still 0, so the drill
+  # printed "all four app roles restored", exited 0 and appended PASS to
+  # drill-log.txt.  The fifth app could be counted neither present nor
+  # missing.  Deriving the names without deriving the count buys nothing: the
+  # `= "4"` is the half that certifies.
+  #
+  # The set comes from restore.sh, which read it out of the ARCHIVE
+  # (payload/*.dump) — the authoritative statement of what there was to
+  # restore.  Deriving it from the restored cluster instead would be circular:
+  # a role and its database go missing together, so the expectation would
+  # shrink to match the damage and pass.
+  APPS="$(sort -u "$RESTORED_DBS" 2>/dev/null)"
+  EXPECTED=0; PRESENT=0; MISSING=""; SUPER=""; UNANSWERED=""
+  for app in $APPS; do
+    case "$app" in
+      *[!A-Za-z0-9_]*)
+        bad "restore reported '$app' as a restored database, which is not a bare identifier"
+        continue ;;
+    esac
+    EXPECTED=$((EXPECTED + 1))
+    # `checked:` sentinel, same reason as the health probe: psql answering
+    # NOTHING AT ALL — container gone, socket refused, query killed, SQL
+    # rejected — must not read as "nothing is wrong with this role".  It
+    # earned its place immediately: the first cut of this loop passed the name
+    # as `-v app=` and matched `:'app'`, psql does not interpolate a variable
+    # in a -c string, every query failed with `syntax error at or near ":"`,
+    # and the drill reported 0/4 NOT ANSWERED instead of a vacuous pass.
+    #
+    # So the name is spliced, and what makes that safe is the filter above:
+    # the `case` has already rejected anything outside [A-Za-z0-9_] (S06), the
+    # same rule config/postgres/healthcheck.sh splices under.
+    A=$(q postgres "SELECT 'checked:' || coalesce((SELECT CASE WHEN rolsuper THEN 'super' ELSE 'ok' END FROM pg_roles WHERE rolname = '$app'), 'missing');")
+    case "$A" in
+      checked:ok)      PRESENT=$((PRESENT + 1)) ;;
+      checked:super)   SUPER="$SUPER $app" ;;
+      checked:missing) MISSING="$MISSING $app" ;;
+      *)               UNANSWERED="$UNANSWERED $app" ;;
+    esac
+  done
+  if [ "$EXPECTED" -eq 0 ]; then
+    bad "the restore reported no restored database, so no app role was checked; an expectation of nothing cannot fail"
+  elif [ "$PRESENT" -eq "$EXPECTED" ] && [ -z "$MISSING$SUPER$UNANSWERED" ]; then
+    ok "all $EXPECTED app roles restored ($(printf '%s' "$APPS" | tr '\n' ' ')), none of them a superuser"
   else
-    bad "app roles after restore: ${R:-0}/4 present, ${S:-?} are superusers"
+    bad "app roles after restore: $PRESENT/$EXPECTED present${MISSING:+; MISSING:$MISSING}${SUPER:+; SUPERUSER:$SUPER}${UNANSWERED:+; NOT ANSWERED:$UNANSWERED}"
   fi
 fi
 

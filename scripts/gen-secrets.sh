@@ -356,11 +356,16 @@ chmod 0600 "$APPPW"
 # derives it from the file this loop writes: the first-boot init script, the
 # health probe, `db-init` and `doctor` (both of which run the two above) and
 # backup.sh all read the key set of app_db_passwords; restore.sh reads the
-# archive.  Adding an app is ONE edit, here.
+# archive and hands that set to the restore drill, which asserts one
+# non-superuser role per restored database.  Adding an app is ONE edit, here.
 #
-# CI invariant I15 fails the build if a second literal copy appears anywhere,
-# because the previous arrangement was four copies under a comment promising
-# they could not diverge.
+# CI invariant I15 fails the build when a copy of this list appears in a
+# `for ... in` loop, a bare assignment or a SQL `IN (...)` set — the three
+# shapes the six copies this replaced were actually written in — and when any
+# named consumer stops deriving, so deleting a derivation cannot make it pass.
+# It is a tripwire for those three shapes and NOT a proof that no literal copy
+# can exist: a list built with `printf` or spread down a heredoc would slip
+# past it.  tests/app-list-coupling.sh measures the behaviour instead.
 for app in authelia openwebui litellm n8n; do
   if grep -q "^${app}=" "$APPPW" 2>/dev/null; then
     log "  reuse   db password for $app"

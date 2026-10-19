@@ -643,41 +643,113 @@ def i14(ctx):
     return bad
 
 
-@check("I15", "the per-app database list is declared ONCE; every consumer derives it")
+@check("I15", "one declaration of the app list; named consumers derive it; no literal copy in the 3 gated shapes")
 def i15(ctx):
     """One declaration, N derivations — checked, not promised in a comment.
 
-    NOM-307's review found the app list written out literally in four files
+    NOM-307's review found the app list written out literally in SIX files
     under a comment in healthcheck.sh asserting that two of them "cannot
     drift".  Nothing coupled them: no invariant, no test.  Declaring the set
     in gen-secrets.sh and deriving it everywhere else is only a fix while
     something fails the build when another literal copy appears.
 
-    TWO WAYS THIS CHECK COULD HAVE BEEN FAKE, both measured while writing it:
+    WHAT THIS CHECK ACTUALLY COVERS, stated exactly, because the first cut of
+    it claimed more than it did.  A literal that names EVERY declared app, in
+    one of three SHAPES, fails the build (<app> stands for an app name — real
+    names here would make this file the second copy and fail the check):
+
+        for x in <app> <app> <app> <app>                 (a loop)
+        APPS="<app> <app> <app> <app>"                   (an assignment)
+        ... WHERE rolname IN ('<app>','<app>', ...)       (a SQL set)
+
+    The first version matched only the loop, so `drill.sh`'s SQL `IN (...)`
+    list and count sat outside the gate while gen-secrets.sh's comment claimed
+    "a second literal copy anywhere" would fail the build.  It is a tripwire
+    for the shapes that have actually appeared in this repository, NOT a proof
+    that no literal copy can exist: a list assembled by `printf`, spread down
+    a heredoc, or built one `grep -q` at a time would still slip past it.
+    tests/app-list-coupling.sh deliberately contains such a `printf` fixture.
+
+    IT TAKES THE WHOLE SET, not two tokens.  Both weaker thresholds were
+    measured: a substring scan returns the legitimate per-app VOLUME lists in
+    backup.sh, restore.sh and remove.sh, and "any two app tokens" additionally
+    returns doctor.sh's `service:secret-path` pair list, which names postgres,
+    n8n and authelia and is a list of services, not of databases.  Both are
+    different lists with different blast radii.  A copy of THIS list names all
+    of it, because it is copied from the declaration the day it is written —
+    which is the day this check has to catch it.
+
+    FOUR WAYS THIS CHECK COULD HAVE BEEN FAKE, all measured while writing it:
 
       * Scanning raw text matched the COMMENTS that describe the defect being
         removed, so the fix failed its own invariant and the only repair would
         have been to allowlist the prose.  Full-line comments are stripped
         first.
       * `\bn8n\b` matches inside `aistack-n8n-data`, so every volume loop in
-        backup.sh, restore.sh and remove.sh looked like an app list.  The word
-        list is split on whitespace and compared by EXACT TOKEN.
+        backup.sh, restore.sh and remove.sh looked like an app list.  Tokens
+        are split on characters that are neither alphanumeric nor `_.-`, so
+        `aistack-n8n-data` stays ONE token and matches no app EXACTLY.
+      * Writing the app names here, in the checker, made this file the second
+        literal copy and I15 failed itself.  So the names are DERIVED from the
+        declaration in gen-secrets.sh, which also means a checker that cannot
+        find that declaration fails instead of quietly looking for nothing.
+      * Deleting a derivation would have made the check pass vacuously, so
+        every consumer is listed by name with the token that proves it reads
+        the derived source.
     """
-    APPS = {"authelia", "openwebui", "litellm", "n8n"}
     DECLARER = os.path.join("scripts", "gen-secrets.sh")
-    # Every consumer, and the token that proves it derives rather than
-    # declares.  Listed explicitly so that DELETING a loop cannot make this
-    # check pass vacuously: an absent derivation is a failure, exactly like the
+    # Every consumer, and the token(s) that prove it derives rather than
+    # declares.  Listed explicitly so that DELETING a derivation cannot make
+    # this check pass: an absent derivation is a failure, exactly like the
     # absent runtime_ids entry this ticket started from.
     DERIVERS = {
-        os.path.join("config", "postgres", "init", "01-roles-and-databases.sh"): "app_db_passwords",
-        os.path.join("config", "postgres", "healthcheck.sh"): "app_db_passwords",
-        os.path.join("scripts", "backup.sh"): "app_db_passwords",
-        os.path.join("scripts", "restore.sh"): "payload/*.dump",
+        os.path.join("config", "postgres", "init", "01-roles-and-databases.sh"): ("app_db_passwords",),
+        os.path.join("config", "postgres", "healthcheck.sh"): ("app_db_passwords",),
+        os.path.join("scripts", "backup.sh"): ("app_db_passwords",),
+        # restore.sh reads the ARCHIVE, then hands that set to the drill.
+        os.path.join("scripts", "restore.sh"): ("payload/*.dump", "AISTACK_RESTORED_DBS_FILE"),
+        os.path.join("scripts", "drill.sh"): ("AISTACK_RESTORED_DBS_FILE",),
     }
-    loop = re.compile(r"\bfor\s+\w+\s+in\s+([^\n;]*)")
+    SHAPES = (
+        ("a `for ... in` loop", re.compile(r"\bfor\s+\w+\s+in\s+([^\n;]*)")),
+        ("an assignment", re.compile(r"(?m)^[ \t]*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?"
+                                    r"[A-Za-z_][A-Za-z0-9_]*\+?=(.*)$")),
+        ("a SQL `IN (...)` set", re.compile(r"(?is)\bIN\s*\(([^)]*)\)")),
+    )
+    # Keeps `aistack-n8n-data` and `n8n-data` whole; splits quotes, commas,
+    # parentheses, whitespace and `$`.
+    SPLIT = re.compile(r"[^A-Za-z0-9_.-]+")
+
+    def code_of(path):
+        raw = open(path, encoding="utf-8", errors="replace").read()
+        # Full-line comments only.  Stripping from any '#' would eat
+        # ${line#*=} and ${ANSWER#checked:} and could invent a match.
+        code = "\n".join("" if ln.lstrip().startswith("#") else ln
+                          for ln in raw.splitlines())
+        return code.replace("\\\n", " ")  # join continuations before matching
+
+    def tokens(words):
+        return [t for t in SPLIT.split(words.strip()) if t]
+
     bad = []
-    declarations = []
+    # --- the app names, DERIVED from the declaration ------------------------
+    declarer_full = os.path.join(ctx.root, DECLARER)
+    if not os.path.exists(declarer_full):
+        return [f"{DECLARER} is missing, so the app list has no declaration and "
+                f"I15 has nothing to check against"]
+    bare = re.compile(r"[a-z][a-z0-9_]*\Z")
+    found = []
+    for words in SHAPES[0][1].findall(code_of(declarer_full)):
+        toks = tokens(words)
+        if len(toks) >= 2 and all(bare.match(t) for t in toks):
+            found.append(toks)
+    if len(found) != 1:
+        return [f"{DECLARER} holds {len(found)} loops that look like the app-list "
+                f"declaration; I15 needs exactly one to derive the app names "
+                f"from, and cannot check a list it cannot find"]
+    APPS = set(found[0])
+
+    # --- no second literal copy, in any of the gated shapes -----------------
     for dirpath, dirnames, filenames in os.walk(ctx.root):
         dirnames[:] = [d for d in dirnames
                        if d not in (".git", "__pycache__", "node_modules", "backups", ".runtime")]
@@ -687,37 +759,33 @@ def i15(ctx):
             if not (name.endswith((".sh", ".py")) or rel == os.path.join("bin", "aistack")):
                 continue
             try:
-                raw = open(full, encoding="utf-8", errors="replace").read()
+                code = code_of(full)
             except OSError as e:
                 bad.append(f"{rel} could not be read ({e}); I15 cannot be checked over it")
                 continue
-            # Full-line comments only.  Stripping from any '#' would eat
-            # ${line#*=} and ${ANSWER#checked:} and could invent a match.
-            code = "\n".join("" if ln.lstrip().startswith("#") else ln
-                             for ln in raw.splitlines())
-            code = code.replace("\\\n", " ")  # join continuations before matching
-            for words in loop.findall(code):
-                named = APPS.intersection(words.split())
-                if len(named) >= 2:
-                    declarations.append((rel, " ".join(sorted(named))))
-    for rel, named in declarations:
-        if rel != DECLARER:
-            bad.append(f"{rel} writes the app list out literally ({named}); "
-                       f"{DECLARER} is the single declaration and every other "
-                       f"consumer must derive it")
-    if not any(rel == DECLARER for rel, _ in declarations):
-        bad.append(f"{DECLARER} no longer declares the app list, so the "
-                   f"derivations have no source to read and I15 would pass "
-                   f"vacuously")
-    for rel, token in sorted(DERIVERS.items()):
+            for shape, rx in SHAPES:
+                for words in rx.findall(code):
+                    named = APPS.intersection(tokens(words))
+                    if named != APPS:
+                        continue
+                    if rel == DECLARER and shape == SHAPES[0][0]:
+                        continue  # the one declaration
+                    bad.append(f"{rel} writes the app list out literally in {shape} "
+                               f"({' '.join(sorted(named))}); {DECLARER} is the single "
+                               f"declaration and every other consumer must derive it")
+
+    # --- and every consumer still derives -----------------------------------
+    for rel, want in sorted(DERIVERS.items()):
         full = os.path.join(ctx.root, rel)
         if not os.path.exists(full):
             bad.append(f"{rel} is missing; it is one of the consumers I15 quantifies over")
             continue
-        if token not in open(full, encoding="utf-8", errors="replace").read():
-            bad.append(f"{rel} does not mention {token}, so it cannot be deriving "
-                       f"the app list; a consumer that derives nothing is how the "
-                       f"list drifts back apart")
+        text = open(full, encoding="utf-8", errors="replace").read()
+        for token in want:
+            if token not in text:
+                bad.append(f"{rel} does not mention {token}, so it cannot be deriving "
+                           f"the app list; a consumer that derives nothing is how the "
+                           f"list drifts back apart")
     return bad
 
 
