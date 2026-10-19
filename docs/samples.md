@@ -51,7 +51,11 @@ bin/aistack samples setup
 3. **mints three demo credentials** — a Postgres login, a LiteLLM *virtual* key
    with its own small budget, and a random 48-hex-character token for W4's
    webhook — writes them `0600` under `secrets/` and imports them into n8n with
-   fixed ids, which is what lets the templates bind to them by id;
+   fixed ids, which is what lets the templates bind to them by id. It also
+   re-imports the backup drill's two **ballast** credentials
+   (`samples/credentials.synthetic.json`, ids `aistackDrillSyn1` and
+   `aistackDrillSyn2`) and asserts there are exactly two of them, not two more
+   per run;
 4. **imports all four workflows** with fixed ids, asserts all four are inactive,
    and asserts a re-import leaves four rather than eight. Four are imported and
    bound, including the deferred W2; three are executable;
@@ -252,6 +256,24 @@ This removes the four demo workflows and three demo credentials from n8n, drops
 the `aistack_demo` database and role, **revokes** the LiteLLM virtual key
 rather than merely forgetting it, and deletes the three generated secrets and
 the generated PDF.
+
+**One thing setup creates survives teardown on purpose:** the two ballast
+credentials in `samples/credentials.synthetic.json`. They are `samples load`
+state, not demo state — `aistack drill run` exports and decrypts them to prove
+the n8n encryption key travelled with the archive, and with zero credentials in
+the database that assertion degrades to a printed note rather than a failure
+(`scripts/drill.sh`). Their ids are deliberately outside the `aistackDemo%`
+pattern teardown deletes by. They are bound to nothing and hold only
+`SYNTHETIC-NOT-A-REAL-…` values. Remove them deliberately if you want a clean
+n8n:
+
+```sh
+docker exec aistack-postgres psql -U aistack_admin -d n8n \
+  -c "DELETE FROM credentials_entity WHERE id IN ('aistackDrillSyn1','aistackDrillSyn2')"
+```
+
+Doing that leaves the next `aistack drill run` with no ciphertext to decrypt
+until something imports a credential again.
 
 It deliberately does **not** delete the model weights: they are shared with the
 rest of the stack, and a teardown that silently removed a 2 GB download would

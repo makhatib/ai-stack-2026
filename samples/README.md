@@ -10,7 +10,11 @@ password anyone forgot to rotate.
   "0 credentials restored", which proves nothing. Imported with
   `n8n import:credentials`, they are encrypted with the instance key, so a
   restored stack that can read them has demonstrated that the key travelled
-  with the archive.
+  with the archive. They carry **fixed ids** (`aistackDrillSyn1`,
+  `aistackDrillSyn2`) so re-importing updates one pair instead of minting a
+  new one every run, and those ids sit outside the `aistackDemo%` pattern
+  `samples teardown` deletes by, because the drill needs this ciphertext to
+  outlive the demo.
 - `corpus/` — a few paragraphs of public-domain text for W1 and W2, so the
   research demo has something local to search.
 - `fixtures/` — the demo schema (`schema.sql`) and the generator for the one
@@ -22,7 +26,7 @@ password anyone forgot to rotate.
 ```sh
 bin/aistack samples setup      # make the demos runnable (W1, W3, W4)
 bin/aistack samples run all    # run them and check the outputs
-bin/aistack samples teardown   # remove everything setup created
+bin/aistack samples teardown   # remove it again (the drill ballast pair stays)
 
 bin/aistack samples load       # import ONLY — what the backup drill needs
 ```

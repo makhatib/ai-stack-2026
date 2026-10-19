@@ -18,7 +18,7 @@
 #   run        execute W1/W3/W4 and CHECK THE OUTPUT, negative cases included;
 #              report W2 as DEFERRED with the measurement behind it
 #   approve    the human decision step in W3, as a separate privilege path
-#   teardown   drop everything setup created
+#   teardown   drop everything setup created, except the drill ballast pair
 #
 # THREE RULES THIS SCRIPT DOES NOT BEND.
 #
@@ -323,10 +323,26 @@ PY
     || die "importing the demo credentials failed"
   shred -u "$RUNDIR/credentials.json" 2>/dev/null || rm -f "$RUNDIR/credentials.json"
 
-  # The drill's ballast pair, unchanged and bound to nothing.  Imported here
-  # too so `aistack drill run` still has ciphertext to decrypt.
+  # The drill's ballast pair, bound to nothing.  Imported here too so
+  # `aistack drill run` still has ciphertext to decrypt: scripts/drill.sh
+  # exports it and greps for the SYNTHETIC marker, and with zero credentials
+  # that assertion degrades to a printed note instead of a failure, which is
+  # the one failure mode a restore drill must not have.
+  #
+  # It carries FIXED ids for the same reason the workflows do.  The file
+  # shipped without them, so n8n minted a fresh pair on every import: ten
+  # setup/load runs left twenty orphaned credentials that nothing deleted.
   dc exec -T n8n n8n import:credentials --input=/opt/aistack/samples/credentials.synthetic.json >/dev/null 2>&1 \
     || die "importing samples/credentials.synthetic.json failed"
+
+  # Two ballast rows, not two per run -- asserted, because the leak this
+  # replaces was silent.  The ids are deliberately OUTSIDE teardown's
+  # 'aistackDemo%' pattern: this pair is `samples load` state that the drill
+  # depends on, so teardown leaves it, and it is the one thing setup creates
+  # that teardown does not remove.  See docs/samples.md section 4.
+  local nb
+  nb="$(psql_admin n8n -tAc "select count(*) from credentials_entity where name in ('Synthetic Postgres (aistack demo)','Synthetic webhook token (aistack demo)')")"
+  [ "$nb" = "2" ] || die "expected exactly 2 drill ballast credentials, found $nb -- an id-less import left orphans; delete the rows whose id is neither aistackDrillSyn1 nor aistackDrillSyn2"
 
   # Assert, rather than trust the exit code: a credential whose id did not
   # survive the import binds to nothing and every Postgres node fails later
