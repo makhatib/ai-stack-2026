@@ -369,9 +369,19 @@ cmd_models() {
       [ $# -ge 1 ] || die "usage: aistack models pull <name>"
       with_lifecycle_lock sh with_helper_lock _model_pull "$@"
       ;;
-    list) docker run --rm --network aistack-inference \
-            "${OLLAMA_IMAGE}:${OLLAMA_TAG}@${OLLAMA_DIGEST}" \
-            sh -c 'OLLAMA_HOST=http://ollama:11434 ollama list' ;;
+    list)
+      # shellcheck disable=SC1091
+      source "$ROOT/versions.env"
+      # --entrypoint sh: the ollama image's ENTRYPOINT *is* `ollama`, so a bare
+      # `sh -c …` argument is parsed as the `ollama sh` SUBCOMMAND and dies with
+      # `unknown command "sh" for "ollama"`.  MEASURED (NOM-302, 2026-10-19):
+      # both this and `models pull` were broken this way, which is why QA found
+      # an empty `ollama list` after a successful install — the pull never ran.
+      docker run --rm --network aistack-inference \
+        --entrypoint sh \
+        "${OLLAMA_IMAGE}:${OLLAMA_TAG}@${OLLAMA_DIGEST}" \
+        -c 'OLLAMA_HOST=http://ollama:11434 ollama list'
+      ;;
     *) die "usage: aistack models {pull <name>|list}" ;;
   esac
 }
@@ -401,13 +411,17 @@ _model_pull() {
   trap 'docker network rm aistack-egress >/dev/null 2>&1 || true' RETURN
 
   info "Pulling '$name' through the model-puller helper (egress), not through Ollama."
+  # --entrypoint sh, for the reason spelled out in `models list` above: without
+  # it docker hands `sh -c …` to the image's `ollama` ENTRYPOINT as a
+  # subcommand name and the pull exits 1 having downloaded nothing.
   docker run --rm --name aistack-model-puller \
     --network aistack-egress \
     -v aistack-ollama-models:/root/.ollama \
     --read-only --cap-drop ALL --security-opt no-new-privileges:true \
     --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    --entrypoint sh \
     "${OLLAMA_IMAGE}:${OLLAMA_TAG}@${OLLAMA_DIGEST}" \
-    sh -c "ollama serve & sleep 3; ollama pull '$name'; pkill ollama"
+    -c "ollama serve & sleep 3; ollama pull '$name'; pkill ollama"
 }
 
 # THE REPAIR FOR AN INTERRUPTED FIRST BOOT.
@@ -480,10 +494,18 @@ cmd_render_strings() { "$ROOT/scripts/render-strings.sh" "$@"; }
 cmd_samples() {
   case "${1:-}" in
     load)
-      # SYNTHETIC ONLY.  These exist so the backup drill can prove CREDENTIAL
-      # DECRYPTION with real ciphertext rather than reporting "0 credentials
-      # restored", which proves nothing about the key travelling with the
-      # archive.
+      # THE OLD COMMAND, KEPT BECAUSE THE DRILL DEPENDS ON IT AND ONLY ON IT.
+      #
+      # `drill run` needs n8n credential CIPHERTEXT to decrypt, so that a
+      # restore reporting "0 credentials restored" cannot pass for a restore
+      # that proved the key travelled with the archive.  That is all this
+      # subcommand was ever for, and it still does exactly that.
+      #
+      # IT IS NOT A DEMO, which is the lesson of NOM-302: it imported four
+      # workflows, exited 0, and not one of them could run — no weights, no
+      # credentials bound, no tables to write to, no question to ask.  An
+      # import is a file landing in a database.  Use `samples setup` for
+      # something a person can run and check.
       info "Importing synthetic workflows and credentials into n8n."
       info "Every value is synthetic; see samples/README.md."
       dc exec -T n8n n8n import:workflow --separate --input=/opt/aistack/workflows \
@@ -491,8 +513,15 @@ cmd_samples() {
       dc exec -T n8n n8n import:credentials --input=/opt/aistack/samples/credentials.synthetic.json \
         || die "credential import failed"
       info "Done.  'aistack drill run' will now exercise credential decryption."
+      info ""
+      info "This imported the templates; it did NOT make them runnable."
+      info "For a demo you can run and check: aistack samples setup, then"
+      info "aistack samples run all.  See docs/samples.md."
       ;;
-    *) die "usage: aistack samples load" ;;
+    setup|run|approve|teardown)
+      "$ROOT/scripts/samples.sh" "$@"
+      ;;
+    *) die "usage: aistack samples {setup|run [W1|W2|W3|W4|P2|all]|approve <action-id>|teardown|load}" ;;
   esac
 }
 
@@ -525,7 +554,12 @@ aistack — AI Stack 2026
   support-bundle      a redacted artefact to send when asking for help
   remove              uninstall, with an explicit prompt about volumes
 
-  samples load        import the synthetic workflows and credentials
+  samples setup       preload weights, build the demo database, bind the
+                      synthetic credentials, import the four templates
+  samples run [case]  run W1/W3/W4/P2 and CHECK the outputs (default: all)
+  samples approve ID  the human decision step in W3's approval envelope
+  samples teardown    remove everything 'samples setup' created
+  samples load        import only, for the backup drill's ciphertext
   manifest counts     regenerate the counts from manifest.yaml
   render-strings      re-render the frozen local-mode copy into every surface
 EOF

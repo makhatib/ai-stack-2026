@@ -1,4 +1,5 @@
 {
+  "id": "aistackDemoW1001",
   "name": "W1 — Research over a local corpus (NO internet)",
   "nodes": [
     {
@@ -11,53 +12,179 @@
     },
     {
       "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "w1-q",
+              "name": "question",
+              "type": "string",
+              "value": "How does retrieval-augmented generation find the right chunk of a document?"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "w1-question",
+      "name": "Synthetic question",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0],
+      "notes": "THE QUESTION LIVES HERE, not in the caller. FOUND BY QA (NOM-302): the first version wired an empty manual trigger straight into the embedding request, so the demo embedded `undefined` and retrieved whatever that happens to be near. A demo with no input is not a demo. `samples setup` records this exact string in w1_expected alongside the corpus file the harness asserts comes back first, so the question and its assertion cannot drift apart."
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "http://litellm:4000/v1/embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ model: 'local-embed', input: $json.question }) }}",
-        "options": { "timeout": 60000 }
+        "options": { "timeout": 300000 }
       },
       "id": "w1-embed-q",
       "name": "Embed the question",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [220, 0]
+      "position": [440, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "aistackDemoLlm01", "name": "Demo LiteLLM virtual key (aistack samples)" }
+      },
+      "notes": "LiteLLM REQUIRES A KEY AND ALWAYS DID. MEASURED (NOM-302): an unauthenticated POST here returns 401, so the first version of this template could not have completed even with weights loaded and tables present. The credential carries a LiteLLM VIRTUAL key minted by `samples setup` with its own budget — not the master key, which would have no spend ceiling and no way to revoke this demo alone."
+    },
+    {
+      "parameters": {
+        "jsCode": "// pgvector takes its input as a text literal, '[0.1,0.2,…]', not as a\n// Postgres array.  Building it here rather than in the SQL keeps the query\n// parameterised: the vector travels as a bound $1, so nothing about the\n// embedding can change the shape of the statement.\nconst row = $json.data && $json.data[0];\nif (!row || !Array.isArray(row.embedding)) {\n  throw new Error('no embedding in the LiteLLM response: ' + JSON.stringify($json).slice(0, 200));\n}\nif (row.embedding.length !== 768) {\n  throw new Error('expected 768 dimensions from local-embed, got ' + row.embedding.length);\n}\nreturn [{\n  json: {\n    question: $('Synthetic question').first().json.question,\n    vec: '[' + row.embedding.join(',') + ']',\n  },\n}];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w1-vec",
+      "name": "Vector literal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT source, content FROM w2_chunks ORDER BY embedding <-> $1::vector LIMIT 5",
-        "options": {}
+        "query": "SELECT source, content, embedding <-> $1::vector AS distance FROM w2_chunks ORDER BY embedding <-> $1::vector LIMIT 5",
+        "options": {
+          "queryReplacement": "={{ [$json.vec] }}"
+        }
       },
       "id": "w1-search",
       "name": "Nearest chunks (pgvector)",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [440, 0],
-      "notes": "THE CORPUS IS LOCAL AND PRELOADED. This demo needs no internet and gets none: Open WebUI's web search is off in every profile and there is no web-search group in this release. The internet-backed version of this demo is a LATER release, not a setting."
+      "typeVersion": 2.7,
+      "position": [880, 0],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "THE CORPUS IS LOCAL AND PRELOADED. This demo needs no internet and gets none: Open WebUI's web search is off in every profile and there is no web-search group in this release. The internet-backed version of this demo is a LATER release, not a setting.\n\nThe $1 placeholder is bound through Query Parameters. FOUND BY QA (NOM-302): the first version wrote $1 into the SQL and supplied nothing, so Postgres rejected the statement before pgvector was ever reached. `distance` is selected so the harness can assert the ORDER BY actually ran rather than trusting row order."
     },
     {
       "parameters": {
         "method": "POST",
         "url": "http://litellm:4000/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: 'Answer using ONLY this context. Cite the source of each claim.\\n\\n' + JSON.stringify($input.all().map(i => i.json)) }], max_tokens: 512 }) }}",
-        "options": { "timeout": 120000 }
+        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: 'Answer using ONLY this context. Cite the source of each claim.\\n\\n' + JSON.stringify($input.all().map(i => ({ source: i.json.source, content: i.json.content }))) }], max_tokens: 160 }) }}",
+        "options": { "timeout": 840000 }
       },
       "id": "w1-answer",
       "name": "Answer with citations",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [660, 0]
+      "position": [1100, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "aistackDemoLlm01", "name": "Demo LiteLLM virtual key (aistack samples)" }
+      },
+      "notes": "The `distance` column is dropped from the prompt on purpose: a float in the context is a token the model will try to explain."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WHAT THE DEMO ACTUALLY CLAIMED, assembled where it can be checked.\n//\n// The answer is prose and no assertion over prose is worth writing; the\n// RETRIEVAL is a fact.  So this node carries both out: the ordered sources\n// and their distances, which `aistack samples run W1` asserts against\n// w1_expected, and the answer, which it only checks is non-empty.\nconst answer = (($json.choices || [])[0] || {}).message || {};\nconst text = (answer.content || '').trim();\nif (!text) {\n  // FOUND BY QA (NOM-302): a template that records an empty answer and\n  // reports success is the defect this whole ticket is about.\n  throw new Error('the model returned no content: ' + JSON.stringify($json).slice(0, 300));\n}\nconst hits = $('Nearest chunks (pgvector)').all().map(i => i.json);\nif (hits.length === 0) {\n  throw new Error('pgvector returned no rows — is the corpus loaded?');\n}\nreturn [{\n  json: {\n    question: $('Synthetic question').first().json.question,\n    top_source: hits[0].source,\n    sources: hits.map(h => h.source),\n    distances: hits.map(h => Number(h.distance)),\n    answer: text,\n  },\n}];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w1-collect",
+      "name": "Collect the demo result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO w1_runs (question, top_source, sources, distances, answer) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5) RETURNING run_id, top_source, created_at",
+        "options": {
+          "queryReplacement": "={{ [$json.question, $json.top_source, JSON.stringify($json.sources), JSON.stringify($json.distances), $json.answer] }}"
+        }
+      },
+      "id": "w1-record",
+      "name": "Record the run (answer + citations)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [1540, 0],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "THE DEMO WRITES ITS OWN EVIDENCE. `aistack samples run W1` asserts against this row rather than against the CLI's stdout, for two reasons: stdout shape is an n8n implementation detail that changes between minor versions, and a run a human did in the UI leaves the same evidence as a run the harness did. An answer stored next to the sources it cited is also the only form in which a citation claim can be re-checked later."
     }
   ],
   "connections": {
-    "Run manually": { "main": [[{ "node": "Embed the question", "type": "main", "index": 0 }]] },
-    "Embed the question": { "main": [[{ "node": "Nearest chunks (pgvector)", "type": "main", "index": 0 }]] },
-    "Nearest chunks (pgvector)": { "main": [[{ "node": "Answer with citations", "type": "main", "index": 0 }]] }
+    "Run manually": {
+      "main": [
+        [
+          { "node": "Synthetic question", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Synthetic question": {
+      "main": [
+        [
+          { "node": "Embed the question", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Embed the question": {
+      "main": [
+        [
+          { "node": "Vector literal", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Vector literal": {
+      "main": [
+        [
+          { "node": "Nearest chunks (pgvector)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Nearest chunks (pgvector)": {
+      "main": [
+        [
+          { "node": "Answer with citations", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Answer with citations": {
+      "main": [
+        [
+          { "node": "Collect the demo result", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Collect the demo result": {
+      "main": [
+        [
+          { "node": "Record the run (answer + citations)", "type": "main", "index": 0 }
+        ]
+      ]
+    }
   },
-  "settings": { "executionTimeout": 300 },
+  "settings": { "executionTimeout": 900 },
   "active": false
 }

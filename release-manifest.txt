@@ -30,4 +30,5 @@ docs/troubleshooting.md
 docs/upgrade.md
 docs/security-faq.md
 docs/backup-restore.md
+docs/samples.md
 config/homepage/settings.yaml

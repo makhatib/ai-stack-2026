@@ -1,4 +1,5 @@
 {
+  "id": "aistackDemoW4001",
   "name": "W4 — Webhook to model to stored result",
   "nodes": [
     {
@@ -6,50 +7,113 @@
         "httpMethod": "POST",
         "path": "w4-demo",
         "authentication": "headerAuth",
+        "responseMode": "lastNode",
         "options": { "rawBody": false }
       },
       "id": "w4-trigger",
+      "webhookId": "a1f5c0de-7b2e-4c31-9d44-aistack0w4de",
       "name": "Webhook (header token)",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [0, 0],
-      "notes": "Local mode only. Public webhooks are not in v1. Caddy bounds the body to 1 MB before this node ever runs, so an unauthenticated POST costs nothing."
+      "credentials": {
+        "httpHeaderAuth": { "id": "aistackDemoHdr01", "name": "Demo webhook token (aistack samples)" }
+      },
+      "notes": "THE TOKEN IS THE CONTROL, AND IT IS NOW BOUND. FOUND BY QA (NOM-302): this node said `authentication: headerAuth` with NO CREDENTIAL ATTACHED, which n8n treats as a configuration error — the webhook could not register, so the one security property this demo exists to show was absent. `aistack samples setup` generates a 48-hex-character token, writes it 0600 under secrets/ and imports it as the credential this node names; `aistack samples run W4` then POSTs with it, without it, and with a wrong one, and asserts 200/401/401 plus the row count after each.\n\nTHE TOKEN IS GENERATED, NEVER COMMITTED. Caddy proxies /n8n/webhook/* WITHOUT forward-auth — n8n's own header check is the only gate on that path — so a fixed token in git would be a shared secret published with the source.\n\nresponseMode is lastNode so the caller receives the stored row rather than n8n's 'workflow got started'. That is what makes the demo checkable from one HTTP call, and it is also the honest shape for a synchronous question-and-answer webhook.\n\nLOCAL MODE ONLY, AND THE HARNESS PROVES IT RATHER THAN ASSERTING IT. Public webhooks are not in this release. `samples run W4` serves this workflow from a SHORT-LIVED helper n8n container on the internal networks, checks it there, and then checks that the live n8n — the one the reverse proxy talks to — still answers 404 on the same path. Caddy bounds the body to 1 MB before any of this runs."
+    },
+    {
+      "parameters": {
+        "jsCode": "// A prompt, or a refusal — not a model call on `undefined`.\nconst body = $json.body || {};\nconst prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';\nif (!prompt) {\n  throw new Error('the request body needs a non-empty \"prompt\" string');\n}\nif (prompt.length > 2000) {\n  throw new Error('prompt is longer than 2000 characters');\n}\nreturn [{ json: { prompt } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w4-validate",
+      "name": "Validate the request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "notes": "A length bound here as well as in Caddy. Caddy's 1 MB limit is about the cost of reading the request; this one is about the cost of the inference it would buy."
     },
     {
       "parameters": {
         "method": "POST",
         "url": "http://litellm:4000/v1/chat/completions",
-        "sendHeaders": true,
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: $json.body.prompt }], max_tokens: 256 }) }}",
-        "options": { "timeout": 120000 }
+        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: $json.prompt }], max_tokens: 160 }) }}",
+        "options": { "timeout": 840000 }
       },
       "id": "w4-model",
       "name": "Ask the model via LiteLLM",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [220, 0],
-      "notes": "LiteLLM is the ONLY inference front door. n8n cannot reach Ollama directly — they share no network — and that is the point."
+      "position": [440, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "aistackDemoLlm01", "name": "Demo LiteLLM virtual key (aistack samples)" }
+      },
+      "notes": "LiteLLM is the ONLY inference front door. n8n cannot reach Ollama directly — they share no network — and that is the point. MEASURED (NOM-302): LiteLLM answers 401 without a key, so the virtual key bound here is load-bearing and not decoration."
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = (($json.choices || [])[0] || {}).message || {};\nconst answer = (msg.content || '').trim();\nif (!answer) {\n  throw new Error('the model returned no content: ' + JSON.stringify($json).slice(0, 300));\n}\nreturn [{ json: { prompt: $('Validate the request').first().json.prompt, answer } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w4-answer",
+      "name": "Take the answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO w4_results (prompt, answer, created_at) VALUES ($1, $2, now())",
-        "options": {}
+        "query": "INSERT INTO w4_results (prompt, answer, created_at) VALUES ($1, $2, now()) RETURNING result_id, prompt, answer, created_at",
+        "options": {
+          "queryReplacement": "={{ [$json.prompt, $json.answer] }}"
+        }
       },
       "id": "w4-store",
       "name": "Store the result",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [440, 0],
-      "notes": "Uses the n8n role, which is not a superuser and can only reach its own database."
+      "typeVersion": 2.7,
+      "position": [880, 0],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "The demo role, which owns ONE database and is dropped by `samples teardown`. It is not the n8n operational role and it is not a superuser.\n\nBoth placeholders are bound through Query Parameters. FOUND BY QA (NOM-302): the first version wrote $1/$2 into the SQL and supplied nothing, so this statement could never have run — a prompt containing a quote would have been the second problem, had the first not been fatal.\n\nThis is the LAST node, so with responseMode=lastNode the stored row is what the caller gets back."
     }
   ],
   "connections": {
-    "Webhook (header token)": { "main": [[{ "node": "Ask the model via LiteLLM", "type": "main", "index": 0 }]] },
-    "Ask the model via LiteLLM": { "main": [[{ "node": "Store the result", "type": "main", "index": 0 }]] }
+    "Webhook (header token)": {
+      "main": [
+        [
+          { "node": "Validate the request", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Validate the request": {
+      "main": [
+        [
+          { "node": "Ask the model via LiteLLM", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Ask the model via LiteLLM": {
+      "main": [
+        [
+          { "node": "Take the answer", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Take the answer": {
+      "main": [
+        [
+          { "node": "Store the result", "type": "main", "index": 0 }
+        ]
+      ]
+    }
   },
-  "settings": { "executionTimeout": 300 },
+  "settings": { "executionTimeout": 900 },
   "active": false
 }

@@ -1,13 +1,80 @@
 {
+  "id": "aistackDemoW3001",
   "name": "W3 — Scheduled summary behind the approval envelope",
   "nodes": [
     {
-      "parameters": { "rule": { "interval": [{ "field": "days", "triggerAtHour": 8 }] } },
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "days", "triggerAtHour": 8 }
+          ]
+        }
+      },
       "id": "w3-cron",
       "name": "Every morning",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [0, 0]
+      "position": [0, 0],
+      "notes": "INACTIVE IN THIS RELEASE AND THE HARNESS ASSERTS IT. The schedule is what the template would do once an operator publishes it; `aistack samples run W3` executes the workflow by id instead, which runs this trigger's downstream chain without registering a timer. A demo that silently starts firing at 08:00 on a machine nobody is watching is not a demo.\n\nONE RUN, TWO JOBS, AND THE SQL DECIDES WHICH — there is no IF node here on purpose. The morning run either DISPATCHES an approval a human has already granted (the upper branch, which claims it atomically) or REQUESTS one (the lower branch, which refuses to create a second request while one is live). The two guards are mutually exclusive in SQL, so branch order cannot change the outcome, and neither branch can leave an envelope stuck in an intermediate state."
+    },
+    {
+      "parameters": {},
+      "id": "w3-manual",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 320],
+      "notes": "THE SAME TWO BRANCHES, FROM A BUTTON. A second trigger is not a second code path: this node fans out to exactly the nodes the schedule does, so what a person runs by hand is the morning run.\n\nMEASURED (NOM-302): n8n 2.x's `n8n execute --id` refuses a workflow whose only trigger is a schedule -- \"Missing node to start execution\" -- so without this node W3 could be graded only by waiting until 08:00, which is not a test anybody runs."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE approval_action SET state='executing' WHERE action_id = (SELECT action_id FROM approval_action WHERE tool='send_summary' AND state='approved' AND expires_at > now() ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING action_id, recipient, parameter_hash, config_revision",
+        "options": {}
+      },
+      "id": "w3-claim",
+      "name": "Claim an approved envelope (one row, or nothing)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [220, -160],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "THE REPLAY DEFENCE, AND IT IS THIS ONE STATEMENT. Two concurrent morning runs cannot both win: `executing` can only be entered FROM `approved`, so the second UPDATE matches zero rows and its branch simply stops. FOR UPDATE SKIP LOCKED means the loser does not block either.\n\nNo rows means there is nothing approved to send, and that is the normal case — this node has alwaysOutputData OFF deliberately, so an empty result ENDS this branch instead of carrying an empty item into a delivery step."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ver AS (SELECT a.action_id, a.recipient, a.parameter_hash, s.summary, encode(sha256(convert_to(s.summary,'UTF8')),'hex') AS recomputed FROM approval_action a JOIN w3_pending_summary s USING (action_id) WHERE a.action_id = $1), ok AS (INSERT INTO w3_delivered (action_id, recipient, summary) SELECT action_id, recipient, summary FROM ver WHERE parameter_hash = recomputed RETURNING action_id), fin AS (UPDATE approval_action a SET state = CASE WHEN EXISTS (SELECT 1 FROM ok) THEN 'executed' ELSE 'failed' END, outcome = CASE WHEN EXISTS (SELECT 1 FROM ok) THEN 'ok' ELSE 'refused' END WHERE a.action_id = $1 AND a.state = 'executing' RETURNING a.action_id, a.state, a.outcome) SELECT f.action_id, f.state, f.outcome, v.recipient, (v.parameter_hash = v.recomputed) AS hash_ok, left(v.summary, 200) AS summary_head FROM fin f JOIN ver v ON v.action_id = f.action_id",
+        "options": {
+          "queryReplacement": "={{ [$json.action_id] }}"
+        }
+      },
+      "id": "w3-deliver",
+      "name": "Re-read, re-hash, then deliver or refuse",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [440, -160],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "ONE STATEMENT, ONE TRANSACTION, AND THERE IS NO THIRD OUTCOME. The envelope is re-read and the SHA-256 recomputed over the summary that is ABOUT to be delivered; on a match the delivery row is written and the envelope becomes executed/ok, on a mismatch nothing is delivered and the envelope becomes failed/refused. Both edges are in action_state_edges and both append to action_transitions.\n\nWHY NOT A HASH CHECK IN A CODE NODE: a check that runs outside the transaction that marks the envelope used can pass and then have its subject change before the write. And an error thrown in a Code node would leave the envelope in `executing` with no path out — a stuck approval that a human has to repair by hand is worse than a refusal.\n\nNOTHING LEAVES THE MACHINE. 'Deliver' writes a row to w3_delivered. There is no mail, no webhook, no outbound message anywhere in this release, and `aistack samples run W3` asserts that the delivery landed in that table rather than asserting that a message was sent."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 1 AS needed WHERE NOT EXISTS (SELECT 1 FROM approval_action WHERE tool='send_summary' AND state IN ('pending','approved','executing') AND expires_at > now()) AND NOT EXISTS (SELECT 1 FROM w3_delivered WHERE delivered_at > now() - interval '20 hours')",
+        "options": {}
+      },
+      "id": "w3-needed",
+      "name": "Is a request even needed?",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [220, 160],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "AN ECONOMY, NOT THE CONTROL — and the difference matters. Zero rows here ends the branch BEFORE the summariser runs, which on a CPU-only box saves about ninety seconds of inference on every morning that already has an approval waiting. But this check and the INSERT further along are two separate statements, so between them anything can change; the guard that actually decides is the WHERE NOT EXISTS inside the insert itself, which runs in the same statement as the write.\n\nA cheap pre-check that is mistaken for the control is how a time-of-check race gets built on purpose."
     },
     {
       "parameters": {
@@ -18,57 +85,153 @@
       "id": "w3-read",
       "name": "Yesterday's results",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [220, 0]
+      "typeVersion": 2.7,
+      "position": [440, 160],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "alwaysOutputData is ON here, and that is the opposite choice from the claim node above for a reason: a day with no W4 results is still a day the summary should be requested for, so an empty SELECT must carry one item forward. An empty CLAIM, by contrast, means there is nothing to send."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One HTTP call regardless of row count, and the row count travels with the\n// text so the approval envelope's scope can state how much was summarised.\nconst rows = $input.all().map(i => i.json).filter(r => r && r.prompt);\nconst text = rows.length\n  ? rows.map((r, n) => (n + 1) + '. ' + r.prompt + ' -> ' + String(r.answer).replace(/\\s+/g, ' ').slice(0, 400)).join('\\n')\n  : '(no W4 results in the last day)';\nreturn [{ json: { rows: rows.length, text } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w3-collect",
+      "name": "Collect the day",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 160]
     },
     {
       "parameters": {
         "method": "POST",
         "url": "http://litellm:4000/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: 'Summarise these results in five bullets:\\n' + JSON.stringify($input.all().map(i => i.json)) }], max_tokens: 512 }) }}",
-        "options": { "timeout": 120000 }
+        "jsonBody": "={{ JSON.stringify({ model: 'local-chat', messages: [{ role: 'user', content: 'Summarise these results in at most five short bullets. Do not invent anything that is not listed.\\n\\n' + $json.text }], max_tokens: 160 }) }}",
+        "options": { "timeout": 840000 }
       },
       "id": "w3-summarise",
       "name": "Summarise",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [440, 0]
+      "position": [880, 160],
+      "credentials": {
+        "httpHeaderAuth": { "id": "aistackDemoLlm01", "name": "Demo LiteLLM virtual key (aistack samples)" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// The FINAL parameters, which is what the envelope's hash has to cover.  If\n// this text can still change after the hash is taken, the hash proves nothing.\nconst msg = (($json.choices || [])[0] || {}).message || {};\nconst summary = (msg.content || '').trim();\nif (!summary) {\n  throw new Error('the model returned no summary: ' + JSON.stringify($json).slice(0, 300));\n}\nreturn [{ json: { summary: summary.slice(0, 2000), rows: $('Collect the day').first().json.rows } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w3-final",
+      "name": "Freeze the final parameters",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 160]
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO approval_action (action_id, approver_subject, approver_groups, tool, backend_id, config_revision, recipient, scope, parameter_hash, expires_at, state) VALUES (gen_random_uuid(), $1, ARRAY['admins'], 'send_summary', 'n8n-local', $2, $3, $4::jsonb, encode(sha256($5::bytea),'hex'), now() + interval '15 minutes', 'pending') RETURNING action_id",
-        "options": {}
+        "query": "WITH want AS (SELECT $1::text AS summary, $2::int AS rows WHERE NOT EXISTS (SELECT 1 FROM approval_action WHERE tool='send_summary' AND state IN ('pending','approved','executing') AND expires_at > now()) AND NOT EXISTS (SELECT 1 FROM w3_delivered WHERE delivered_at > now() - interval '20 hours')), act AS (INSERT INTO approval_action (action_id, approver_subject, approver_groups, tool, backend_id, config_revision, recipient, scope, parameter_hash, expires_at, state) SELECT gen_random_uuid(), (SELECT value FROM w3_config WHERE key='approver_subject'), ARRAY['admins'], 'send_summary', 'n8n-local', (SELECT value FROM w3_config WHERE key='config_revision'), (SELECT value FROM w3_config WHERE key='recipient'), jsonb_build_object('tool','send_summary','rows',w.rows,'max_chars',2000), encode(sha256(convert_to(w.summary,'UTF8')),'hex'), now() + interval '15 minutes', 'pending' FROM want w RETURNING action_id, approver_subject, recipient, parameter_hash, expires_at), pend AS (INSERT INTO w3_pending_summary (action_id, summary) SELECT a.action_id, w.summary FROM act a CROSS JOIN want w RETURNING action_id) SELECT action_id, approver_subject, recipient, parameter_hash, expires_at FROM act",
+        "options": {
+          "queryReplacement": "={{ [$json.summary, $json.rows] }}"
+        }
       },
-      "id": "w3-request-approval",
+      "id": "w3-request",
       "name": "Request approval (write the envelope FIRST)",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [660, 0],
-      "notes": "THE RECORD IS WRITTEN BEFORE THE APPROVER IS PROMPTED. The envelope binds the approver's identity and groups AT DECISION TIME, the recipient, the scope, and a SHA-256 over the final parameters. Mutation after approval invalidates the decision. 15-minute expiry: a stale approval is not an approval."
+      "typeVersion": 2.7,
+      "position": [1320, 160],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "THE RECORD IS WRITTEN BEFORE THE APPROVER IS PROMPTED. The envelope binds the intended approver and their groups, the recipient, the scope, and a SHA-256 over the final parameters. Mutation after approval invalidates the decision — the delivery node recomputes that hash. 15-minute expiry: a stale approval is not an approval.\n\nTHE WORKFLOW CANNOT NAME ITS OWN APPROVER. approver_subject, recipient and config_revision are read from w3_config, which `aistack samples setup` writes; in the deployed stack they come from the agentgateway config revision and the decision itself carries Authelia's Remote-User, which the PROXY sets. The point survives the simplification: a workflow that can choose who approves it can approve itself.\n\nONE REQUEST PER DAY, NOT ONE PER RUN. The `want` CTE refuses to write a second envelope while any is pending, approved or executing, and refuses to re-request within 20 hours of a delivery. FOUND BY QA (NOM-302): the first version wrote a fresh pending envelope on every single execution, so re-running the demo three times left three identical approvals for a human to wade through — which is how approval fatigue gets engineered in."
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "UPDATE approval_action SET state='executing' WHERE action_id=$1 AND state='approved' AND expires_at > now() RETURNING action_id",
-        "options": {}
+        "jsCode": "// The only output a human should read after a request run: what is waiting,\n// who can decide it, and the exact command that decides it.\nconst r = $json;\nreturn [{\n  json: {\n    status: 'awaiting_approval',\n    action_id: r.action_id,\n    approver: r.approver_subject,\n    recipient: r.recipient,\n    expires_at: r.expires_at,\n    decide_with: 'aistack samples approve ' + r.action_id + '   (add --reject to refuse)',\n  },\n}];",
+        "mode": "runOnceForAllItems"
       },
-      "id": "w3-execute",
-      "name": "Execute only if approved (one row, or nothing)",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [880, 0],
-      "notes": "Proceeds ONLY IF one row was affected. Two concurrent executes cannot both win: the second sees a state that is no longer 'approved'. Before sending, the template re-reads the envelope in this same transaction and aborts on ANY mismatch — approver still in the group, config revision unchanged, parameter hash recomputed over what is ABOUT to be sent. If the external call times out, the workflow does NOT retry: it halts for a human. Retrying an uncertain send is how one approval becomes two payments."
+      "id": "w3-await",
+      "name": "Awaiting human approval",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 160]
     }
   ],
   "connections": {
-    "Every morning": { "main": [[{ "node": "Yesterday's results", "type": "main", "index": 0 }]] },
-    "Yesterday's results": { "main": [[{ "node": "Summarise", "type": "main", "index": 0 }]] },
-    "Summarise": { "main": [[{ "node": "Request approval (write the envelope FIRST)", "type": "main", "index": 0 }]] },
-    "Request approval (write the envelope FIRST)": { "main": [[{ "node": "Execute only if approved (one row, or nothing)", "type": "main", "index": 0 }]] }
+    "Every morning": {
+      "main": [
+        [
+          { "node": "Claim an approved envelope (one row, or nothing)", "type": "main", "index": 0 },
+          { "node": "Is a request even needed?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Is a request even needed?": {
+      "main": [
+        [
+          { "node": "Yesterday's results", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Claim an approved envelope (one row, or nothing)": {
+      "main": [
+        [
+          { "node": "Re-read, re-hash, then deliver or refuse", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Yesterday's results": {
+      "main": [
+        [
+          { "node": "Collect the day", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Collect the day": {
+      "main": [
+        [
+          { "node": "Summarise", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Summarise": {
+      "main": [
+        [
+          { "node": "Freeze the final parameters", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Freeze the final parameters": {
+      "main": [
+        [
+          { "node": "Request approval (write the envelope FIRST)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Request approval (write the envelope FIRST)": {
+      "main": [
+        [
+          { "node": "Awaiting human approval", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Run manually": {
+      "main": [
+        [
+          { "node": "Claim an approved envelope (one row, or nothing)", "type": "main", "index": 0 },
+          { "node": "Is a request even needed?", "type": "main", "index": 0 }
+        ]
+      ]
+    }
   },
-  "settings": { "executionTimeout": 300 },
+  "settings": { "executionTimeout": 900 },
   "active": false
 }

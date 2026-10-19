@@ -1,4 +1,5 @@
 {
+  "id": "aistackDemoW2001",
   "name": "W2 — Chat with your PDF (Docling to pgvector)",
   "nodes": [
     {
@@ -11,54 +12,138 @@
     },
     {
       "parameters": {
+        "fileSelector": "/opt/aistack/samples/fixtures/synthetic.pdf",
+        "options": { "dataPropertyName": "pdf" }
+      },
+      "id": "w2-read",
+      "name": "Read the synthetic PDF",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "notes": "THE DOCUMENT IS GENERATED, NOT COMMITTED. `aistack samples setup` runs samples/fixtures/make-synthetic-pdf.py, which writes a byte-identical one-page PDF whose every byte is accounted for in source. samples/ is bind-mounted read-only at /opt/aistack/samples, so this node can read it and nothing in n8n can modify it.\n\nFOUND BY QA (NOM-302): the first version of this template opened straight on the Docling request and read $json.pdf_base64 out of an empty manual trigger, so it posted `undefined` as a document."
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "http://docling-serve:5001/v1/convert/source",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ sources: [{ kind: 'file', base64_string: $json.pdf_base64, filename: 'synthetic.pdf' }], options: { to_formats: ['md'] } }) }}",
+        "jsonBody": "={{ JSON.stringify({ sources: [{ kind: 'file', base64_string: $binary.pdf.data, filename: 'synthetic.pdf' }], options: { to_formats: ['md'] } }) }}",
         "options": { "timeout": 120000 }
       },
       "id": "w2-parse",
       "name": "Parse with Docling",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [220, 0],
-      "notes": "BYTES ONLY. Docling's URL fetching is disabled and it sits on a network with no route off the host. It is the component most likely to be executing something an attacker wrote, so it sees one caller and nothing else."
+      "position": [440, 0],
+      "notes": "BYTES ONLY. Docling's URL fetching is disabled and it sits on a network with no route off the host. It is the component most likely to be executing something an attacker wrote, so it sees one caller and nothing else.\n\nAND IN THIS BUILD THAT ONE CALLER IS NOT n8n. MEASURED (NOM-302, 2026-10-19): docling-serve is on the `parse-owui` /29 and n8n is on apps+gateway+data, so `docling-serve` does not even resolve from n8n —\n\n    $ docker exec aistack-n8n getent hosts docling-serve  -> no output\n    $ docker exec aistack-n8n wget -T5 -O- http://docling-serve:5001/health\n    wget: bad address 'docling-serve:5001'\n\nThis node therefore CANNOT complete as shipped, and `aistack samples run W2` reports BLOCKED with that measurement rather than a pass. Closing the gap means giving Docling a second peer, which moves the untrusted-input component next to the engine that holds every credential: a zone change for manifest.yaml and invariant I7, not a workflow edit. It is the Tech Lead's call, tracked in NOM-302's handoff. Everything else in this template is bound and runnable, so the demo starts working the moment that bridge exists."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One chunk per heading-led block, which for the one-page synthetic document\n// is one chunk.  Chunking a four-paragraph page into thirty slices would\n// demo a tuning knob rather than the pipeline.\nconst md = (($json.document || {}).md_content || '').trim();\nif (!md) {\n  throw new Error('Docling returned no markdown: ' + JSON.stringify($json).slice(0, 300));\n}\nreturn [{ json: { source: 'synthetic.pdf', content: md } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w2-chunk",
+      "name": "Chunk the markdown",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
     },
     {
       "parameters": {
         "method": "POST",
         "url": "http://litellm:4000/v1/embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'local-embed', input: $json.document.md_content }) }}",
-        "options": { "timeout": 120000 }
+        "jsonBody": "={{ JSON.stringify({ model: 'local-embed', input: $json.content }) }}",
+        "options": { "timeout": 300000 }
       },
       "id": "w2-embed",
       "name": "Embed via LiteLLM",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [440, 0]
+      "position": [880, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "aistackDemoLlm01", "name": "Demo LiteLLM virtual key (aistack samples)" }
+      },
+      "notes": "LiteLLM REQUIRES A KEY AND ALWAYS DID. MEASURED (NOM-302): an unauthenticated POST to /v1/embeddings returns 401, so this node could not have completed without the credential this release now binds. The key is a LiteLLM virtual key with its own budget, minted by `samples setup` and revoked by `samples teardown` — not the master key."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Same literal-building step as W1, for the same reason: the vector travels\n// as a bound parameter, so nothing about an embedding can change the shape of\n// the INSERT.\nconst row = ($json.data || [])[0];\nif (!row || !Array.isArray(row.embedding)) {\n  throw new Error('no embedding in the LiteLLM response: ' + JSON.stringify($json).slice(0, 200));\n}\nif (row.embedding.length !== 768) {\n  throw new Error('expected 768 dimensions from local-embed, got ' + row.embedding.length);\n}\nreturn [{\n  json: {\n    source: $('Chunk the markdown').first().json.source,\n    content: $('Chunk the markdown').first().json.content,\n    vec: '[' + row.embedding.join(',') + ']',\n  },\n}];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "w2-vec",
+      "name": "Vector literal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO w2_chunks (source, content, embedding) VALUES ($1, $2, $3::vector)",
-        "options": {}
+        "query": "INSERT INTO w2_chunks (source, content, embedding) VALUES ($1, $2, $3::vector) RETURNING chunk_id, source",
+        "options": {
+          "queryReplacement": "={{ [$json.source, $json.content, $json.vec] }}"
+        }
       },
       "id": "w2-store",
       "name": "Store chunk + embedding",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
-      "position": [660, 0],
-      "notes": "One datastore, one backup procedure. Retention deletes a document AND its embeddings in the SAME transaction — a vector that outlives its source is a deleted document you can still search."
+      "typeVersion": 2.7,
+      "position": [1320, 0],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "One datastore, one backup procedure. Retention deletes a document AND its embeddings in the SAME transaction — a vector that outlives its source is a deleted document you can still search.\n\nThe three placeholders are bound through Query Parameters. FOUND BY QA (NOM-302): the first version wrote $1/$2/$3 into the SQL with nothing supplied, so Postgres rejected the statement before any row was written."
     }
   ],
   "connections": {
-    "Run manually": { "main": [[{ "node": "Parse with Docling", "type": "main", "index": 0 }]] },
-    "Parse with Docling": { "main": [[{ "node": "Embed via LiteLLM", "type": "main", "index": 0 }]] },
-    "Embed via LiteLLM": { "main": [[{ "node": "Store chunk + embedding", "type": "main", "index": 0 }]] }
+    "Run manually": {
+      "main": [
+        [
+          { "node": "Read the synthetic PDF", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Read the synthetic PDF": {
+      "main": [
+        [
+          { "node": "Parse with Docling", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Parse with Docling": {
+      "main": [
+        [
+          { "node": "Chunk the markdown", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Chunk the markdown": {
+      "main": [
+        [
+          { "node": "Embed via LiteLLM", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Embed via LiteLLM": {
+      "main": [
+        [
+          { "node": "Vector literal", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Vector literal": {
+      "main": [
+        [
+          { "node": "Store chunk + embedding", "type": "main", "index": 0 }
+        ]
+      ]
+    }
   },
-  "settings": { "executionTimeout": 300 },
+  "settings": { "executionTimeout": 900 },
   "active": false
 }

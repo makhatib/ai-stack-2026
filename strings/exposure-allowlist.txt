@@ -28,3 +28,6 @@ DevOps Engineer (NOM-258) | Unrelated to reachability: "language models" is disk
 DevOps Engineer (NOM-258) | Unrelated to reachability: supply-chain signature posture. | for the upstreams that publish signatures, listed per image. There is no
 DevOps Engineer (NOM-258) | Narrows the claim: states what internal bridges do and do not give. | masquerade** for them. Nothing on such a network has a path to the internet.
 DevOps Engineer (NOM-258) | Narrows the claim: explicitly declines to claim either answer. | your local network, or link-local metadata addresses. We did not test it, so
+DevOps Engineer (NOM-302) | Quotes n8n's refusal to apply a change to a RUNNING process; unrelated to reachability. | `publish:workflow` says so itself: *"changes will not take effect if n8n is
+DevOps Engineer (NOM-302) | Narrows the claim: the demo is served by a throwaway container started for one test. | running"*. So `samples run W4` publishes the demo, starts a **throwaway n8n
+DevOps Engineer (NOM-302) | WIDENS nothing and hides nothing: states the measured fact that a published webhook answers on every main, which is the finding itself. | **While the demo is published, it answers on every running n8n, including the
