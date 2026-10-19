@@ -107,7 +107,47 @@ create_app() {
   echo "role+database ready: $app"
 }
 
-for app in authelia openwebui litellm n8n; do
+# THE APP LIST IS NOT DECLARED HERE.  It is the key set of $PW_FILE.
+#
+# It used to be `for app in authelia openwebui litellm n8n` — a hardcoded copy
+# of a list that also lived in gen-secrets.sh, backup.sh and restore.sh, under
+# a comment in healthcheck.sh asserting that the probe's list and this one
+# "cannot drift".  They could, and the drift was asymmetric in the direction
+# that wedges the stack: the probe derived its EXPECTED set from this file
+# while this script created a FIXED set.
+#
+# MEASURED (NOM-307 review, 2026-10-19).  Add a fifth app to gen-secrets.sh —
+# the first edit anyone makes, because without it there is no password to hand
+# the role — and run the installer, or the repair that docs/troubleshooting.md
+# tells an operator to run.  On an ALREADY-HEALTHY deployment, within 10s:
+# postgres goes unhealthy because the probe now demands a role nothing
+# creates; every service behind `depends_on: service_healthy` stops starting;
+# and the probe blames "FIRST-BOOT INIT DID NOT COMPLETE", which is false,
+# then names `db-init` as the repair — which re-ran this same fixed list,
+# created nothing, and died saying the cluster still does not hold what it
+# should.  A gate that wedges the stack and names a cause that is not the
+# cause is the same defect as the `except ImportError` this ticket removed.
+#
+# Deriving both from one file is what makes healthcheck.sh's comment true
+# rather than aspirational, and it makes `db-init` a genuine repair for list
+# drift instead of a no-op.  The same extraction appears in healthcheck.sh; CI
+# invariant I15 holds them together and fails the build on any new literal
+# copy, and tests/app-list-coupling.sh measures it against a real cluster.
+APPS="$(sed -n 's/^\([A-Za-z0-9_][A-Za-z0-9_]*\)=.*/\1/p' "$PW_FILE" | sort -u)"
+if [ -z "$APPS" ]; then
+  cat >&2 <<EOF
+FATAL: $PW_FILE holds no application names, so no role can be created.
+
+The file is readable (checked above) but contains no \`name=value\` line.  On
+the host, in the stack directory:
+
+    sudo bash scripts/gen-secrets.sh
+
+EOF
+  exit 1
+fi
+
+for app in $APPS; do
   create_app "$app"
 done
 

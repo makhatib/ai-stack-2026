@@ -83,7 +83,15 @@ echo "Backing up to $DEST/aistack-$STAMP.tar.gz.enc"
 # --- postgres ---------------------------------------------------------------
 echo "  pg_dumpall --globals-only"
 dc exec -T postgres pg_dumpall --globals-only -U aistack_admin > "$STAGE/globals.sql"
-for db in authelia openwebui litellm n8n; do
+# WHICH databases, DERIVED — not another literal copy of the app list.  A
+# hardcoded list fails here in the worst available direction: an app added to
+# gen-secrets.sh but not to this line is an app whose database is simply
+# absent from an archive that reports success, and nothing says so until a
+# restore comes up short.  The preflight above has already asserted every file
+# under secrets/ is readable, so this read cannot be the thing that fails.
+APP_DBS="$(sed -n 's/^\([A-Za-z0-9_][A-Za-z0-9_]*\)=.*/\1/p' "$ROOT/secrets/app_db_passwords" | sort -u)"
+[ -n "$APP_DBS" ] || die "secrets/app_db_passwords names no databases; run scripts/gen-secrets.sh"
+for db in $APP_DBS; do
   echo "  pg_dump $db"
   dc exec -T postgres pg_dump --format=custom -U aistack_admin -d "$db" > "$STAGE/$db.dump"
 done

@@ -643,7 +643,85 @@ def i14(ctx):
     return bad
 
 
-ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14]
+@check("I15", "the per-app database list is declared ONCE; every consumer derives it")
+def i15(ctx):
+    """One declaration, N derivations — checked, not promised in a comment.
+
+    NOM-307's review found the app list written out literally in four files
+    under a comment in healthcheck.sh asserting that two of them "cannot
+    drift".  Nothing coupled them: no invariant, no test.  Declaring the set
+    in gen-secrets.sh and deriving it everywhere else is only a fix while
+    something fails the build when another literal copy appears.
+
+    TWO WAYS THIS CHECK COULD HAVE BEEN FAKE, both measured while writing it:
+
+      * Scanning raw text matched the COMMENTS that describe the defect being
+        removed, so the fix failed its own invariant and the only repair would
+        have been to allowlist the prose.  Full-line comments are stripped
+        first.
+      * `\bn8n\b` matches inside `aistack-n8n-data`, so every volume loop in
+        backup.sh, restore.sh and remove.sh looked like an app list.  The word
+        list is split on whitespace and compared by EXACT TOKEN.
+    """
+    APPS = {"authelia", "openwebui", "litellm", "n8n"}
+    DECLARER = os.path.join("scripts", "gen-secrets.sh")
+    # Every consumer, and the token that proves it derives rather than
+    # declares.  Listed explicitly so that DELETING a loop cannot make this
+    # check pass vacuously: an absent derivation is a failure, exactly like the
+    # absent runtime_ids entry this ticket started from.
+    DERIVERS = {
+        os.path.join("config", "postgres", "init", "01-roles-and-databases.sh"): "app_db_passwords",
+        os.path.join("config", "postgres", "healthcheck.sh"): "app_db_passwords",
+        os.path.join("scripts", "backup.sh"): "app_db_passwords",
+        os.path.join("scripts", "restore.sh"): "payload/*.dump",
+    }
+    loop = re.compile(r"\bfor\s+\w+\s+in\s+([^\n;]*)")
+    bad = []
+    declarations = []
+    for dirpath, dirnames, filenames in os.walk(ctx.root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in (".git", "__pycache__", "node_modules", "backups", ".runtime")]
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, ctx.root)
+            if not (name.endswith((".sh", ".py")) or rel == os.path.join("bin", "aistack")):
+                continue
+            try:
+                raw = open(full, encoding="utf-8", errors="replace").read()
+            except OSError as e:
+                bad.append(f"{rel} could not be read ({e}); I15 cannot be checked over it")
+                continue
+            # Full-line comments only.  Stripping from any '#' would eat
+            # ${line#*=} and ${ANSWER#checked:} and could invent a match.
+            code = "\n".join("" if ln.lstrip().startswith("#") else ln
+                             for ln in raw.splitlines())
+            code = code.replace("\\\n", " ")  # join continuations before matching
+            for words in loop.findall(code):
+                named = APPS.intersection(words.split())
+                if len(named) >= 2:
+                    declarations.append((rel, " ".join(sorted(named))))
+    for rel, named in declarations:
+        if rel != DECLARER:
+            bad.append(f"{rel} writes the app list out literally ({named}); "
+                       f"{DECLARER} is the single declaration and every other "
+                       f"consumer must derive it")
+    if not any(rel == DECLARER for rel, _ in declarations):
+        bad.append(f"{DECLARER} no longer declares the app list, so the "
+                   f"derivations have no source to read and I15 would pass "
+                   f"vacuously")
+    for rel, token in sorted(DERIVERS.items()):
+        full = os.path.join(ctx.root, rel)
+        if not os.path.exists(full):
+            bad.append(f"{rel} is missing; it is one of the consumers I15 quantifies over")
+            continue
+        if token not in open(full, encoding="utf-8", errors="replace").read():
+            bad.append(f"{rel} does not mention {token}, so it cannot be deriving "
+                       f"the app list; a consumer that derives nothing is how the "
+                       f"list drifts back apart")
+    return bad
+
+
+ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14, i15]
 
 
 def main():

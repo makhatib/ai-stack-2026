@@ -32,10 +32,21 @@
 # rubber stamp.  `aistack doctor` makes the same assertion, and
 # `aistack db-init` repairs it in place.
 #
-# THE EXPECTED LIST IS NOT HARDCODED HERE.  It is the key set of
-# app_db_passwords — the same file 01-roles-and-databases.sh iterates — so the
-# two cannot drift.  Keys only; this script never reads a value and never
-# prints one.
+# THE EXPECTED LIST IS NOT HARDCODED HERE, AND IT IS NOT HARDCODED IN THE INIT
+# SCRIPT EITHER.  Both derive it from the key set of app_db_passwords, which
+# makes scripts/gen-secrets.sh — the one thing that WRITES that file — the
+# single place an app list is declared.  Adding an app is one edit, there.
+#
+# That symmetry is a fix, not a description of how it always was.  This comment
+# used to claim 01-roles-and-databases.sh "iterates" this file; it did not, it
+# iterated a literal `for app in authelia openwebui litellm n8n`.  So the
+# probe's expected set and the init's created set were two lists with nothing
+# but this sentence holding them together, and a fifth app declared in
+# gen-secrets.sh alone took an already-healthy postgres to unhealthy in 10s
+# while blaming a first boot that had completed months earlier.  CI invariant
+# I15 now holds them together; tests/app-list-coupling.sh measures it.
+#
+# Keys only; this script never reads a value and never prints one.
 #
 # Cost: two psql round trips over the local socket every interval, both
 # reading catalogues.  Measured at well under a tenth of a second.

@@ -349,6 +349,18 @@ gen backup.hmac                     operator      hex32
 APPPW="$SECRETS/app_db_passwords"
 touch "$APPPW"
 chmod 0600 "$APPPW"
+# THE SINGLE DECLARATION OF THE APP LIST.
+#
+# This loop is the ONLY place in the repository where the set of apps that get
+# a Postgres role and database is written out literally.  Everything else
+# derives it from the file this loop writes: the first-boot init script, the
+# health probe, `db-init` and `doctor` (both of which run the two above) and
+# backup.sh all read the key set of app_db_passwords; restore.sh reads the
+# archive.  Adding an app is ONE edit, here.
+#
+# CI invariant I15 fails the build if a second literal copy appears anywhere,
+# because the previous arrangement was four copies under a comment promising
+# they could not diverge.
 for app in authelia openwebui litellm n8n; do
   if grep -q "^${app}=" "$APPPW" 2>/dev/null; then
     log "  reuse   db password for $app"

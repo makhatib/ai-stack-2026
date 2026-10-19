@@ -140,8 +140,15 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 dc exec -T postgres psql -U aistack_admin -d postgres < "$WORK/payload/globals.sql" >/dev/null 2>&1 || true
-for db in authelia openwebui litellm n8n; do
-  [ -f "$WORK/payload/$db.dump" ] || continue
+# WHICH databases, read from the ARCHIVE — not from a literal list and not
+# from the host's secrets.  The payload is the authoritative statement of what
+# there is to restore: a four-app checkout must be able to restore a five-app
+# archive rather than silently dropping the fifth, and step 3/4 above has
+# already verified this payload for set equality, digests and HMAC before
+# anything here overwrites a byte.
+for dump in "$WORK"/payload/*.dump; do
+  [ -f "$dump" ] || continue
+  db="$(basename "$dump" .dump)"
   echo "      $db"
   # CREATE THE DATABASE IF IT IS NOT THERE.
   #
