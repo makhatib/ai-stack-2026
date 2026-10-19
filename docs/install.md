@@ -8,6 +8,7 @@ internet takes to pull nine images.
 | | |
 |---|---|
 | **OS** | Linux with Docker Engine 24+ and the Compose v2 plugin |
+| **Host tools** | `python3`, `openssl`, `tar`, and the usual base utilities: `awk`, `sed`, `grep`, `diff`, `df`, `flock`, `ss` |
 | **CPU** | 4 cores (Starter) · 4–8 (AI Automation) |
 | **RAM** | 8–16 GB (Starter) · 16–32 GB (AI Automation) |
 | **Disk** | 60 GB (Starter) · 150 GB (AI Automation) |
@@ -15,6 +16,11 @@ internet takes to pull nine images.
 
 **These are estimates, not measurements.** They are the figures we will write
 into the compose file, not an observed peak on your hardware.
+
+The host-tools row is not an estimate — it is the list the installer actually
+invokes, and step 1 checks every entry before it does anything else. On
+Debian/Ubuntu: `apt install python3 openssl coreutils diffutils util-linux
+iproute2 tar`. No Python library is needed; a plain `python3` is enough.
 
 You also need a hostname that resolves on the machine you are installing on.
 `aistack.localhost` works on most systems; otherwise add a line to
@@ -34,9 +40,10 @@ bookkeeping — no mail is ever sent, there is no SMTP in this release).
 
 ### What it does, in order
 
-1. **Pre-flight checks.** Docker version, Compose plugin, free disk, free RAM,
-   and whether the ports you chose are already in use. Any failure is a
-   **hard stop** with the reason, not a warning it continues past.
+1. **Pre-flight checks.** The host tools above, Docker version, Compose
+   plugin, free disk, free RAM, and whether the ports you chose are already in
+   use. Any failure is a **hard stop** with the reason, not a warning it
+   continues past.
 2. **Host listener enumeration.** It lists every socket on your machine bound
    to `0.0.0.0` or `::`, with its address family. Read this list. It is the
    one thing the stack cannot protect you from and it tells you what a

@@ -208,6 +208,10 @@ services:
       - postgres-data:/var/lib/postgresql/data
       # `CREATE EXTENSION vector` actually runs here; it is not assumed.
       - ./config/postgres/init:/docker-entrypoint-initdb.d:ro
+      # The health probe, as a FILE rather than a CMD-SHELL one-liner: it
+      # asserts the end state of first-boot init and has to explain itself
+      # when that assertion fails.  See the file's own header (NOM-307).
+      - ./config/postgres/healthcheck.sh:/usr/local/bin/aistack-pg-health:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
       - /run/postgresql:rw,nosuid,size=64m
@@ -249,12 +253,31 @@ services:
       PGDATA: /var/lib/postgresql/data/pgdata
     mem_limit: 2g
     cpus: "2.0"
+    # NOT `pg_isready` ALONE.  MEASURED (NOM-307, 2026-10-19): a first boot
+    # whose init scripts die leaves a cluster that answers pg_isready, reports
+    # health=healthy, and holds none of the four application roles — and the
+    # entrypoint will never re-run init over that data directory.  A gate that
+    # passes on a state only a volume wipe used to recover is worse than no
+    # gate, because every service downstream of it then fails for a reason
+    # that names a consequence instead of a cause.
+    #
+    # `restart: unless-stopped` is UNCHANGED and that is deliberate.  Switching
+    # postgres to `on-failure:N` would stop Docker from starting it again after
+    # a host reboot (the daemon restarts `always`/`unless-stopped` containers
+    # on start, not `on-failure` ones) — trading a loud first boot for a stack
+    # that does not come back from a power cut.  Invariant I10 also holds every
+    # service to `unless-stopped`.  The honest fix is the gate, not the policy.
+    #
+    # start_period is 90s rather than 30s: the probe is now false until init
+    # FINISHES, and during the start period a failing probe reads as
+    # "starting" rather than "unhealthy", which is exactly the window init
+    # needs.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aistack_admin -d aistack"]
+      test: ["CMD", "/usr/local/bin/aistack-pg-health"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 90s
 
   homepage:
     <<: *hardened

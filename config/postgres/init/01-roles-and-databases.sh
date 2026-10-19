@@ -17,6 +17,38 @@ set -euo pipefail
 # namespace.  (Nothing does — no host PID anywhere — but the habit is the point.)
 PW_FILE="${APP_DB_PASSWORDS_FILE:?APP_DB_PASSWORDS_FILE not set}"
 
+# SAY WHY, ONCE, BEFORE THE REDIRECT DOES IT BADLY.
+#
+# MEASURED (NOM-307, 2026-10-19).  With the secret written 0600 root:root this
+# script's only output was
+#
+#   01-roles-and-databases.sh: line 20: /run/secrets/app_db_passwords: Permission denied
+#   FATAL: no password for 'authelia' in /run/secrets/app_db_passwords
+#
+# — a line number, and then a sentence that reads as "the file lacks an entry"
+# when the truth is "this process cannot open the file at all".  The two have
+# completely different repairs.  This check costs one stat and replaces both.
+if [ ! -r "$PW_FILE" ]; then
+  cat >&2 <<EOF
+FATAL: cannot READ $PW_FILE (it is not an empty or malformed file).
+
+  running as:  uid $(id -u) gid $(id -g)
+  file is:     $(ls -ln "$PW_FILE" 2>/dev/null | awk '{print $1" owner "$3":"$4}' || echo 'not present')
+
+Compose bind-mounts a file secret with its HOST ownership, and this container
+drops ALL capabilities, so uid 0 inside it does not bypass file permissions
+either.  The host file must be readable by the uid this entrypoint drops to.
+
+On the host, in the stack directory:
+
+    sudo bash scripts/gen-secrets.sh
+
+It reads the measured uid:gid from manifest.yaml and applies the mode, and it
+now refuses to continue rather than writing one that cannot work.
+EOF
+  exit 1
+fi
+
 get_pw() {
   # Format: one `name=value` per line.  Parsed, never sourced (S06) — a
   # password containing a backtick must not become a command.

@@ -117,27 +117,19 @@ claim_for_operator "$SECRETS" 0700
 # can start.  `scripts/probe-runtime.sh` takes the measurement against a live
 # stack and `aistack doctor` re-checks readability by asking the service, so a
 # stale value here is caught rather than trusted.
+#
+# AND IT READS THE MANIFEST WITH awk, NOT WITH PyYAML.
+#
+# MEASURED (NOM-307, 2026-10-19).  This was a Python heredoc guarded by
+# `try: import yaml / except ImportError: sys.exit(0)`.  PyYAML is not in
+# docs/install.md's prerequisites, so on a machine that has only what the
+# guide asks for the import failed, the heredoc printed nothing and exited 0,
+# and apply_mode below read that as "no ids declared" — for EVERY consumer.
+# The whole of S13's per-service mode logic was switched off by a missing
+# library, silently, with the correct value sitting in manifest.yaml unread.
+# scripts/manifest-runtime-ids.sh carries the full account.
 service_ids() {
-  python3 - "$ROOT/manifest.yaml" "$1" <<'PYIDS' 2>/dev/null || true
-import sys
-try:
-    import yaml
-except ImportError:
-    sys.exit(0)
-try:
-    m = yaml.safe_load(open(sys.argv[1])) or {}
-except Exception:
-    sys.exit(0)
-# Helpers are a separate top-level map in the manifest but are secret
-# consumers exactly like services, so look in both rather than silently
-# falling back to 0600 for every helper.
-e = ((m.get("services") or {}).get(sys.argv[2])
-     or (m.get("helpers") or {}).get(sys.argv[2])
-     or {})
-ids = e.get("runtime_ids")
-if ids:
-    print(ids)
-PYIDS
+  "$ROOT/scripts/manifest-runtime-ids.sh" "$1" 2>/dev/null || true
 }
 
 # Apply the mode S13 requires, and FAIL LOUDLY if it cannot be applied.
@@ -170,11 +162,17 @@ apply_mode() {
 
   ids="$(service_ids "$consumer")"
 
+  # NO IDS IS A STOP, NOT A DEFAULT.
+  #
+  # MEASURED (NOM-307, 2026-10-19).  This branch used to chmod 0600 root:root,
+  # log a WARN and RETURN 0.  That is the one path in this script that only
+  # warns, and it is the path a missing PyYAML drove every consumer down: the
+  # install continued and produced exactly the stack this file's header says
+  # a warning was not enough to prevent — Postgres unable to read
+  # app_db_passwords as uid 999, its first-boot init script dead, and seven
+  # WARN lines as the only trace.  An unresolvable consumer now fails here.
   if [ -z "$ids" ]; then
-    chmod 0600 "$path"
-    log "  WARN    no runtime_ids for '$consumer' in manifest.yaml; wrote 0600 root:root."
-    log "          If $consumer does not run as root it will not be able to read this."
-    return 0
+    die_no_ids "$path" "$consumer"
   fi
 
   uid="${ids%%:*}"; gid="${ids##*:}"
@@ -232,6 +230,33 @@ apply_mode() {
   fi
 
   die_unreadable "$path" "$consumer" "$gid"
+}
+
+die_no_ids() {
+  local path="$1" consumer="$2"
+  cat >&2 <<EOF
+
+FATAL: cannot determine which uid/gid must read $(basename "$path").
+
+'$consumer' has no usable \`runtime_ids\` entry in:
+
+    $ROOT/manifest.yaml
+
+Docker Compose bind-mounts a file secret WITH ITS HOST OWNERSHIP, so the host
+mode is the only control over who can read it.  Without the consumer's
+measured uid:gid this script would have to guess, and the guess that looks
+safest — 0600 root:root — is unreadable by every service that does not run as
+uid 0.  That is a stack that installs and then cannot start.
+
+Fix the manifest entry, then re-run the installer:
+
+    services:
+      $consumer:
+        runtime_ids: "<uid>:<gid>"   # from 'aistack probe-images'
+
+Refusing to continue rather than writing a mode that cannot work.
+EOF
+  exit 1
 }
 
 die_unreadable_root() {
@@ -462,7 +487,7 @@ claim_for_operator "$ROOT/.runtime" 0700
 
 # .env AND THE INSTALL LOG, which only the operator's CLI ever reads.
 #
-# `.env` is created by install.sh step 9, BEFORE this script runs, and `cp`
+# `.env` is created by install.sh step 10, BEFORE this script runs, and `cp`
 # onto an existing file keeps the existing owner — so this is reached as a
 # repair on an upgrade and as the first owner on a fresh install.  It is the
 # file compose opens first, which makes it the file whose wrong ownership

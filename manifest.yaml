@@ -394,7 +394,10 @@ services:
     depends_on: []
     volumes: [postgres-data]
     backup: yes
-    healthcheck: "ours:pg_isready"
+    # NOM-307: `ours:pg_isready` certified a cluster whose first-boot init had
+    # died as healthy.  The probe now asserts one role and one database per
+    # application plus the control table, and names what is missing.
+    healthcheck: "ours:pg-init-complete"
     limits: { mem: 2g, cpus: "2.0", pids: 256 }
     exception_ids: []
     confined: false

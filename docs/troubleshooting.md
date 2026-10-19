@@ -62,6 +62,34 @@ swallows the specific reason at the default log level. Set
 it could not read and a file it could not write under the read-only root
 filesystem.
 
+## An application says a database role does not exist
+
+Symptoms: LiteLLM, n8n or Open WebUI exits with `password authentication
+failed for user "…"` or `Role "…" does not exist`, while Postgres itself looks
+fine.
+
+Cause: **Postgres only runs its first-boot init scripts on an empty data
+directory.** If that first boot was interrupted part way through — an
+unreadable secret file, a power cut, a container killed mid-init — every later
+start prints `PostgreSQL Database directory appears to contain a database;
+Skipping initialization` and the cluster keeps whichever half of the roles it
+managed to create.
+
+```sh
+bin/aistack doctor      # names the missing roles and databases
+bin/aistack db-init     # re-applies the init in place
+```
+
+`db-init` is idempotent: every statement is `IF NOT EXISTS`, so it creates
+only what is missing and does not touch an existing role, database or
+password. It cannot repair a role whose password has diverged from
+`secrets/app_db_passwords` — that is a different problem and deleting a live
+role is not a repair we will do for you.
+
+Since this release the health check asserts those roles exist, so this state
+reports as **unhealthy** instead of healthy, and `bin/aistack up` prints the
+missing objects rather than only naming Postgres.
+
 ## A health check says unhealthy but the service works
 
 Check the probe before the service. Two of the obvious probes are wrong for

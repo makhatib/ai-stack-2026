@@ -181,6 +181,31 @@ else
   fi
 fi
 
+hdr "Database init"
+# "ROLE MISSING" IS A FIRST-CLASS CHECK, because the stack can reach that
+# state from ANY interrupted first boot — an unreadable secret (NOM-307), a
+# power cut, a container killed mid-init — and not only from the one cause we
+# measured.  The Postgres entrypoint runs /docker-entrypoint-initdb.d on an
+# empty data directory and nowhere else, so a cluster that got half way
+# through stays half way through, and before this check the first symptom was
+# an application reporting `Role "litellm" does not exist`.
+if ! docker ps --format '{{.Names}}' | grep -q '^aistack-postgres$'; then
+  warn "postgres is not running; cannot check its roles and databases"
+elif ! docker exec aistack-postgres test -x /usr/local/bin/aistack-pg-health 2>/dev/null; then
+  warn "this aistack-postgres container predates the first-boot probe, so the"
+  warn "roles could not be checked.  Recreate it to get the check (and the"
+  warn "health gate that uses it):  docker compose up -d postgres"
+else
+  if PGHEALTH="$(docker exec aistack-postgres /usr/local/bin/aistack-pg-health 2>&1)"; then
+    ok "every application role, database and control table from first-boot init is present"
+  else
+    bad "the database is missing part of what first-boot init should have created"
+    printf '%s\n' "$PGHEALTH" | sed 's/^/         /'
+    printf '         Repair in place (idempotent, touches nothing that exists):\n'
+    printf '             bin/aistack db-init\n'
+  fi
+fi
+
 hdr "Locks"
 # TWO LOCK DIRECTORIES IS NOT A TIDINESS PROBLEM, IT IS A LOST LOCK.
 #

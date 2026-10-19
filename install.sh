@@ -125,26 +125,63 @@ say "9 containers. Chat, documents, local models and workflow automation."
 say ""
 
 # ===========================================================================
-# 1-6  PRE-FLIGHT.  Every failure here is a HARD STOP with the reason, not a
+# 1-7  PRE-FLIGHT.  Every failure here is a HARD STOP with the reason, not a
 #      warning the installer continues past (H1, S02, S14, H4).
 # ===========================================================================
-head2 "[1/14] Docker"
+head2 "[1/15] Host tools"
+# THE TOOLS THIS INSTALLER ACTUALLY INVOKES, CHECKED BEFORE IT INVOKES THEM.
+#
+# MEASURED (NOM-307, 2026-10-19).  Pre-flight checked docker, disk, RAM and
+# ports and never checked an interpreter, while install.sh calls `python3` in
+# four places and `openssl` once per secret.  On the isolated QA target — a
+# machine carrying only what docs/install.md declares — that absence was not
+# the failure; it was worse than the failure, because the one path that
+# depended on a missing library DEGRADED QUIETLY instead of stopping, and the
+# install went on to build a database it could not authenticate against.
+#
+# Two rules this list follows:
+#   * it names the package, because "python3 not found" without "apt install
+#     python3" is half a diagnosis;
+#   * `ss` IS REQUIRED, not optional.  Step 8's port check reads `ss` output,
+#     and an empty read is indistinguishable from "both ports are free" — a
+#     vacuous pass over the one check that stops this stack from fighting
+#     another service for :443.
+#
+# PyYAML IS DELIBERATELY NOT HERE.  Nothing in the install path imports it any
+# more (NOM-307); `ci/invariants.py` and `aistack security-check` do, and both
+# say so loudly and are developer tools, not install prerequisites.
+MISSING=""
+for tool in python3 openssl awk sed grep diff df flock ss tar; do
+  command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
+done
+if [ -n "$MISSING" ]; then
+  die "these host tools are missing and the installer needs every one of them:
+   $MISSING
+
+On Debian/Ubuntu:   apt install python3 openssl coreutils diffutils util-linux iproute2 tar
+On Fedora/RHEL:     dnf install python3 openssl coreutils diffutils util-linux iproute2 tar
+
+They are listed in docs/install.md under 'Before you start'."
+fi
+say "  $(python3 --version 2>&1), openssl, awk, sed, grep, diff, df, flock, ss, tar"
+
+head2 "[2/15] Docker"
 command -v docker >/dev/null || die "docker is not installed."
 docker info >/dev/null 2>&1 || die "cannot talk to the Docker daemon. Is it running, and are you in the docker group?"
 say "  $(docker --version)"
 
-head2 "[2/14] Compose v2"
+head2 "[3/15] Compose v2"
 docker compose version >/dev/null 2>&1 || die "the Docker Compose v2 plugin is not installed."
 say "  $(docker compose version | head -1)"
 
-head2 "[3/14] Disk"
+head2 "[4/15] Disk"
 AVAIL_GB=$(df -BG --output=avail "$ROOT" | tail -1 | tr -dc '0-9')
 say "  ${AVAIL_GB} GB available at $ROOT"
 [ "${AVAIL_GB:-0}" -ge 40 ] || die "at least 40 GB free is needed; ${AVAIL_GB} GB available.
 Model weights alone are tens of gigabytes. Free some space and re-run."
 [ "${AVAIL_GB:-0}" -ge 60 ] || warn "60 GB is the Starter recommendation; you have ${AVAIL_GB} GB."
 
-head2 "[4/14] Memory"
+head2 "[5/15] Memory"
 TOTAL_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 say "  ${TOTAL_MB} MB total"
 [ "${TOTAL_MB:-0}" -ge 7000 ] || die "at least 8 GB of RAM is needed; this machine has ${TOTAL_MB} MB."
@@ -153,7 +190,7 @@ if [ "${TOTAL_MB:-0}" -lt 15000 ]; then
   warn "service on a CPU-only box. It remains available, but expect it to be slow."
 fi
 
-head2 "[5/14] GPU"
+head2 "[6/15] GPU"
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   say "  $(nvidia-smi -L | head -1)"
   say "  NOT USED IN THIS RELEASE. GPU support is a later version, and no GPU"
@@ -162,7 +199,7 @@ else
   say "  none detected — expected, and nothing in this release needs one."
 fi
 
-head2 "[6/14] Host listeners"
+head2 "[7/15] Host listeners"
 # THE ONE THING THE STACK CANNOT PROTECT YOU FROM, enumerated rather than
 # glossed (F16).  A container reaches the host through its bridge gateway;
 # denying that needs host firewall rules this release does not install.
@@ -183,9 +220,9 @@ cat <<'EOF'
 EOF
 
 # ===========================================================================
-# 7   ANSWERS
+# 8   ANSWERS
 # ===========================================================================
-head2 "[7/14] Configuration"
+head2 "[8/15] Configuration"
 ask AISTACK_HOSTNAME    "Hostname to serve"        "aistack.localhost" valid_hostname
 ask AISTACK_BIND_ADDR   "Address to bind to"       "127.0.0.1"         valid_bind_addr
 ask AISTACK_ADMIN_EMAIL "Admin email (no mail is ever sent)" "admin@localhost"
@@ -212,7 +249,7 @@ if [ -z "${ANS[COMPOSE_PROFILES]:-}" ]; then
   fi
 fi
 
-head2 "[8/14] Port availability"
+head2 "[9/15] Port availability"
 # A PORT CONFLICT IS PER ADDRESS, NOT PER PORT.
 #
 # MEASURED (NOM-258, 2026-10-18).  The first version of this check grepped
@@ -276,9 +313,9 @@ fi
 say "  80 and 443 free on ${ANS[AISTACK_BIND_ADDR]}"
 
 # ===========================================================================
-# 9   .env  — shown as a diff before it is written
+# 10  .env  — shown as a diff before it is written
 # ===========================================================================
-head2 "[9/14] Writing .env"
+head2 "[10/15] Writing .env"
 NEW_ENV="$(mktemp)"
 cp .env.example "$NEW_ENV"
 for k in AISTACK_HOSTNAME AISTACK_BIND_ADDR AISTACK_ADMIN_EMAIL AISTACK_TZ COMPOSE_PROFILES; do
@@ -311,9 +348,9 @@ rm -f "$NEW_ENV"
 chmod 0600 .env
 
 # ===========================================================================
-# 10  SECRETS
+# 11  SECRETS
 # ===========================================================================
-head2 "[10/14] Secrets"
+head2 "[11/15] Secrets"
 bash scripts/gen-secrets.sh < /dev/null
 
 # The database passwords are written into .env because Compose interpolates
@@ -336,9 +373,9 @@ PY
 chmod 0600 .env
 
 # ===========================================================================
-# 11  OWNER BOOTSTRAP, PHASE 1 (S05)
+# 12  OWNER BOOTSTRAP, PHASE 1 (S05)
 # ===========================================================================
-head2 "[11/14] Owner account (phase 1 of 2)"
+head2 "[12/15] Owner account (phase 1 of 2)"
 if [ -f config/authelia/users.yml ]; then
   say "  users.yml already exists — left alone (an existing account is never reset)."
 else
@@ -367,16 +404,16 @@ fi
 bash scripts/gen-secrets.sh < /dev/null >/dev/null   # apply modes to users.yml
 
 # ===========================================================================
-# 12-14  PINS, PULL, START
+# 13-15  PINS, PULL, START
 # ===========================================================================
-head2 "[12/14] Rendering pins"
+head2 "[13/15] Rendering pins"
 bin/aistack pin
 
-head2 "[13/14] Pulling images by digest"
+head2 "[14/15] Pulling images by digest"
 say "  Nine images. This is the slow part."
 docker compose pull --quiet
 
-head2 "[14/14] Starting"
+head2 "[15/15] Starting"
 bin/aistack up || die "the stack did not become healthy. The failing service and its
 last 50 redacted lines are above. 'bin/aistack support-bundle' collects a
 shareable artefact; 'bin/aistack logs <service>' shows more."

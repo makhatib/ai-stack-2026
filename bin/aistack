@@ -224,46 +224,111 @@ _up() {
 Serving will not start while drill containers exist.  Run 'aistack drill clean'."
   fi
   info "Starting (profiles: ${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' "$ROOT/.env" 2>/dev/null | cut -d= -f2-)})"
-  dc up -d --remove-orphans
+  # `compose up` CAN FAIL BEFORE THE HEALTH GATE EVER RUNS, and when it does
+  # its last line names the wrong thing.
+  #
+  # MEASURED (NOM-307, 2026-10-19): a half-initialised Postgres ended the
+  # install with
+  #     dependency failed to start: container aistack-postgres is unhealthy
+  # naming the one service that was, by its own probe at that moment, fine —
+  # while the actual cause was seven WARN lines from gen-secrets.sh earlier in
+  # the same log.  With `set -e` this used to abort the function here and the
+  # explanation below never ran at all.
+  if ! dc up -d --remove-orphans; then
+    info ""
+    info "'docker compose up' gave up.  What each container itself reports:"
+    _explain_unhealthy
+    return 1
+  fi
   _health_gate
 }
 
-_health_gate() {
-  # Bounded.  A health gate that waits forever is a hang with a progress bar.
-  local deadline=$(( SECONDS + 300 )) unhealthy
-  info "Waiting for health (up to 300s)..."
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    unhealthy="$(dc ps --format json 2>/dev/null \
-      | python3 -c '
-import json,sys
-bad=[]
+# The state of every container, as one line of `service container state health`.
+#
+# IT FAILS INSTEAD OF RETURNING NOTHING.  The previous version swallowed every
+# exception per line and printed an empty list, so a `compose ps` that errored
+# — or that one day emits a JSON array instead of one object per line —
+# produced zero bad services and the gate said "All services healthy."  That
+# is the same shape of defect as NOM-307's silent `except ImportError`: an
+# unanswered question read as a reassuring answer.
+_service_table() {
+  local json
+  json="$(dc ps "$@" --format json 2>/dev/null)" || return 1
+  [ -n "$json" ] || return 1
+  printf '%s\n' "$json" | python3 -c '
+import json, sys
+rows = []
 for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    try: d=json.loads(line)
-    except Exception: continue
-    h=(d.get("Health") or "").lower(); s=(d.get("State") or "").lower()
-    if s!="running" or h in ("starting","unhealthy"):
-        bad.append("%s(%s%s)"%(d.get("Service"),s,"/"+h if h else ""))
-print(" ".join(bad))' 2>/dev/null || true)"
-    [ -z "$unhealthy" ] && { info "All services healthy."; return 0; }
-    sleep 5
-  done
-  # Name the service and print its last 50 REDACTED lines, plus the exact
-  # rollback command.  A health-gate failure that says only "unhealthy" sends
-  # the viewer to a screenshot of their terminal, which is the thing
-  # support-bundle exists to replace.
-  info ""
-  info "NOT HEALTHY after 300s: $unhealthy"
-  for svc in $unhealthy; do
-    svc="${svc%%(*}"
+    line = line.strip()
+    if not line:
+        continue
+    d = json.loads(line)          # a shape we cannot parse is an ERROR, not "healthy"
+    rows.append((d.get("Service") or "?", d.get("Name") or "?",
+                 (d.get("State") or "").lower(), (d.get("Health") or "").lower()))
+if not rows:
+    sys.exit(3)
+for r in rows:
+    print(*r)
+'
+}
+
+_not_ready() {
+  # $1 = the table.  A service is not ready when it is not running, or it has
+  # a probe that is starting or failing.
+  printf '%s\n' "$1" | awk '$3!="running" || $4=="starting" || $4=="unhealthy" {print $1}'
+}
+
+# WHAT THE CONTAINER SAYS ABOUT ITSELF, not what compose concluded.
+#
+# The last health-probe OUTPUT is printed first and deliberately: it is the one
+# line that names a cause.  config/postgres/healthcheck.sh, for instance, says
+# which roles and databases are missing and which command repairs them, and
+# none of that reaches the terminal if only `docker compose`'s own summary is
+# shown.
+_explain_unhealthy() {
+  local table svc name
+  if ! table="$(_service_table -a)"; then
+    info "  (could not read 'docker compose ps' — try: docker compose ps -a)"
+    return 0
+  fi
+  printf '%s\n' "$table" | awk '{printf "  %-16s %-24s %s%s\n", $1, $2, $3, ($4=="" ? "" : "/" $4)}'
+  for svc in $(_not_ready "$table"); do
+    name="$(printf '%s\n' "$table" | awk -v s="$svc" '$1==s {print $2; exit}')"
     info ""
-    info "--- last 50 lines of $svc (redacted) ---"
+    info "--- $svc: last health-probe output ---"
+    docker inspect --format \
+      '{{range .State.Health.Log}}exit {{.ExitCode}}: {{.Output}}{{end}}' "$name" 2>/dev/null \
+      | tail -12 | "$ROOT/scripts/redact.sh" || info "  (no healthcheck on this service)"
+    info "--- $svc: last 50 log lines (redacted) ---"
     dc logs --tail 50 "$svc" 2>&1 | "$ROOT/scripts/redact.sh" || true
   done
   info ""
   info "To roll back to the previous pins:   aistack rollback"
   info "To collect a shareable artefact:     aistack support-bundle"
+}
+
+_health_gate() {
+  # Bounded.  A health gate that waits forever is a hang with a progress bar.
+  local deadline=$(( SECONDS + 300 )) table unhealthy
+  info "Waiting for health (up to 300s)..."
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! table="$(_service_table)"; then
+      info ""
+      info "COULD NOT READ THE STACK'S STATE from 'docker compose ps'."
+      info "That is not a pass.  Run 'docker compose ps' here and look at the error."
+      return 1
+    fi
+    unhealthy="$(_not_ready "$table" | tr '\n' ' ')"
+    [ -z "${unhealthy// /}" ] && { info "All services healthy."; return 0; }
+    sleep 5
+  done
+  # Name the service and print its last health output and 50 REDACTED log
+  # lines, plus the exact rollback command.  A health-gate failure that says
+  # only "unhealthy" sends the viewer to a screenshot of their terminal, which
+  # is the thing support-bundle exists to replace.
+  info ""
+  info "NOT HEALTHY after 300s: $unhealthy"
+  _explain_unhealthy
   return 1
 }
 
@@ -345,6 +410,53 @@ _model_pull() {
     sh -c "ollama serve & sleep 3; ollama pull '$name'; pkill ollama"
 }
 
+# THE REPAIR FOR AN INTERRUPTED FIRST BOOT.
+#
+# MEASURED (NOM-307, 2026-10-19).  The Postgres entrypoint runs
+# /docker-entrypoint-initdb.d ONLY on an empty data directory.  If first boot
+# gets part way through and dies — an unreadable secret, a power cut, a
+# container killed mid-init — every later start prints "Skipping
+# initialization" and the cluster keeps whatever half of the roles it got.
+# Before this command the only recovery was deleting the volume, which is a
+# very large hammer for a database that is three CREATE ROLEs short.
+#
+# The init scripts were already written to be idempotent (IF NOT EXISTS and
+# ON CONFLICT DO NOTHING throughout) precisely so they could be re-applied, so
+# this re-applies them in place against the running container.
+#
+# WHAT IT DOES NOT DO: it does not touch a role that already exists, so it
+# cannot repair a role whose PASSWORD has diverged from secrets/app_db_passwords
+# (that is a different failure, and silently rotating a live role's password is
+# how an "idempotent" tool locks you out of your own data).
+cmd_db_init() { with_lifecycle_lock sh _db_init "$@"; }
+_db_init() {
+  local c=aistack-postgres
+  docker ps --format '{{.Names}}' | grep -q "^${c}$" \
+    || die "$c is not running.  Start the stack first:  aistack up
+If it will not start, 'docker logs $c | head -40' shows what first boot did."
+
+  info "Re-applying the first-boot database init inside $c."
+  info "Every statement is IF NOT EXISTS: existing roles, databases and"
+  info "passwords are left exactly as they are."
+
+  docker exec "$c" bash /docker-entrypoint-initdb.d/01-roles-and-databases.sh \
+    || die "the role/database init failed; its output is above."
+  docker exec "$c" sh -c \
+    'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+       -f /docker-entrypoint-initdb.d/02-approval-envelope.sql >/dev/null' \
+    || die "the approval-envelope schema failed to apply; see the output above."
+
+  # Assert the outcome with the same probe the healthcheck uses, rather than
+  # reporting success because two commands exited 0.
+  if docker exec "$c" /usr/local/bin/aistack-pg-health; then
+    info ""
+    info "Done.  Every application role, database and control table is present."
+    info "Docker re-runs the health probe within 10s; 'aistack status' will show healthy."
+  else
+    die "init ran but the cluster still does not hold what it should (output above)."
+  fi
+}
+
 cmd_pin()    { render_pins; }
 cmd_update() { "$ROOT/scripts/update.sh" "$@"; }
 cmd_rollback(){ "$ROOT/scripts/rollback.sh" "$@"; }
@@ -397,6 +509,9 @@ aistack — AI Stack 2026
   models pull <name>  pull a model through the egress helper (NOT via the UI)
   models list
 
+  db-init             re-apply the first-boot database init (idempotent
+                      repair for a first boot that was interrupted)
+
   pin                 re-render versions.env into .env
   update              backup, pull by digest, up, bounded health gate
   rollback            return to the previous pins
@@ -426,6 +541,7 @@ case "${1:-}" in
   config) shift; cmd_config "$@" ;;
   models) shift; cmd_models "$@" ;;
   pin) shift; cmd_pin "$@" ;;
+  db-init) shift; cmd_db_init "$@" ;;
   update) shift; cmd_update "$@" ;;
   rollback) shift; cmd_rollback "$@" ;;
   backup) shift; cmd_backup "$@" ;;

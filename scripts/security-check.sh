@@ -19,6 +19,27 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 cd "$ROOT"
 RC=0
+
+# THIS SCRIPT REQUIRES PyYAML AND SAYS SO HERE, LOUDLY.
+#
+# Not a prerequisite of the stack: nothing in install.sh or bin/aistack
+# imports yaml (NOM-307 removed the last one).  But the audit half below reads
+# security-exceptions.yaml with `import yaml` to learn which services hold an
+# E6 environment-variable secret, and those services are held to a STRICTER
+# assertion than everything else.  Without the module that read produces an
+# empty list, this script has `set -u` but not `set -e`, and the strict half
+# of the audit would then cover nothing while still printing its result lines.
+# A check that quietly examines fewer things than it claims is worse than no
+# check, so it stops instead.
+python3 -c 'import yaml' 2>/dev/null || {
+  printf '\nsecurity-check: CANNOT RUN — PyYAML is missing.\n\n' >&2
+  printf 'The audit reads security-exceptions.yaml to find the E6 services, and\n' >&2
+  printf 'without it that list would be empty and the strict half of the audit\n' >&2
+  printf 'would silently check nothing.  Install it and re-run:\n\n' >&2
+  printf '    apt install python3-yaml      # or: pip install PyYAML\n\n' >&2
+  printf 'This is a developer/operator tool.  The INSTALLER does not need it.\n' >&2
+  exit 2
+}
 OUT="$ROOT/security-report-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$OUT"
 
