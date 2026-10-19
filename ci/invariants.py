@@ -409,6 +409,23 @@ def i9(ctx):
         for field in ("approved_by", "approved_at", "review_by"):
             if not e.get(field):
                 bad.append(f"exception {e.get('id')} is missing {field}")
+        # PRESENCE IS NOT APPROVAL.  This check used to accept any non-empty
+        # `approved_by`, so the agent-authored string
+        #   "DevOps Engineer (NOM-258), pending Tech Lead review"
+        # satisfied it — the register recorded its own author as the approver
+        # and CI called that complete [NOM-301].  An agent cannot approve a
+        # security exception, and a string that still says "pending" is a
+        # request for approval, not an approval.  This is the same rule
+        # ci/scan-gate.py applies to security-findings.yaml; the two registers
+        # are now held to one standard instead of the weaker of two.
+        ab = str(e.get("approved_by") or "")
+        if ab:
+            if re.search(r"pending|tbd|unapproved", ab, re.I):
+                bad.append(f"exception {e.get('id')} approved_by is still pending "
+                           f"({ab!r}) — a request for approval is not an approval")
+            elif re.search(r"\bagent\b|Engineer \(agent\)|DevOps Engineer", ab, re.I):
+                bad.append(f"exception {e.get('id')} approved_by names an agent "
+                           f"({ab!r}) — an agent cannot approve a security exception")
         rb = e.get("review_by")
         if rb:
             d = rb if isinstance(rb, datetime.date) else datetime.date.fromisoformat(str(rb))

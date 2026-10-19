@@ -1,0 +1,749 @@
+# AI Stack 2026 — security-findings.yaml  (NOM-301)
+#
+# THE VULNERABILITY DISPOSITION REGISTER.  security-exceptions.yaml covers
+# deviations from the hardening anchor; this file covers CVE findings in the
+# pinned images.  They are separate registers because they fail for different
+# reasons and are approved against different evidence.
+#
+# THE CONTROL THIS FILE EXISTS TO PROVIDE:
+#   `ci/scan-gate.py --dispositions security-findings.yaml` maps EVERY blocking
+#   unit in the scan evidence to exactly one entry below and FAILS when any
+#   unit is unclaimed.  A new CRITICAL or HIGH in a bumped image therefore
+#   breaks the build instead of landing silently inside a group that happens to
+#   name its package.  Package lists below are EXHAUSTIVE for that reason — no
+#   wildcards, so a reviewer can see precisely what was accepted.
+#
+# THE UNIT OF DISPOSITION is the (image, package, installed-version) triple,
+# not the CVE.  One bump or one acceptance disposes of every CVE a triple
+# carries, and the CVE counts are recorded so nothing is hidden by grouping.
+#
+# WHAT MAKES THIS HARD, STATED PLAINLY (measured, NOM-301, 2026-10-19):
+#   Every image in the candidate is ALREADY ON THE NEWEST UPSTREAM RELEASE.
+#   Verified against each upstream's own release API on 2026-10-19:
+#     caddy 2.11.7, authelia 4.39.28, ollama 0.40.6, open-webui v0.12.3,
+#     docling-serve v1.37.0, homepage v2.6.0, agentgateway v1.6.0 — latest.
+#     n8n 2.43.7 was NOT latest and HAS BEEN BUMPED to 2.44.3 (see V0).
+#   So apart from V0 there is NO PIN CHANGE that removes these findings.  They
+#   are unfixed upstream, unfixed by the distro, or not reachable.  That is why
+#   the residue needs named approval rather than another bump, and it is why
+#   none of the entries below claims a fix it cannot point at.
+#
+# NO AGENT MAY APPROVE AN ENTRY HERE.  Every `approved_by` is PENDING and the
+# gate is EXPECTED TO FAIL its approval check until the Tech Lead decides.
+# That failure is the control working, not a defect to route around.
+
+schema: aistack.security-findings.v1
+version: 1
+
+candidate:
+  issue: NOM-301
+  measured_on: 2026-10-19
+  measured_by: "DevOps Engineer (agent) — evidence only, NOT an approval"
+  severity_convention: vendor
+  severity_convention_note: >-
+    The distro's / upstream's own severity, i.e. trivy's.  grype also runs and
+    its NVD-derived score is HARSHER on 76 units the distro assessed and scored
+    lower; those are COUNTED in the gate's `dis-up` column and NOT adopted,
+    because the distro knows its own build flags and defaults and NVD does not.
+    The one place grype's severity IS used is the Docling OS layer, where trivy
+    has no data source at all and there is therefore no distro verdict to
+    prefer — see V9.
+  totals_after_V0_bump:
+    blocking_units: 203
+    critical_units: 23
+    high_units: 180
+    blocking_cve_instances: 1049
+  coverage:
+    images_pinned: 10
+    images_scanned_at_exact_pinned_digest: 10
+    os_layer_covered: 10
+    grype_second_opinion: 10
+    syft_sbom: 10
+    note: >-
+      AGENTGATEWAY was pinned but ABSENT from the NOM-258 scan set and was
+      therefore an unmeasured image, not a clean one.  NOM-301 scanned it:
+      0 blocking units.  The gate now derives its image list from versions.env
+      rather than from a hand-written images.txt, so a pin can no longer be
+      omitted without failing.
+
+# ---------------------------------------------------------------------------
+# APPLIED FIX
+# ---------------------------------------------------------------------------
+dispositions:
+
+  - id: V0
+    title: "n8n 2.43.7 -> 2.44.3"
+    disposition: fixed
+    images: [N8N]
+    packages:
+      - openssh
+      - openssh-client-common
+      - openssh-client-default
+      - openssh-keygen
+      - openssh-server
+      - openssh-server-common
+      - openssh-sftp-server
+      - graphicsmagick
+    measured: >-
+      CRITICAL units 10 -> 3, HIGH 8 -> 5, blocking CVE instances 46 -> 14.
+      The bump clears all seven openssh units (Alpine 10.3_p1-r0 -> r1) and the
+      graphicsmagick unit.  No new CRITICAL package appears.  Measured on the
+      exact bump digest, not inferred from the version number.
+    evidence: "security-report-bump-20261019T060718Z"
+    pin_after: "docker.io/n8nio/n8n:2.44.3@sha256:5032941f437e1daa421cad0cc3ea57cd054f0d44a7256b38a0a3fca1b460834a"
+    approved_by: n/a
+    note: "A fix needs no exception. Listed so the gate can account for the packages it removed."
+
+# ---------------------------------------------------------------------------
+# NOT REACHABLE — the vulnerable code cannot execute in this deployment.
+# These are the only entries that claim a finding does not apply, and each
+# names the structural reason rather than asserting low risk.
+# ---------------------------------------------------------------------------
+
+  - id: V1
+    title: "linux-libc-dev — kernel headers, not a kernel"
+    disposition: not-reachable
+    images: [OPEN_WEBUI]
+    packages: [linux-libc-dev]
+    severity: CRITICAL
+    units: 1
+    cve_instances: 216
+    why_not_reachable: >-
+      linux-libc-dev ships the kernel's userspace HEADERS for compiling against.
+      It contains no executable kernel code and loads no module.  The container
+      runs the HOST's kernel, so the CVEs listed against this package describe
+      code that is not present in the image's execution path at all.  The two
+      CRITICALs are ksmbd (the in-kernel SMB server) and a gcov concurrency bug
+      — neither is reachable from a container that cannot load kernel code.
+    the_real_control: >-
+      Host kernel patching on the Proxmox host, which is a HOST obligation and
+      is NOT satisfied by this image's contents either way.  This entry disposes
+      of the finding against the image; it does not claim the host is patched.
+    residual: >-
+      None from the image.  If the host kernel is unpatched, that is a live
+      risk, tracked where it belongs rather than here.
+    fix_available_upstream: "6.1.190-1 — irrelevant to reachability; would only change the header version"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+  - id: V2
+    title: "chromadb pre-auth RCE — no Chroma listener exists"
+    disposition: not-reachable
+    images: [OPEN_WEBUI]
+    packages: [chromadb]
+    severity: CRITICAL
+    units: 1
+    cve_instances: 4
+    why_not_reachable: >-
+      CVE-2026-45829 and CVE-2026-45833 are PRE-AUTHENTICATION code execution
+      in ChromaDB's HTTP SERVER.  Open WebUI uses Chroma as an in-process
+      library, not as a service: no chroma container exists in compose.yaml, no
+      Chroma port is published, and nothing in the stack opens Chroma's API.
+      There is no listener for a pre-auth request to arrive at.
+    residual: >-
+      STATED IN FULL: the library code is still in the image.  Anything that
+      already has code execution inside open-webui could call it directly, but
+      such an attacker does not need a Chroma CVE.  The pre-auth property —
+      which is what makes these CRITICAL — does not apply.
+    fix_available_upstream: none
+    verify: "compose.yaml declares no chroma service and no chroma port"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+  - id: V3
+    title: "n8n bundled git/template libraries — no shipped workflow reaches them"
+    disposition: not-reachable-as-shipped
+    images: [N8N]
+    packages: ["@simple-git/argv-parser", simple-git, handlebars]
+    severity: CRITICAL
+    units: 3
+    cve_instances: 6
+    why_not_reachable: >-
+      These are reached through n8n's Git node and template rendering.  CHECKED,
+      not assumed: all four shipped workflows (W1-W4) use only httpRequest,
+      postgres, manualTrigger, scheduleTrigger and webhook nodes — no git, ssh,
+      executeCommand or code node appears anywhere in workflows/*.json.  The one
+      route that is deliberately NOT behind Authelia, /n8n/webhook/*, reaches
+      only W4, which is httpRequest + postgres.  The editor and REST API, which
+      are what it would take to ADD a Git node, are behind Authelia forward_auth
+      and the REST API is additionally 404'd at the edge.
+    residual: >-
+      STATED IN FULL: this disposition is about the SHIPPED workflow set, not
+      about the image.  An operator who builds a workflow passing webhook input
+      into a Git node makes these reachable pre-auth.  An operator who can do
+      that already has the Code node and therefore arbitrary execution inside
+      n8n, so the CVEs grant no privilege they lacked — but the pre-auth
+      property WOULD be new, and that is the part worth watching.
+    fix_available_upstream: "simple-git 4.0.1, argv-parser 2.0.1, handlebars 4.7.10 — all bundled inside n8n; not independently pinnable"
+    recheck_when: "a workflow adds a git, ssh, executeCommand or code node"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+# ---------------------------------------------------------------------------
+# REACHABLE, NO FIX WE CAN APPLY — accepted under containment, with the
+# residual risk written out.  These are the entries that actually need a
+# decision from a human.
+# ---------------------------------------------------------------------------
+
+  - id: V4
+    title: "PyJWT authentication bypass in Open WebUI — THE MOST SERIOUS RESIDUAL"
+    disposition: accepted-under-containment
+    images: [OPEN_WEBUI]
+    packages: [PyJWT, pyjwt]
+    severity: CRITICAL
+    units: 1
+    cve_instances: 6
+    headline_cve: "CVE-2026-102268 — authentication bypass via improper public key validation"
+    reachable: yes
+    why_reachable: >-
+      Open WebUI validates its own session and API tokens with PyJWT.  That code
+      is in the request path of every authenticated route, so this is NOT a
+      dormant library.
+    containment: >-
+      VERIFIED in config/caddy/sites.d/10-open-webui.caddy: all four route
+      groups — /, /api/*, /ws/* and the upload matcher — carry
+      `forward_auth authelia:9091`.  An unauthenticated request never reaches
+      open-webui's JWT code; an attacker must first hold a valid Authelia
+      session.  Open WebUI is one of exactly two publishable surfaces, so this
+      is the whole of the network containment.
+    residual: >-
+      STATED IN FULL AND NOT MINIMISED: a user who has passed Authelia can use
+      this to forge or escalate an Open WebUI identity.  In a single-operator
+      MVP the population that can do this is the operator, so the practical
+      privilege gain is small — but the stack is intended for a team, and the
+      moment a second non-admin account exists this becomes a real privilege
+      escalation between users.  Accepting it is a decision about the operating
+      model, not just about a CVE.
+    fix_available_upstream: >-
+      PyJWT 2.14.0 fixes it, but it is a transitive dependency inside
+      open-webui v0.12.3, which IS the newest release (published 2026-10-16).
+      There is no pin that resolves this today.
+    required_action: >-
+      Track upstream for the first open-webui release carrying PyJWT >= 2.14.0
+      and bump on sight.  This entry is the reason that watch exists.
+    expires_on: "the first open-webui release with PyJWT >= 2.14.0"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead — flagged as the one finding worth reading in full"
+
+  - id: V5
+    title: "Open WebUI RAG libraries with an upstream fix we cannot pin"
+    disposition: accepted-under-containment
+    images: [OPEN_WEBUI]
+    packages: [sentence-transformers, unstructured]
+    severity: CRITICAL
+    units: 2
+    cve_instances: 2
+    cves:
+      - "CVE-2026-68770 sentence-transformers RCE via security-control bypass (fix 5.6.0)"
+      - "CVE-2026-71428 unstructured SSRF in URL-based partitioning (fix 0.24.0)"
+    reachable: conditionally
+    why_reachable: >-
+      sentence-transformers executes model code, so it is reachable when a model
+      is loaded from an untrusted source.  The stack loads embedding models
+      through Ollama from pinned names, not arbitrary URLs.  `unstructured`
+      SSRF is reachable through RAG ingestion of a URL, which an authenticated
+      user can supply.
+    containment: >-
+      Authelia in front of every open-webui route (same evidence as V4); the
+      egress network is a separate attachment rather than the default bridge,
+      so an SSRF reaches only what that attachment can reach.
+    residual: >-
+      An authenticated user can aim the SSRF at whatever the egress attachment
+      permits.  We do not claim the attachment makes it harmless.
+    fix_available_upstream: "both fixed upstream, both transitive inside open-webui v0.12.3 (latest)"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+  - id: V6
+    title: "Debian 12 base packages with NO distro fix at any version"
+    disposition: accepted-no-fix-exists
+    images: [OPEN_WEBUI, POSTGRES]
+    severity: "CRITICAL and HIGH"
+    units: 62
+    critical_units: 9
+    packages_critical:
+      - libaom3
+      - libglib2.0-0
+      - libmbedcrypto7
+      - libsqlite3-0
+      - libxml2
+      - zlib1g
+      - zlib1g-dev
+    packages_high:
+      - bsdutils
+      - curl
+      - ffmpeg
+      - gzip
+      - libacl1
+      - libavcodec59
+      - libavdevice59
+      - libavfilter8
+      - libavformat59
+      - libavutil57
+      - libblkid1
+      - libcjson1
+      - libcurl3-gnutls
+      - libcurl4
+      - libexpat1
+      - libharfbuzz0b
+      - libjxl0.7
+      - libldap-2.5-0
+      - libmariadb-dev
+      - libmariadb3
+      - libmfx1
+      - libmount1
+      - libncursesw6
+      - libpostproc56
+      - librsvg2-2
+      - libsmartcols1
+      - libsndfile1
+      - libssh-gcrypt-4
+      - libssl-dev
+      - libssl3
+      - libswresample4
+      - libswscale6
+      - libsystemd0
+      - libtiff6
+      - libtinfo6
+      - libudev1
+      - libuuid1
+      - libx11-6
+      - libx11-data
+      - libx11-xcb1
+      - libxrender1
+      - mariadb-common
+      - mount
+      - ncurses-base
+      - ncurses-bin
+      - openssl
+      - util-linux
+      - util-linux-extra
+    excluded_deliberately: >-
+      The perl family is NOT in this entry.  It appears in BOTH images but with
+      DIFFERENT facts — CRITICAL with a fix in postgres (V7), HIGH with no fix
+      in open-webui (V11) — so one shared entry would have had to state one of
+      them wrongly.  The gate's ambiguity check is what surfaced this.
+    why_no_fix: >-
+      Debian has published no fixed version for these in bookworm.  trivy
+      reports no FixedVersion and grype reports no fix version, from both
+      scanners independently.  There is no `apt upgrade` and no newer image tag
+      that resolves them, because both images are already at their newest
+      upstream release.  "No fix available" is a measured field here, not a
+      guess.
+    reachable: mixed
+    reachability_note: >-
+      Honestly mixed and not individually triaged, which is itself the
+      disposition: these are base-OS libraries, some genuinely in the request
+      path (libssl3, libcurl4, libxml2) and many not (libx11, mesa, mariadb
+      client in an image that talks to postgres).  We do NOT claim a
+      per-package reachability result we did not establish.
+    containment: >-
+      Both images: cap_drop ALL, no-new-privileges, read_only root filesystem,
+      no published ports (postgres is never published; open-webui only through
+      Caddy + Authelia), pids_limit, and a non-default network attachment.
+    residual: >-
+      STATED IN FULL: a remote-code-execution path through one of the reachable
+      libraries would execute inside the container with those restrictions.
+      Containment reduces what that buys an attacker; it does not prevent the
+      initial execution, and we do not claim it does.
+    the_only_real_fix: "a smaller base image upstream, or a Debian 13 base — see V7"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+  - id: V7
+    title: "pgvector perl/sqlite/zlib CRITICALs — a Debian 13 base would clear six of eight"
+    disposition: accepted-pending-decision
+    images: [POSTGRES]
+    packages: [libperl5.36, perl, perl-base, perl-modules-5.36, stdlib, libpcre2-8-0]
+    severity: "CRITICAL and HIGH"
+    units: 6
+    critical_units: 5
+    measured_alternative:
+      pin: "docker.io/pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84"
+      evidence: "security-report-bump-20261019T060718Z"
+      result: >-
+        CRITICAL units 8 -> 3, HIGH 20 -> 28.  Clears the whole perl family plus
+        libsqlite3-0 and zlib1g; leaves libxml2 and the Go stdlib unit.  It is a
+        genuine TRADE, not a strict improvement: five fewer CRITICAL, eight more
+        HIGH.
+    why_not_applied: >-
+      It changes the base OS from Debian 12 to Debian 13.  That is a shape
+      change to the data tier, not a patch, and it carries a glibc collation
+      change that can invalidate existing text indexes on a cluster created
+      under the old locale data.  For a fresh MVP install that is a non-issue;
+      for anything already holding data it is a REINDEX, and that is a decision
+      about operations, not security.  Applying it unilaterally inside a
+      security ticket would be the wrong call, so it is MEASURED AND PROPOSED
+      here instead.
+    recommendation: >-
+      Take it for the MVP, which installs fresh.  Do not take it as an in-place
+      upgrade path without a reindex plan.
+    decision_owner: "Tech Lead"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead — this one needs a yes/no, not just a sign-off"
+
+  - id: V8
+    title: "Go toolchain and golang.org/x/* compiled into Caddy, Authelia and Ollama"
+    disposition: accepted-upstream-rebuild-only
+    images: [AUTHELIA, CADDY, OLLAMA]
+    packages:
+      - stdlib
+      - golang.org/x/net
+      - golang.org/x/crypto
+      - golang.org/x/text
+      - golang.org/x/mod
+      - golang.org/x/image
+      - github.com/buger/jsonparser
+    severity: HIGH
+    units: 11
+    cve_instances: 56
+    reachable: partly
+    why_reachable: >-
+      For Caddy and Authelia the affected package is net/http and x/net, which
+      IS the hot path — these are HTTP servers.  We say so rather than claiming
+      a TLS-terminating proxy is unaffected by an HTTP library CVE.  For Ollama
+      the x/crypto and x/image findings sit in code paths the stack does not
+      drive, but it is on an unpublished internal network either way.
+    why_no_fix: >-
+      A Go binary embeds its toolchain and module versions at BUILD time.
+      There is no runtime upgrade; the only fix is an upstream rebuild.  All
+      three images are already at their newest release (caddy 2.11.7,
+      authelia 4.39.28, ollama 0.40.6, each confirmed latest on 2026-10-19),
+      so there is no pin that improves this today.
+    severity_note: >-
+      Zero of these are CRITICAL under the vendor convention.  grype reads 7 of
+      them as CRITICAL from NVD scores; that disagreement is counted by the gate
+      and not adopted.
+    containment: >-
+      Caddy is the only service with published ports and holds exactly one
+      capability (NET_BIND_SERVICE, exception E1).  Authelia and Ollama publish
+      nothing.  Ollama is on the inference network with no egress attachment.
+    residual: >-
+      A Go net/http CVE affecting Caddy is exposed to the internet by
+      definition.  That is the single largest unmitigated residual in the stack
+      after V4, and no amount of container hardening changes it.
+    required_action: "bump on the first upstream release built against a fixed Go toolchain"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+  - id: V9
+    title: "Docling CentOS Stream 9 OS layer — the gap NOM-259 flagged, now measured"
+    disposition: accepted-no-fix-we-can-apply
+    images: [DOCLING]
+    severity: HIGH
+    units: 75
+    critical_units: 0
+    cve_instances: 273
+    how_the_gap_was_closed: >-
+      trivy has NO DATA SOURCE for CentOS Stream: it identifies the OS, logs
+      `WARN Unsupported os family="centos-stream"`, returns NO os-pkgs result,
+      and still exits 0.  Commit 9042e0c made the scanner refuse to call that
+      silence clean.  NOM-301 closes it with a scanner that does have a source:
+      grype resolves `ID=centos VERSION_ID=9` onto the Red Hat feed
+      (`redhat:distro:redhat:9`) and returned 2133 rpm matches — 0 CRITICAL,
+      267 HIGH, 1088 MEDIUM, 769 LOW, 9 NEGLIGIBLE.  The appearance of
+      NEGLIGIBLE, which NVD does not use, is how we know these carry Red Hat's
+      OWN severities rather than generic NVD scores.
+    the_honest_caveat: >-
+      CentOS Stream 9 is UPSTREAM of RHEL 9, so Red Hat's fixed-version numbers
+      do not always correspond to a Stream package that exists.  The SEVERITIES
+      are the vendor's and are sound; individual `fix` strings should be treated
+      as indicative.  This is real coverage, not equivalent coverage, and we
+      label it that way.
+    packages_with_a_listed_fix:
+      - gd
+      - gd-devel
+      - gnupg2
+      - libcap
+      - libevent
+      - libpq
+      - libpq-devel
+      - mariadb-connector-c
+      - mariadb-connector-c-config
+      - mariadb-connector-c-devel
+      - nodejs
+      - nodejs-docs
+      - nodejs-full-i18n
+      - nodejs-libs
+      - npm
+      - openssl
+      - openssl-devel
+      - openssl-fips-provider
+      - openssl-libs
+      - pcre2
+      - pcre2-devel
+      - pcre2-syntax
+      - pcre2-utf16
+      - pcre2-utf32
+      - python3.12
+      - python3.12-devel
+      - python3.12-libs
+      - rsync
+      - sqlite
+      - sqlite-devel
+      - sqlite-libs
+      - tesseract
+      - tesseract-devel
+    packages_with_no_fix:
+      - emacs-filesystem
+      - expat
+      - expat-devel
+      - gnutls
+      - go-srpm-macros
+      - httpd
+      - httpd-core
+      - httpd-devel
+      - httpd-filesystem
+      - httpd-tools
+      - libX11
+      - libX11-common
+      - libX11-devel
+      - libX11-xcb
+      - libXrender
+      - libblkid
+      - libblkid-devel
+      - libfdisk
+      - libmount
+      - libmount-devel
+      - libsmartcols
+      - libuuid
+      - mesa-dri-drivers
+      - mesa-filesystem
+      - mesa-libGL
+      - mesa-libgbm
+      - mod_ldap
+      - mod_lua
+      - mod_session
+      - mod_ssl
+      - python3
+      - python3-libs
+      - python3-pip-wheel
+      - python3.12-pip
+      - python3.12-pip-wheel
+      - util-linux
+      - util-linux-core
+      - vim-filesystem
+      - vim-minimal
+    packages_lang:
+      - "com.fasterxml.jackson.core:jackson-core"
+      - "com.fasterxml.jackson.core:jackson-databind"
+      - "org.apache.httpcomponents.core5:httpcore5"
+    observation_worth_a_look: >-
+      The image carries httpd, mod_ssl, mod_ldap, mod_lua, mesa and X11.  None
+      of it is needed to serve a document-conversion API, and httpd in
+      particular is an HTTP server we neither configure nor want.  Nothing in
+      compose.yaml starts it and docling-serve's own entrypoint does not, so it
+      is dead weight rather than a listener — but it is a large attack surface
+      riding along, and it is the strongest argument for the base-image
+      replacement the NOM-259 fix note suggested.
+    why_no_fix_we_can_apply: >-
+      docling-serve v1.37.0 is the newest release (2026-10-13).  The fixes Red
+      Hat lists are not available to us without rebuilding the image on a
+      different base.
+    containment: >-
+      Not published.  Reachable only from open-webui and agentgateway over the
+      parse networks, both of which sit behind Authelia.  cap_drop ALL,
+      no-new-privileges, read_only.
+    residual: >-
+      267 vendor-HIGH rpm CVEs remain in a reachable-from-authenticated-users
+      service.  Zero are CRITICAL.
+    recommendation: "replace the base image, or accept for the MVP and revisit at 1.0"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+  - id: V11
+    title: "Open WebUI perl family — HIGH with no Debian 12 fix"
+    disposition: accepted-no-fix-exists
+    images: [OPEN_WEBUI]
+    packages: [perl, perl-base, perl-modules-5.36, libperl5.36]
+    severity: HIGH
+    units: 4
+    why_separate_from_V7: >-
+      Same package names as V7, different facts.  In pgvector these are
+      CRITICAL and Debian ships a fix (deb12u4), which is why the trixie base
+      clears them.  In open-webui the same packages are HIGH and carry no fix,
+      and open-webui publishes no trixie variant — so neither V7's measured
+      alternative nor its reasoning transfers here.
+    why_no_fix: "no fixed version in bookworm; open-webui v0.12.3 is the newest release"
+    reachable: unlikely
+    reachability_note: >-
+      perl is present as a base-image dependency.  Nothing in open-webui's
+      documented request path invokes it.  We say unlikely rather than
+      not-reachable because we did not trace every subprocess the application
+      can spawn.
+    containment: "behind Authelia on every route; cap_drop ALL; read_only; no-new-privileges"
+    residual: "a perl-reachable code path, if one exists, executes under those restrictions"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+  - id: V10
+    title: "Remaining language-dependency HIGHs with upstream fixes we cannot pin"
+    disposition: accepted-upstream-only
+    images: [HOMEPAGE, N8N, OPEN_WEBUI]
+    packages:
+      - brace-expansion
+      - braces
+      - cryptography
+      - fsspec
+      - http-cache-semantics
+      - ip-address
+      - jaraco.context
+      - jq
+      - libexpat
+      - libjq1
+      - mcp
+      - nodemailer
+      - pacote
+      - picomatch
+      - pyarrow
+      - pypdf
+      - sigstore
+      - tiff
+      - toml
+      - transformers
+      - wheel
+    severity: HIGH
+    units: 21
+    why_no_fix: >-
+      All are transitive dependencies bundled inside images that are already at
+      their newest upstream release (homepage v2.6.0, n8n 2.44.3,
+      open-webui v0.12.3).  None is independently pinnable.
+    containment: "every one of these three services is behind Authelia; none publishes a port"
+    residual: "ordinary dependency lag; no CRITICAL among them"
+    approved_by: PENDING
+    approved_at: null
+    review_by: 2027-04-17
+    reviewer_requested: "Tech Lead"
+
+# ---------------------------------------------------------------------------
+# NOT VULNERABILITIES.  Recorded so the scan's non-zero misconfig and secret
+# counts have a written answer instead of being quietly dropped.
+# ---------------------------------------------------------------------------
+non_vulnerability_findings:
+
+  - id: M1
+    kind: misconfiguration
+    count: 16
+    disposition: not-applicable-to-this-deployment
+    what_they_are: >-
+      All 16 come from source trees that upstream images happen to SHIP, not
+      from any configuration this stack applies:
+        * 5 in n8n, against the `isolated-vm` npm package's own
+          Dockerfile.alpine / Dockerfile.debian — build files for a dependency
+          that are never executed at runtime (DS-0002 root user,
+          DS-0025 apk --no-cache, DS-0026 no HEALTHCHECK).
+        * 2 in litellm, against its own Dockerfile.build_from_pip (same checks).
+        * 9 in litellm, against `enterprise/cloudformation_stack/litellm.yaml`
+          — an AWS CloudFormation template for a deployment model we do not use
+          (AWS-0180 RDS publicly accessible, AWS-0080/0131 unencrypted storage,
+          AWS-0028/0130 IMDS tokens, AWS-0077/0133/0176/0177).
+    why_not_applicable: >-
+      None of these files is read by anything at runtime, and the AWS ones
+      describe infrastructure that does not exist in a self-hosted Proxmox
+      deployment.  The DS-0002 "image user should not be root" hits are against
+      DEPENDENCY Dockerfiles, not against the images' actual runtime user —
+      that question is governed by compose.yaml and exception E2 and is probed
+      separately.
+    approved_by: PENDING
+    review_by: 2027-04-17
+
+  - id: S1
+    kind: secret
+    count: 1
+    disposition: not-a-credential-of-ours
+    what_it_is: >-
+      trivy's `jwt-token` rule fired at line 528 of
+      /opt/app-root/lib/python3.12/site-packages/skimage/data/_fetchers.py in
+      the docling image — scikit-image's sample-data fetcher.  MEDIUM.
+    why_not_a_credential: >-
+      It is a token embedded in a third-party library's public sample-data
+      fetching code, shipped identically to every scikit-image user.  It
+      authenticates nothing belonging to Nomad AI and grants no access to this
+      stack.  THE VALUE WAS NOT PRINTED, copied, or recorded anywhere in this
+      repo or in the issue thread, and must not be.
+    action: none
+    approved_by: PENDING
+    review_by: 2027-04-17
+
+# ---------------------------------------------------------------------------
+# COVERAGE LIMITS.  What the evidence does NOT establish.  A scanner that
+# looked at nothing reports zero, and zero is not an answer.
+# ---------------------------------------------------------------------------
+coverage_limits:
+
+  - id: L1
+    subject: "repository misconfiguration scanning"
+    claim_NOT_made: "that the shipped configuration is free of misconfigurations"
+    what_actually_happened: >-
+      `trivy fs --scanners misconfig,secret` over the source tree reported
+      `Detected config files num=0` and returned no results.  That is NOT a
+      clean result — it is NO COVERAGE.  trivy's misconfig scanner analyses
+      Dockerfiles, Kubernetes manifests, Terraform, CloudFormation and Helm.
+      This repo ships NONE of those: `find` for Dockerfile*, *.tf, Chart.yaml
+      and k8s paths returns nothing.  What the repo does ship — compose.yaml,
+      the Caddyfile and sites.d/*.caddy, authelia/configuration.yml,
+      litellm/config.yaml, homepage/*.yaml, limits.yaml — are formats trivy
+      does not analyse.  So trivy examined zero of the files that matter.
+    what_IS_the_control: >-
+      `ci/invariants.py`, which asserts the stack's own invariants (published
+      ports, capability sets, auth on every route, banned strings) directly
+      against those files.  That is the real config control; trivy's zero says
+      nothing either way and is recorded here so nobody later cites it as
+      evidence of a clean configuration.
+    secret_scanning_DID_run: >-
+      By contrast the SECRET scanner is content-based and did process the tree
+      (it logged size warnings on individual report files as it went) and found
+      zero secrets in the repo.  That zero IS a result.
+
+  - id: L2
+    subject: "signature verification"
+    claim_NOT_made: "that any image signature was verified"
+    status: >-
+      cosign is not installed on AI-Sandbox and was NOT run.  Digest pinning is
+      the supply-chain control; signature verification remains UNATTEMPTED, as
+      versions.env already states.  Unattempted is recorded as unattempted.
+
+  - id: L3
+    subject: "per-package reachability inside V6"
+    claim_NOT_made: "that each of the 62 Debian base-package findings was individually traced"
+    status: >-
+      V6 is dispositioned as a group under containment, with its mixed
+      reachability stated rather than resolved.  A per-package reachability
+      result for 62 base libraries was not produced and is not claimed.
+
+# ---------------------------------------------------------------------------
+approval:
+  state: PENDING
+  who_must_approve: "Tech Lead"
+  what_they_are_approving: >-
+    The dispositions above for the 23 CRITICAL and 180 HIGH blocking units that
+    remain after the n8n bump, on the understanding that every image is already
+    at its newest upstream release and no further pin change removes them.
+  what_no_agent_may_do: >-
+    Approve any entry in this file or in security-exceptions.yaml.  Every
+    `approved_by` here is PENDING and the gate's approval check is EXPECTED TO
+    FAIL until a named human decides.  security-exceptions.yaml additionally
+    still carries `approved_by: "DevOps Engineer (NOM-258), pending Tech Lead
+    review"` on E1, E6, E7, E9 and E10 — an agent self-approval marker that
+    NOM-301 has deliberately NOT cleared.
+  read_first: "V4 (PyJWT), then V7 (a yes/no on the Debian 13 base), then V8 (Caddy's Go net/http exposure)"
