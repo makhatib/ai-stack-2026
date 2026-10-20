@@ -48,7 +48,14 @@ services:
   postgres:
     <<: *drill
     image: ${POSTGRES_IMAGE:?pin missing}:${POSTGRES_TAG:?pin missing}@${POSTGRES_DIGEST:?pin missing}
-    cap_add: [CHOWN, SETUID, SETGID, FOWNER, DAC_READ_SEARCH]   # E7
+    # E7, AND IT MUST STAY EQUAL TO compose.yaml's postgres cap_add.  This is
+    # the SECOND copy of that list and the drill is the worst place for a
+    # divergent one: if the drill grants MORE than the shipped service, the
+    # restore drill passes against a container the operator will never run, and
+    # the failure mode of that divergence is a GREEN DRILL.  NOM-341 narrowed
+    # the set to four (FOWNER measured out) and this copy did not move with it
+    # until I16 was added to hold them equal.
+    cap_add: [CHOWN, SETUID, SETGID, DAC_READ_SEARCH]   # E7 — equal to compose.yaml, asserted by I16
     networks: [drill]
     volumes:
       - postgres-data:/var/lib/postgresql/data

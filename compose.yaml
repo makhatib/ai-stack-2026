@@ -174,7 +174,8 @@ services:
     <<: *hardened
     image: ${POSTGRES_IMAGE:?pin missing}:${POSTGRES_TAG:?pin missing}@${POSTGRES_DIGEST:?pin missing}
     container_name: aistack-postgres
-    # E7 — MEASURED, not guessed (NOM-258, 2026-10-18).
+    # E7 — MEASURED, not guessed (NOM-258 2026-10-18; RE-BISECTED on the
+    # Debian 13 base, NOM-341 2026-10-20).
     #
     # The official entrypoint starts as root to chown PGDATA and then drops to
     # uid 999 via gosu.  Under `cap_drop: ALL` the chown fails with "Operation
@@ -184,10 +185,9 @@ services:
     #   CHOWN           chown PGDATA to postgres
     #   SETUID          \ gosu's drop from root to 999
     #   SETGID          /
-    #   FOWNER          the entrypoint's permission fix-up over PGDATA
     #   DAC_READ_SEARCH the entrypoint's `find` over an EXISTING PGDATA
     #
-    # TWO THINGS HERE WERE ONLY RIGHT AFTER BEING MEASURED TWICE.
+    # THREE THINGS HERE WERE ONLY RIGHT AFTER BEING MEASURED.
     #
     # (1) BOTH LIFECYCLE PATHS MUST BE TESTED.  The first bisection used a
     # fresh volume every time and concluded four capabilities were enough.
@@ -202,7 +202,18 @@ services:
     # the container; DAC_READ_SEARCH bypasses only read and directory-search.
     # The entrypoint needs to traverse and read, not to write, so it gets the
     # one that cannot be used to overwrite a file it does not own.
-    cap_add: [CHOWN, SETUID, SETGID, FOWNER, DAC_READ_SEARCH]
+    #
+    # (3) FOWNER IS GONE, AND IT WAS MEASURED OUT, NOT TIDIED AWAY.  The pin
+    # moved to the trixie (Debian 13) base, so the bisection was re-run against
+    # the new digest — a capability set is evidence about ONE image.  Dropping
+    # FOWNER from the five breaks nothing: first boot, two restarts and the
+    # shipped healthcheck all pass without it, across three trials and again at
+    # full fidelity with the real initdb.d scripts mounted.  Dropping any of
+    # the remaining four does break something, so this set is minimal and not
+    # just sufficient.  Re-measure this list whenever POSTGRES_DIGEST changes;
+    # I9 now fails the build when E7's recorded digest and the pin disagree,
+    # which is what forces that.
+    cap_add: [CHOWN, SETUID, SETGID, DAC_READ_SEARCH]
     networks: [data]
     volumes:
       - postgres-data:/var/lib/postgresql/data

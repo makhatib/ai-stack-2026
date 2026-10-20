@@ -47,26 +47,34 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import approvers  # noqa: E402  — the approval-authority rule, shared with I9
+from pins import read_pins  # noqa: E402  — the committed pins, shared with I9
 
 SEV_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "NEGLIGIBLE": 4, "UNKNOWN": 5}
 BLOCKING = ("CRITICAL", "HIGH")
 OS_TYPES = ("rpm", "deb", "apk")
 
-
-def read_pins(path):
-    pins = {}
-    for ln in open(path):
-        m = re.match(r"([A-Z0-9_]+)_(IMAGE|TAG|DIGEST|KIND)=(.*)", ln.strip())
-        if m:
-            pins.setdefault(m.group(1), {})[m.group(2)] = m.group(3)
-    return {
-        n: d for n, d in pins.items()
-        if d.get("DIGEST", "").startswith("sha256:")
-    }
+# The header block the per-entry `units` must add up to.
+HEADER_TOTALS = "totals_after_V0_bump"
 
 
 def index_reports(dirs):
-    """digest -> {trivy: path, grype: path}, by reading each report's own metadata."""
+    """digest -> {trivy: path, grype: path}, by reading each report's own metadata.
+
+    WHEN TWO DIRECTORIES HOLD A SCAN OF THE SAME DIGEST, THE MORE COMPLETE ONE
+    WINS — not the last one listed [NOM-341].  This was last-writer-wins, and
+    the ordering is whatever the caller's shell glob produced, so
+    `ci/scan-gate.py versions.env security-report-*/` let
+    security-report-docling-recheck-20261018T194157Z — a trivy-only recheck
+    with no SBOM and no grype — shadow the full c2 scan of the same docling
+    digest.  Measured: DOCLING reported 3 units instead of 75 and the gate's
+    total read 131 against the register's 203, while the gate still called
+    every unit claimed.  A silent DOWNGRADE of evidence is worse than a
+    missing scan, because a missing scan is reported as UNSCANNED.
+
+    "More complete" is: has a grype second opinion, then has an OS-layer
+    result, then the later directory name.  All three are properties of the
+    evidence, so the answer does not depend on argument order.
+    """
     by = {}
     for d in dirs:
         tdir, gdir = os.path.join(d, "trivy"), os.path.join(d, "grype")
@@ -90,11 +98,18 @@ def index_reports(dirs):
             if not dig:
                 continue
             g = os.path.join(gdir, f[:-5] + ".grype.json")
-            by[dig] = {
+            has_grype = os.path.exists(g)
+            has_os = any((r.get("Class") == "os-pkgs")
+                         for r in (doc.get("Results") or []))
+            cand = {
                 "trivy": p,
-                "grype": g if os.path.exists(g) else None,
+                "grype": g if has_grype else None,
                 "report_dir": d,
+                "_rank": (1 if has_grype else 0, 1 if has_os else 0, d),
             }
+            prev = by.get(dig)
+            if prev is None or cand["_rank"] > prev["_rank"]:
+                by[dig] = cand
     return by
 
 
@@ -185,16 +200,34 @@ def load_dispositions(path):
     # is nothing to approve in "we did not run cosign", and sweeping them into
     # the approval check would invent three findings that do not exist.
     APPROVABLE = ("dispositions", "non_vulnerability_findings")
+    # The scalar fields the arithmetic and approval checks read.  `units` and
+    # `critical_units` were present in the register and read by NOBODY before
+    # NOM-341 — which is exactly how V6 could declare 62 against 77 measured
+    # and V10 21 against 22 for a day with a green coverage check.
+    SCALARS = ("approved_by", "approved_at", "review_by", "units", "critical_units")
     entries, cur, key, section = [], None, None, ""
+    header, hblock = {}, None
     for raw in open(path):
         ln = raw.rstrip("\n")
         s = ln.strip()
         if not s or s.startswith("#"):
             continue
+        # the `candidate: / totals_after_V0_bump:` header block, which is the
+        # figure the per-entry sum has to equal
+        if hblock is not None:
+            m = re.match(r"^    ([a-z_]+):\s*(\d+)\s*$", ln)
+            if m:
+                header[m.group(1)] = int(m.group(2))
+                continue
+            if re.match(r"^ {0,3}\S", ln):
+                hblock = None
         m = re.match(r"^([a-z_]+):\s*$", ln)
         if m:
             section = m.group(1)
             cur = None
+            continue
+        if section == "candidate" and re.match(rf"^  {HEADER_TOTALS}:\s*$", ln):
+            hblock = HEADER_TOTALS
             continue
         m = re.match(r"^  - id:\s*(\S+)", ln)
         if m:
@@ -204,7 +237,7 @@ def load_dispositions(path):
             entries.append(cur)
             key = None
             continue
-        m = re.match(r"^    (approved_by|review_by):\s*(.*)$", ln)
+        m = re.match(rf"^    ({'|'.join(SCALARS)}):\s*(.*)$", ln)
         if m and cur is not None:
             cur[m.group(1)] = m.group(2).strip().strip('"').strip("'")
             key = None
@@ -236,7 +269,102 @@ def load_dispositions(path):
         for img in e["images"]:
             for pkg in e["packages"]:
                 claim.setdefault((img, pkg), []).append(e["id"])
-    return claim, entries
+    return claim, entries, header
+
+
+def check_unit_arithmetic(entries, measured, header, totals):
+    """An approval may not certify an entry whose own arithmetic is wrong.
+
+    THE DEFECT THIS EXISTS FOR [NOM-309/NOM-341].  The coverage check above
+    asks only "is every measured unit claimed by SOME entry".  It never asked
+    whether the number an entry DECLARES is the number it claims.  So V6 could
+    declare `units: 62` while claiming 77, V10 `units: 21` while claiming 22,
+    and the per-entry column could sum to 187 against a header total of 203 —
+    with the gate green on coverage the whole time.  The only thing that
+    caught it was a human reading the file, and a control that is a human
+    reading the file is not a control.
+
+    Three assertions, because each catches something the others do not:
+
+      1. PER ENTRY, declared `units` == measured units for that entry's
+         (image, package) set, and the same for `critical_units`.
+      2. EVERY approvable entry must DECLARE both, including the ones that
+         measure zero.  An undeclared figure is not a passing figure; without
+         this, an entry dodges assertion 1 by saying nothing, and assertion 3
+         silently loses a term.
+      3. The per-entry sum == the register header's own totals.  Assertion 1
+         alone passes a register whose entries are each right and whose header
+         is wrong, which is the figure a reader quotes.
+
+    `measured` is {entry id: (units, critical_units)} counted from the SAME
+    claim map the coverage check used, so the two cannot disagree about which
+    unit belongs to which entry.
+    """
+    problems = []
+    dsum = dcrit = 0
+    for e in entries:
+        if not e.get("approvable"):
+            continue
+        eid = e["id"]
+        mu, mc = measured.get(eid, (0, 0))
+        for field, meas in (("units", mu), ("critical_units", mc)):
+            raw = str(e.get(field, "")).strip()
+            if raw == "":
+                problems.append(
+                    f"{eid}: declares no {field}, and measures {meas} — every "
+                    f"approvable entry must state both, or the header total "
+                    f"below is a sum with a missing term")
+                continue
+            try:
+                decl = int(raw)
+            except ValueError:
+                problems.append(f"{eid}: {field} {raw!r} is not a number")
+                continue
+            if field == "units":
+                dsum += decl
+            else:
+                dcrit += decl
+            if decl != meas:
+                problems.append(
+                    f"{eid}: declares {field}: {decl} but the scan measures "
+                    f"{meas} for its own (image, package) set — an approval "
+                    f"would certify a figure the evidence does not support")
+    want_u = header.get("blocking_units")
+    want_c = header.get("critical_units")
+    if want_u is None:
+        problems.append(
+            f"the register header has no {HEADER_TOTALS}.blocking_units, so "
+            f"the per-entry sum ({dsum}) has nothing to be checked against")
+    elif dsum != want_u:
+        problems.append(
+            f"the per-entry units sum to {dsum} but the header "
+            f"{HEADER_TOTALS}.blocking_units says {want_u} — correct the "
+            f"per-entry declarations from the scan first; the header is what "
+            f"moves to meet them")
+    if want_c is not None and dcrit != want_c:
+        problems.append(
+            f"the per-entry critical_units sum to {dcrit} but the header "
+            f"{HEADER_TOTALS}.critical_units says {want_c}")
+    # and both must still equal what the scan actually measured
+    if dsum != totals["units"]:
+        problems.append(
+            f"the per-entry units sum to {dsum} but the scan measured "
+            f"{totals['units']} blocking units in total")
+    if dcrit != totals["crit"]:
+        problems.append(
+            f"the per-entry critical_units sum to {dcrit} but the scan "
+            f"measured {totals['crit']} CRITICAL units in total")
+    hh = header.get("high_units")
+    if hh is not None and hh != totals["units"] - totals["crit"]:
+        problems.append(
+            f"the header {HEADER_TOTALS}.high_units says {hh} but the scan "
+            f"measured {totals['units'] - totals['crit']}")
+    hc = header.get("blocking_cve_instances")
+    if hc is not None and hc != totals["cves"]:
+        problems.append(
+            f"the header {HEADER_TOTALS}.blocking_cve_instances says {hc} but "
+            f"the scan measured {totals['cves']}")
+    return problems
 
 
 def check_approvals(entries, root):
@@ -278,6 +406,12 @@ def check_approvals(entries, root):
                     problems.append(f"{e['id']}: {(today - d).days} days PAST its review_by")
         elif ab not in ("n/a",):
             problems.append(f"{e['id']}: missing review_by")
+        # the <= 180-day cap, from the shared rule, so this register is held
+        # to the same window as security-exceptions.yaml.  Vacuous today only
+        # because every `approved_at` here is null; it goes live per entry the
+        # moment a human writes one.  See approvers.check_review_window.
+        problems.extend(approvers.check_review_window(
+            e["id"], e.get("approved_at"), rb))
         if len(problems) > before:
             flagged.add(e["id"])
     approvable = sum(1 for e in entries if e.get("approvable") and e.get("approved_by") not in ("n/a", "null"))
@@ -287,7 +421,8 @@ def check_approvals(entries, root):
 def main():
     pins_path, dirs = sys.argv[1], sys.argv[2:]
     disp_path = os.environ.get("DISPOSITIONS")
-    claim, entries = load_dispositions(disp_path) if disp_path else (None, None)
+    claim, entries, header = (load_dispositions(disp_path) if disp_path
+                              else (None, None, {}))
     pins = read_pins(pins_path)
     reports = index_reports(dirs)
 
@@ -353,6 +488,10 @@ def main():
     # --- every blocking unit must be claimed by exactly one disposition -----
     if claim is not None:
         unclaimed, double = [], []
+        # counted off the SAME claim map the coverage check uses, so the
+        # arithmetic check below cannot disagree with it about which unit
+        # belongs to which entry
+        measured = collections.defaultdict(lambda: [0, 0])
         for name in sorted(out):
             r = out[name]
             if r["status"] != "SCANNED":
@@ -362,8 +501,13 @@ def main():
                 ids = claim.get((name, pkg))
                 if not ids:
                     unclaimed.append(f"{name} {unit} [{u['worst']}]")
-                elif len(ids) > 1:
+                    continue
+                if len(ids) > 1:
                     double.append(f"{name} {unit} claimed by {ids}")
+                for i in ids:
+                    measured[i][0] += 1
+                    if u["worst"] == "CRITICAL":
+                        measured[i][1] += 1
         print(f"\ndisposition coverage: {disp_path}")
         if unclaimed:
             print(f"  UNCLAIMED blocking units: {len(unclaimed)} — each is an "
@@ -380,6 +524,22 @@ def main():
             for x in double[:20]:
                 print("    -", x)
             fail.append(f"{len(double)} blocking unit(s) claimed by more than one disposition")
+
+        # --- an approval may not certify an entry whose arithmetic is wrong --
+        arith = check_unit_arithmetic(
+            entries, {k: tuple(v) for k, v in measured.items()}, header,
+            {"units": tot["units"], "crit": tot["crit"], "cves": tot["cves"]})
+        print(f"\nunit arithmetic: per-entry declarations vs this scan")
+        if arith:
+            for p in arith:
+                print("    -", p)
+            fail.append(f"{len(arith)} unit-arithmetic error(s) — a declared "
+                        f"figure does not equal what the scan measures, so no "
+                        f"approval of it would mean anything")
+        else:
+            print("  every approvable entry's declared units and critical_units "
+                  "equal what this scan\n  measures for its own packages, and "
+                  "the per-entry sum equals the header total.")
 
         approval_problems, n_approvable, n_flagged = check_approvals(
             entries, os.path.dirname(os.path.abspath(disp_path)) or ".")

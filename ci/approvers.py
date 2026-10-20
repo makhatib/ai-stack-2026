@@ -109,6 +109,13 @@ NOT_APPLICABLE = ("n/a", "null", "none", "")
 
 APPROVERS_FILE = "security-approvers.yaml"
 
+# Both registers' headers promise a review window no longer than this.
+# security-exceptions.yaml says a "`review_by` date <= 180 days EVEN WHEN THE
+# ENTRY IS PERMANENT".  Until NOM-341 nothing asserted it, so the promise was
+# prose: both gates checked only whether `review_by` was already PAST, which
+# a `review_by: 2099-01-01` passes for the next seventy years.
+REVIEW_WINDOW_DAYS = 180
+
 
 def _norm(s):
     return re.sub(r"\s+", " ", str(s or "")).strip().strip('"').strip("'")
@@ -135,6 +142,57 @@ def pending_hit(value):
         if re.search(pat, v, re.I):
             return pat
     return None
+
+
+def _as_date(value):
+    """A `datetime.date` from a register field, or None if it is not one."""
+    import datetime
+    if isinstance(value, datetime.date):
+        return value
+    v = _norm(value)
+    if v.lower() in NOT_APPLICABLE:
+        return None
+    try:
+        return datetime.date.fromisoformat(v)
+    except ValueError:
+        return None
+
+
+def check_review_window(entry_id, approved_at, review_by,
+                        max_days=REVIEW_WINDOW_DAYS):
+    """The <= 180-day cap, asserted FROM `approved_at`.  Shared by both gates.
+
+    Fails an entry whose window is TOO LONG, which is the half neither gate
+    had: a `review_by` far in the future is not "a live review date", it is
+    an entry that will never come back for review.  Past-due is a different
+    failure and stays with each caller, which already reported it.
+
+    WHAT THIS DOES NOT ESTABLISH, stated because a check whose limits are not
+    written down gets cited for more than it proves: with no `approved_at`
+    there is no window to measure, so an UNSIGNED entry is not checked here.
+    That is not a hole to route around — it is the definition.  The window is
+    a property of an approval, and the moment a human writes `approved_at`
+    this check goes live on that entry.  Every entry in
+    security-findings.yaml is in exactly that state today.
+    """
+    problems = []
+    rb = _as_date(review_by)
+    aa = _as_date(approved_at)
+    if rb is None:
+        return problems               # the caller owns "missing / not a date"
+    if aa is None:
+        return problems               # unsigned: no window exists yet
+    window = (rb - aa).days
+    if window > max_days:
+        problems.append(
+            f"{entry_id}: review_by {rb.isoformat()} is {window} days after "
+            f"approved_at {aa.isoformat()} — the register's own header promises "
+            f"a window of {max_days} days or less, even for a permanent entry")
+    if window < 0:
+        problems.append(
+            f"{entry_id}: review_by {rb.isoformat()} is BEFORE approved_at "
+            f"{aa.isoformat()} — the entry was born past its own review date")
+    return problems
 
 
 def load_approvers(root):

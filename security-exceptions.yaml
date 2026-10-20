@@ -6,9 +6,23 @@
 # Every entry carries `approved_by` and `approved_at` (A NAMED HUMAN, who must
 # be on security-approvers.yaml — see `approval:` at the end of this file and
 # ci/approvers.py for the rule, which no agent of this company can satisfy)
-# and a `review_by` date <= 180 days EVEN WHEN THE ENTRY IS PERMANENT.  CI fails the build when an entry is missing approval, is past
-# `review_by`, or records a digest that no longer matches the pin — a change
-# invalidates its own evidence rather than inheriting it.
+# and a `review_by` date <= 180 days EVEN WHEN THE ENTRY IS PERMANENT.  CI
+# fails the build when an entry is missing approval, is past `review_by`, has a
+# review window LONGER than 180 days, or records a digest that no longer
+# matches the pin — a change invalidates its own evidence rather than
+# inheriting it.
+#
+# THE LAST TWO OF THOSE WERE PROSE UNTIL NOM-341.  This paragraph claimed both
+# for days and no code implemented either.  What CI actually did was check
+# whether `review_by` was already PAST — which a date in 2099 passes forever —
+# and nothing at all about the digest.  That mattered here specifically: E7
+# carried a Debian 12 pgvector digest and a capability set bisected against it,
+# and NOM-341 moved that pin to Debian 13, so an unenforced binding would have
+# left Debian 12 evidence sitting under a Debian 13 image reading as approved.
+# Both are now asserted by ci/invariants.py I9, the window from the shared rule
+# in ci/approvers.py so this register and security-findings.yaml are held to
+# one cap.  tests/register-controls.sh drives each of them to failure on a
+# scratch copy, because a check that has only ever passed is a note.
 
 schema: aistack.security-exceptions.v1
 version: 1
@@ -54,13 +68,20 @@ exceptions:
 
   - id: E7
     service: postgres
-    exception: "cap_add: CHOWN, SETUID, SETGID, FOWNER, DAC_READ_SEARCH"
+    exception: "cap_add: CHOWN, SETUID, SETGID, DAC_READ_SEARCH"
     why: >-
       MEASURED by bisection against the pinned digest, NOT assumed.  The
       official entrypoint starts as root to prepare PGDATA and then drops to
       uid 999 via gosu.  CHOWN chowns PGDATA; SETUID and SETGID are the drop
-      itself; FOWNER is the permission fix-up; DAC_READ_SEARCH lets root
-      traverse an EXISTING PGDATA, which is 0700 owned by 999.
+      itself; DAC_READ_SEARCH lets root traverse an EXISTING PGDATA, which is
+      0700 owned by 999.
+      RE-BISECTED ON DEBIAN 13 [NOM-341] because the pin moved, and the set
+      came out SMALLER: FOWNER WAS DROPPED.  It is not a sixth capability
+      anyone removed as a tidy-up — it was in this entry as "the permission
+      fix-up", and on the trixie digest, with FOWNER absent, first boot AND
+      both restarts complete and the shipped healthcheck passes.  A capability
+      that the bisection cannot show is required is not a measured capability,
+      and this entry claims every one of its capabilities is measured.
     mitigation: >-
       DAC_READ_SEARCH IS DELIBERATE AND DAC_OVERRIDE IS NOT USED.  Both
       complete the restart path; DAC_OVERRIDE bypasses read, write AND execute
@@ -69,11 +90,35 @@ exceptions:
       Postgres is on one internal bridge, publishes no port, and is never
       publishable.
     evidence: >-
-      Bisected twice.  The first bisection used a fresh volume each time and
-      concluded four capabilities sufficed; that set starts a NEW database and
-      then fails on the FIRST RESTART.  A capability set validated only
-      against first boot is a container that works until it is restarted.
-    digest: sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+      Bisected three times, each against the digest recorded below.  The FIRST
+      bisection used a fresh volume each time and concluded four capabilities
+      sufficed; that set starts a NEW database and then fails on the FIRST
+      RESTART.  A capability set validated only against first boot is a
+      container that works until it is restarted, which is why every pass
+      since tests INIT and RESTART and a set passes only if both pass.
+      THE DEBIAN 13 RE-BISECTION [NOM-341, 2026-10-20] ran that way.  Dropping
+      each capability in turn from the declared five: CHOWN, SETUID and SETGID
+      each break first boot ("failed switching to 'postgres': operation not
+      permitted"); DAC_READ_SEARCH passes first boot and FAILS THE FIRST
+      RESTART with `find: '/var/lib/postgresql/data/pgdata': Permission
+      denied` — the recorded trap, reproduced on the new base; FOWNER breaks
+      NOTHING.  The remaining four were then re-tested as a set, three
+      independent trials of init + two restarts each, all pass; and each of
+      those four was dropped again from WITHIN that set, and each one broke,
+      so the set is minimal and not merely sufficient.  Re-run at FULL
+      FIDELITY with the real /docker-entrypoint-initdb.d scripts, the real
+      healthcheck and synthetic secrets: init and restart pass, the shipped
+      healthcheck exits 0, and all four application roles are created.  Zero
+      added capabilities fails first boot, which is the control showing the
+      probe can fail.
+    digest: sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84
+    digest_note: >-
+      THIS FIELD IS NOW ENFORCED.  This file's header has always said CI fails
+      an entry recording a digest that no longer matches the pin; until
+      NOM-341 no code did, and this entry is why it mattered — it carried the
+      Debian 12 digest sha256:ac08538c... and a capability set bisected against
+      it, and the pin moved to Debian 13.  ci/invariants.py I9 now binds this
+      value to POSTGRES_DIGEST in versions.env and fails when they differ.
     scope: all
     permanent: true
     approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
@@ -170,9 +215,15 @@ approval:
     pass replaces it.  E2, E3 and E5 are `scope: deferred` and carry no
     approval field, so they are outside this entirely.
   why_the_signature_waits: >-
-    The findings register's figures are being corrected first (V6/V10 units and
-    the Debian 13 Postgres base), and both registers are signed in ONE pass on
-    the corrected evidence.  See security-findings.yaml `approval:`.
+    IT NO LONGER WAITS ON ANYTHING BUT THE SIGNATURE.  The findings register's
+    figures have been corrected (V6/V10/V11 units and the Debian 13 Postgres
+    base, NOM-341) and both registers are now ready to be signed in ONE pass
+    on the corrected evidence.  See security-findings.yaml `approval:`.
+    ONE THING IN THIS REGISTER CHANGED WITH THAT PASS and a signer should see
+    it named rather than finding it in a diff: E7 was re-bisected against the
+    new Debian 13 digest and came out ONE CAPABILITY SMALLER — FOWNER is gone
+    from E7 and from compose.yaml, measured, not tidied.  E1, E6, E9 and E10
+    are untouched.
 
 # DELIBERATELY NOT AN EXCEPTION: the Docker socket.
 # A read-only socket proxy was evaluated and REJECTED.  Read access to the

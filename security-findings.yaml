@@ -35,10 +35,16 @@
 # The authority is now a named human, recorded once in security-approvers.yaml,
 # and ci/approvers.py refuses every agent of this company BY NAME.  Every
 # `approved_by` here is still PENDING and the gate is EXPECTED TO FAIL its
-# approval check until that human approves the CORRECTED figures — see
-# `approval:` at the end of this file for what "corrected" means and why the
-# signature waits.  That failure is the control working, not a defect to route
-# around.
+# approval check until that human approves.  That failure is the control
+# working, not a defect to route around.
+#
+# THE FIGURES ARE NOW THE CORRECTED ONES [NOM-341] and they are no longer
+# merely written down: `ci/scan-gate.py` fails when any entry's declared
+# `units` / `critical_units` differ from what it measures for that entry's own
+# (image, package) set, and when the per-entry sum differs from the header.
+# Before that, the only thing that caught a wrong count was a human reading
+# the file — V6 declared 62 against 77 and V10 declared 21 against 22 while
+# the coverage check stayed green.  See `approval:` at the end of this file.
 
 schema: aistack.security-findings.v1
 version: 1
@@ -46,7 +52,22 @@ version: 1
 candidate:
   issue: NOM-301
   measured_on: 2026-10-19
+  corrected_on: 2026-10-20
+  corrected_by_issue: NOM-341
   measured_by: "DevOps Engineer (agent) — evidence only, NOT an approval"
+  evidence_dir: security-report-nom341-20261020T175630Z
+  evidence_dir_note: >-
+    ONE directory for the whole pin set, which is new in NOM-341 and is the
+    reason every figure below can name a single scan.  Before this the figures
+    came from three directories at once (c2 for eight images, bump for n8n,
+    agw for agentgateway) and the gate had to be handed all three — and when
+    it was handed `security-report-*/` instead, a trivy-only docling RECHECK
+    with no grype shadowed the full c2 scan of the same digest and the total
+    read 131 instead of 203 with every unit still "claimed".  The nine
+    unchanged digests were carried into this directory unmodified and POSTGRES,
+    the one pin that moved, was scanned fresh here.  ci/scan-gate.py now
+    prefers the more complete scan of a digest over the last one listed, so
+    the shadowing cannot recur.
   severity_convention: vendor
   severity_convention_note: >-
     The distro's / upstream's own severity, i.e. trivy's.  grype also runs and
@@ -57,10 +78,27 @@ candidate:
     has no data source at all and there is therefore no distro verdict to
     prefer — see V9.
   totals_after_V0_bump:
-    blocking_units: 203
-    critical_units: 23
-    high_units: 180
-    blocking_cve_instances: 1049
+    blocking_units: 205
+    critical_units: 17
+    high_units: 188
+    blocking_cve_instances: 1009
+  totals_note: >-
+    THESE FIGURES MOVED IN NOM-341 AND THEY ARE NOW ASSERTED, NOT ASSERTED-OF.
+    They read 203 / 23 / 180 / 1049 and were wrong in two independent ways.
+      * The per-entry `units` summed to 187, not 203 [NOM-309].  V6 declared
+        62 against 77 measured and V10 declared 21 against 22; 187 + 15 + 1 =
+        203 was the whole of the gap.  Nothing in CI compared the two numbers,
+        so a human reading the file was the only control.
+      * The Debian 13 Postgres base was then APPLIED (V7), which re-measured
+        POSTGRES from 28 units / 8 CRITICAL to 30 / 2.
+    THE DIRECTION OF THE CORRECTION MATTERS: the per-entry declarations were
+    corrected FROM THE SCAN, and this header then moved to meet their sum.  It
+    was not balanced the other way round.  `ci/scan-gate.py` now fails when a
+    declared per-entry figure differs from what it measures for that entry's
+    own packages, and when the per-entry sum differs from this block — so the
+    arithmetic that was wrong here cannot be wrong again silently.
+    CRITICAL fell 23 -> 17 and HIGH rose 180 -> 188: the trixie swap is a
+    TRADE, as V7 said it was, not a strict improvement.
   coverage:
     images_pinned: 10
     images_scanned_at_exact_pinned_digest: 10
@@ -97,8 +135,16 @@ dispositions:
       The bump clears all seven openssh units (Alpine 10.3_p1-r0 -> r1) and the
       graphicsmagick unit.  No new CRITICAL package appears.  Measured on the
       exact bump digest, not inferred from the version number.
-    evidence: "security-report-bump-20261019T060718Z"
+    evidence: "security-report-bump-20261019T060718Z, re-confirmed in security-report-nom341-20261020T175630Z"
     pin_after: "docker.io/n8nio/n8n:2.44.3@sha256:5032941f437e1daa421cad0cc3ea57cd054f0d44a7256b38a0a3fca1b460834a"
+    units: 0
+    critical_units: 0
+    units_note: >-
+      ZERO IS THE ASSERTION, not a blank.  These eight packages carry no
+      blocking unit at the bumped digest, which is what "fixed" has to mean.
+      Declared so ci/scan-gate.py checks it on every run: if a future n8n pin
+      brings an openssh or graphicsmagick finding back, this entry stops
+      measuring 0 and the gate fails instead of the entry quietly covering it.
     approved_by: n/a
     note: "A fix needs no exception. Listed so the gate can account for the packages it removed."
 
@@ -115,6 +161,7 @@ dispositions:
     packages: [linux-libc-dev]
     severity: CRITICAL
     units: 1
+    critical_units: 1
     cve_instances: 216
     why_not_reachable: >-
       linux-libc-dev ships the kernel's userspace HEADERS for compiling against.
@@ -143,6 +190,7 @@ dispositions:
     packages: [chromadb]
     severity: CRITICAL
     units: 1
+    critical_units: 1
     cve_instances: 4
     why_not_reachable: >-
       CVE-2026-45829 and CVE-2026-45833 are PRE-AUTHENTICATION code execution
@@ -169,6 +217,7 @@ dispositions:
     packages: ["@simple-git/argv-parser", simple-git, handlebars]
     severity: CRITICAL
     units: 3
+    critical_units: 3
     cve_instances: 6
     why_not_reachable: >-
       These are reached through n8n's Git node and template rendering.  CHECKED,
@@ -229,6 +278,7 @@ dispositions:
     packages: [PyJWT, pyjwt]
     severity: CRITICAL
     units: 1
+    critical_units: 1
     cve_instances: 6
     headline_cve: "CVE-2026-102268 — authentication bypass via improper public key validation"
     reachable: yes
@@ -291,6 +341,7 @@ dispositions:
     packages: [sentence-transformers, unstructured]
     severity: CRITICAL
     units: 2
+    critical_units: 2
     cve_instances: 2
     cves:
       - "CVE-2026-68770 sentence-transformers RCE via security-control bypass (fix 5.6.0)"
@@ -320,8 +371,8 @@ dispositions:
     disposition: accepted-no-fix-exists
     images: [OPEN_WEBUI, POSTGRES]
     severity: "CRITICAL and HIGH"
-    units: 62
-    critical_units: 9
+    units: 79
+    critical_units: 8
     packages_critical:
       - libaom3
       - libglib2.0-0
@@ -333,7 +384,14 @@ dispositions:
     packages_high:
       - bsdutils
       - curl
+      - dirmngr
       - ffmpeg
+      - gnupg
+      - gnupg-l10n
+      - gpg
+      - gpg-agent
+      - gpgconf
+      - gpgsm
       - gzip
       - libacl1
       - libavcodec59
@@ -348,6 +406,7 @@ dispositions:
       - libexpat1
       - libharfbuzz0b
       - libjxl0.7
+      - liblastlog2-2
       - libldap-2.5-0
       - libmariadb-dev
       - libmariadb3
@@ -367,6 +426,7 @@ dispositions:
       - libtiff6
       - libtinfo6
       - libudev1
+      - login
       - libuuid1
       - libx11-6
       - libx11-data
@@ -407,45 +467,95 @@ dispositions:
       libraries would execute inside the container with those restrictions.
       Containment reduces what that buys an attacker; it does not prevent the
       initial execution, and we do not claim it does.
-    the_only_real_fix: "a smaller base image upstream, or a Debian 13 base — see V7"
+    the_only_real_fix: >-
+      a smaller base image upstream.  "or a Debian 13 base — see V7" was the
+      other half of this sentence and IT HAS NOW BEEN TAKEN: POSTGRES is pinned
+      to the trixie base as of NOM-341.  That did not empty this entry, it
+      RESHAPED it — on Debian 12 this entry's postgres half included
+      libsqlite3-0 and zlib1g as CRITICALs with no fix, and both are gone;
+      Debian 13 brings gnupg, the gpg tool family, login and liblastlog2-2 in
+      with no fix of their own.  MEASURED, this entry's postgres half only:
+      22 units / 3 CRITICAL / 19 HIGH on bookworm -> 24 / 1 / 23 on trixie.
+      Two fewer CRITICAL, four more HIGH.  There is no third base to move to.
+    what_changed_in_NOM-341: >-
+      `units` read 62 and `critical_units` read 9.  Measured on the SAME
+      evidence NOM-301 wrote, this entry already claimed 77 units and 10
+      CRITICAL [NOM-309] — the declaration was simply never compared to the
+      scan by anything.  It now declares 79 / 8, which is what it measures
+      against security-report-nom341-20261020T175630Z after the trixie swap,
+      and ci/scan-gate.py fails if that ever stops being true.  The number
+      moved for two unrelated reasons at once and both are stated so neither
+      hides the other: +17 from correcting the declaration, -15 CRITICAL-and-
+      HIGH churn and +9 new no-fix packages from the base change.
     approved_by: PENDING
     approved_at: null
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
   - id: V7
-    title: "pgvector perl/sqlite/zlib CRITICALs — a Debian 13 base would clear six of eight"
-    disposition: accepted-pending-decision
+    title: "Debian 13 Postgres base — APPLIED; what it did not clear"
+    disposition: fix-applied-partial-residue-accepted
     images: [POSTGRES]
-    packages: [libperl5.36, perl, perl-base, perl-modules-5.36, stdlib, libpcre2-8-0]
+    packages: [stdlib, libpcre2-8-0]
     severity: "CRITICAL and HIGH"
-    units: 6
-    critical_units: 5
-    measured_alternative:
-      pin: "docker.io/pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84"
-      evidence: "security-report-bump-20261019T060718Z"
-      result: >-
-        CRITICAL units 8 -> 3, HIGH 20 -> 28.  Clears the whole perl family plus
-        libsqlite3-0 and zlib1g; leaves libxml2 and the Go stdlib unit.  It is a
-        genuine TRADE, not a strict improvement: five fewer CRITICAL, eight more
-        HIGH.
-    why_not_applied: >-
-      It changes the base OS from Debian 12 to Debian 13.  That is a shape
-      change to the data tier, not a patch, and it carries a glibc collation
-      change that can invalidate existing text indexes on a cluster created
-      under the old locale data.  For a fresh MVP install that is a non-issue;
-      for anything already holding data it is a REINDEX, and that is a decision
-      about operations, not security.  Applying it unilaterally inside a
-      security ticket would be the wrong call, so it is MEASURED AND PROPOSED
-      here instead.
-    recommendation: >-
-      Take it for the MVP, which installs fresh.  Do not take it as an in-place
-      upgrade path without a reindex plan.
-    decision_owner: "Tech Lead"
+    units: 2
+    critical_units: 1
+    decision: >-
+      TAKEN.  This entry was `accepted-pending-decision` and the decision was
+      the yes/no it asked for: the Tech Lead decided YES on NOM-341 and the
+      pin is now
+      docker.io/pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84
+      in versions.env.  So this is no longer a proposal; it is a fix-applied
+      entry that still carries the residue the fix did not reach, which is
+      what the two packages above are.
+    measured_after_applying:
+      evidence: security-report-nom341-20261020T175630Z
+      postgres_whole_image: "28 units / 8 CRITICAL / 20 HIGH -> 30 / 2 / 28"
+      what_it_cleared: >-
+        The whole Debian 12 perl family AS CRITICALS (libperl5.36, perl,
+        perl-base, perl-modules-5.36 each had a deb12u4 fix), plus libsqlite3-0
+        and zlib1g.  Six CRITICAL units gone.
+      what_it_left_in_this_entry: >-
+        stdlib@v1.24.6, still CRITICAL — the Go toolchain compiled into the
+        pgvector binaries, with the same no-runtime-upgrade property V8
+        describes for Caddy, Authelia and Ollama.  And libpcre2-8-0@10.46-1~
+        deb13u2, HIGH, which DOES have a distro fix (10.46-1~deb13u3) that is
+        not in the image yet — unlike every package in V6, which has no fix at
+        any version.  That difference is why these two are here and not there.
+      where_the_rest_went: >-
+        The trixie perl family is still PRESENT, but as HIGH with NO FIX — the
+        same facts open-webui's perl family already had, so it moved to V11
+        and V11 now covers both images.  The remaining 24 postgres units are
+        base packages with no fix and belong to V6.  Nothing was dropped: 24
+        (V6) + 2 (here) + 4 (V11) = 30, which is the image total.
+      versus_what_was_PREDICTED: >-
+        SAY IT EVEN WHEN IT IS BETTER.  This entry predicted "CRITICAL units
+        8 -> 3, HIGH 20 -> 28".  HIGH landed exactly on 28.  CRITICAL landed
+        on 2, NOT 3 — one better than predicted.  The prediction was already
+        internally inconsistent: the same sentence named the two units it
+        expected to survive ("leaves libxml2 and the Go stdlib unit") and then
+        said three.  The prose was right and the figure was wrong, which is
+        the identical defect class to the V6/V10 unit counts this pass fixed.
+        The swap is NOT worse than predicted, so the Tech Lead's decision
+        stands as made and is not reopened.
+    the_operational_condition_attached_to_the_decision: >-
+      UNCHANGED AND STILL BINDING.  Debian 13 carries a glibc collation change
+      that can invalidate existing text indexes on a cluster created under the
+      old locale data.  For a FRESH MVP install that is a non-issue and the MVP
+      installs fresh.  For a cluster already holding data this pin is a
+      REINDEX, and nothing in this repo performs one.  The same warning is in
+      versions.env next to the pin, because that is where an operator looks.
+    residual: >-
+      One CRITICAL (Go stdlib, fixable only by an upstream rebuild of
+      pgvector) and one HIGH with a distro fix the image has not picked up.
+      Postgres is on one internal bridge, publishes no port and is never
+      publishable; its capability set was re-bisected against this exact digest
+      and came out one capability SMALLER (exception E7).
+    required_action: "re-pin when pgvector publishes a trixie build on a fixed Go toolchain and a deb13u3 pcre2"
     approved_by: PENDING
     approved_at: null
     review_by: 2027-04-17
-    reviewer_requested: "Tech Lead — this one needs a yes/no, not just a sign-off"
+    reviewer_requested: "Tech Lead — the yes/no is already given; this is now a sign-off on the residue"
 
   - id: V8
     title: "Go toolchain and golang.org/x/* compiled into Caddy, Authelia and Ollama"
@@ -461,6 +571,7 @@ dispositions:
       - github.com/buger/jsonparser
     severity: HIGH
     units: 11
+    critical_units: 0
     cve_instances: 56
     reachable: partly
     why_reachable: >-
@@ -621,26 +732,54 @@ dispositions:
     reviewer_requested: "Tech Lead"
 
   - id: V11
-    title: "Open WebUI perl family — HIGH with no Debian 12 fix"
+    title: "The perl family in BOTH Debian images — HIGH with no fix"
     disposition: accepted-no-fix-exists
-    images: [OPEN_WEBUI]
-    packages: [perl, perl-base, perl-modules-5.36, libperl5.36]
+    images: [OPEN_WEBUI, POSTGRES]
+    packages: [perl, perl-base, perl-modules-5.36, libperl5.36, perl-modules-5.40, libperl5.40]
     severity: HIGH
-    units: 4
-    why_separate_from_V7: >-
-      Same package names as V7, different facts.  In pgvector these are
-      CRITICAL and Debian ships a fix (deb12u4), which is why the trixie base
-      clears them.  In open-webui the same packages are HIGH and carry no fix,
-      and open-webui publishes no trixie variant — so neither V7's measured
-      alternative nor its reasoning transfers here.
-    why_no_fix: "no fixed version in bookworm; open-webui v0.12.3 is the newest release"
+    units: 8
+    critical_units: 0
+    why_it_now_covers_postgres_too: >-
+      THE TRIXIE SWAP MERGED A SPLIT THAT ONLY EXISTED BECAUSE OF THE OLD BASE.
+      This entry used to read "Open WebUI perl family" and explained at length
+      why it could not share an entry with V7: in Debian 12 pgvector these
+      packages were CRITICAL WITH A FIX (deb12u4) while in open-webui they were
+      HIGH WITH NO FIX, and one entry would have had to state one of those
+      wrongly.  Debian 13 ships perl 5.40.1-6+deb13u1, where the postgres perl
+      family is HIGH with NO FIX — the same two facts open-webui's already had.
+      The reason for the split is therefore gone, and keeping two entries would
+      now be the thing that misrepresents the evidence.  V6's
+      `excluded_deliberately` note still applies: the perl family is kept OUT
+      of V6 so the reader sees it named, and the gate's own ambiguity check is
+      what would catch it if it were ever claimed twice.
+    the_two_version_series_are_both_listed: >-
+      5.36 for open-webui (bookworm) and 5.40 for postgres (trixie), and both
+      sets of names are listed rather than one being assumed to cover the
+      other.  The unit of disposition is (image, package, installed-version),
+      so `perl-modules-5.36` and `perl-modules-5.40` are different packages and
+      a list naming only one of them would leave the other unclaimed.
+    units_measured: >-
+      4 in open-webui (perl, perl-base, perl-modules-5.36, libperl5.36) + 4 in
+      postgres (perl, perl-base, perl-modules-5.40, libperl5.40) = 8, against
+      security-report-nom341-20261020T175630Z.  This entry declared 4 while it
+      covered one image; the figure moved because its scope did, not because
+      anything was found.
+    why_no_fix: >-
+      No fixed version in bookworm for the 5.36 series and none in trixie for
+      the 5.40 series; open-webui v0.12.3 and pgvector 0.8.7 are both the
+      newest releases, and open-webui publishes no trixie variant, so there is
+      no pin change on either side that clears these.
     reachable: unlikely
     reachability_note: >-
-      perl is present as a base-image dependency.  Nothing in open-webui's
-      documented request path invokes it.  We say unlikely rather than
-      not-reachable because we did not trace every subprocess the application
-      can spawn.
-    containment: "behind Authelia on every route; cap_drop ALL; read_only; no-new-privileges"
+      perl is present as a base-image dependency in both images.  Nothing in
+      open-webui's documented request path invokes it, and nothing in the
+      postgres entrypoint or init scripts does either — those are bash and
+      psql.  We say unlikely rather than not-reachable because we did not
+      trace every subprocess either application can spawn.
+    containment: >-
+      open-webui: behind Authelia on every route.  postgres: one internal
+      bridge, no published port, never publishable.  Both: cap_drop ALL,
+      read_only, no-new-privileges.
     residual: "a perl-reachable code path, if one exists, executes under those restrictions"
     approved_by: PENDING
     approved_at: null
@@ -674,7 +813,8 @@ dispositions:
       - transformers
       - wheel
     severity: HIGH
-    units: 21
+    units: 22
+    critical_units: 0
     why_no_fix: >-
       All are transitive dependencies bundled inside images that are already at
       their newest upstream release (homepage v2.6.0, n8n 2.44.3,
@@ -695,6 +835,14 @@ non_vulnerability_findings:
   - id: M1
     kind: misconfiguration
     count: 16
+    units: 0
+    critical_units: 0
+    units_note: >-
+      `count: 16` is a MISCONFIGURATION count and is a different quantity from
+      a blocking vulnerability unit; this entry claims none of the latter, and
+      says so rather than leaving the field off.  ci/scan-gate.py requires
+      both figures on every approvable entry for that reason: an undeclared
+      figure is not a passing figure, it is a term missing from the header sum.
     disposition: not-applicable-to-this-deployment
     what_they_are: >-
       All 16 come from source trees that upstream images happen to SHIP, not
@@ -721,6 +869,8 @@ non_vulnerability_findings:
   - id: S1
     kind: secret
     count: 1
+    units: 0
+    critical_units: 0
     disposition: not-a-credential-of-ours
     what_it_is: >-
       trivy's `jwt-token` rule fired at line 528 of
@@ -776,11 +926,14 @@ coverage_limits:
 
   - id: L3
     subject: "per-package reachability inside V6"
-    claim_NOT_made: "that each of the 62 Debian base-package findings was individually traced"
+    claim_NOT_made: "that each of the 79 Debian base-package findings was individually traced"
     status: >-
       V6 is dispositioned as a group under containment, with its mixed
       reachability stated rather than resolved.  A per-package reachability
-      result for 62 base libraries was not produced and is not claimed.
+      result for 79 base libraries was not produced and is not claimed.  The
+      figure was 62 here and in V6, and 62 was never the number of findings
+      V6 covered — it is the count this coverage limit now reports because the
+      limit has to quote the entry it is a limit ON.
 
 # ---------------------------------------------------------------------------
 approval:
@@ -811,31 +964,41 @@ approval:
     WHAT IT DOES NOT ESTABLISH: that the named person consented.  Nothing in a
     repository can.  `authority_record` is the citation a human follows.
   why_approved_by_is_still_PENDING: >-
-    BECAUSE THE FIGURES ARE WRONG AND ARE ABOUT TO CHANGE.  Signing today
-    would record a human accepting numbers NOM-309 already measured as
-    understated: V6 declares `units: 62` against 77 measured, V10 declares 21
-    against 22, and the per-entry units sum to 187 against this file's header
-    total of 203 (187 + 15 + 1 = 203, which is the whole of the gap).  On top
-    of that the Tech Lead decided YES on the Debian 13 Postgres base
-    (pgvector:0.8.7-pg17-trixie), which trades 5 CRITICAL for 8 HIGH and
-    re-measures V6, V7 and the totals.  So the correction pass runs first and
-    ONE signature pass follows on the corrected register.  Who signs never
-    depended on those numbers, which is why it was settled in parallel.
-  what_they_are_approving: >-
-    The dispositions above for the CRITICAL and HIGH blocking units that remain
-    after the n8n bump, on the understanding that every image is already at its
-    newest upstream release and no further pin change removes them.  The counts
-    in the header are the figures as measured on 2026-10-19 and are the ones
-    being corrected; the signature pass must restate them from the corrected
-    register rather than from this sentence.
+    ONLY BECAUSE NO HUMAN HAS SIGNED YET.  The reason it was waiting is GONE:
+    the figures have been corrected [NOM-341] and the register is ready for one
+    signature pass.
+    WHAT WAS WRONG, kept here because the correction is only auditable next to
+    it: V6 declared `units: 62` against 77 measured, V10 declared 21 against
+    22, and the per-entry units summed to 187 against a header total of 203
+    (187 + 15 + 1 = 203, the whole of the gap) [NOM-309].  The Tech Lead then
+    decided YES on the Debian 13 Postgres base, which re-measured V6, V7, V11
+    and the totals.
+    WHAT IS TRUE NOW: every approvable entry declares `units` and
+    `critical_units`, each equals what ci/scan-gate.py measures for that
+    entry's own packages, the per-entry sum equals the header, and the header
+    equals the scan — all four asserted on every gate run against
+    security-report-nom341-20261020T175630Z, not asserted in prose here.  The
+    gate's ONLY remaining failure is the approval check.  Who signs never
+    depended on those numbers, which is why it was settled in parallel
+    [NOM-310].
   already_decided_on_NOM-310: >-
     The V4 operating cap is ACCEPTED — the MVP runs single-operator or
     admin-only until open-webui ships PyJWT >= 2.14.0.  See V4's
     `operating_cap`, including the part that is not enforced in code.
   what_they_are_approving: >-
-    The dispositions above for the 23 CRITICAL and 180 HIGH blocking units that
-    remain after the n8n bump, on the understanding that every image is already
-    at its newest upstream release and no further pin change removes them.
+    The dispositions above for the 17 CRITICAL and 188 HIGH blocking units that
+    remain after the n8n bump AND the Debian 13 Postgres base, on the
+    understanding that every image is already at its newest upstream release
+    and no further pin change removes them.
+    THIS KEY APPEARED TWICE IN THIS FILE until NOM-341 — once saying "the
+    CRITICAL and HIGH blocking units" and once saying "the 23 CRITICAL and 180
+    HIGH".  YAML keeps the LAST of two duplicate keys, so the specific stale
+    figures were the live value and the sentence warning that the counts were
+    about to be corrected was the one being discarded.  Two keys with one name
+    is the same defect as a declared unit count nobody checked: the file said
+    something true and something false and nothing made it choose.  There is
+    now one key, and the figures in it are the header's, which ci/scan-gate.py
+    asserts against the scan.
   what_no_agent_may_do: >-
     Approve any entry in this file or in security-exceptions.yaml, or add a
     name to security-approvers.yaml.  THE TECH LEAD IS AN AGENT AND IS COVERED

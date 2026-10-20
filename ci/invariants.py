@@ -20,6 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import approvers  # noqa: E402  — the approval-authority rule, shared with the scan gate
+import pins as pinfile  # noqa: E402  — the committed pins, shared with the scan gate
 
 try:
     import yaml
@@ -392,6 +393,56 @@ def i8(ctx):
     return bad
 
 
+def _exception_digest_binding(ctx, e):
+    """An exception's recorded `digest:` must still be the pinned digest.
+
+    security-exceptions.yaml's header promises CI fails an entry "that records
+    a digest that no longer matches the pin — a change invalidates its own
+    evidence rather than inheriting it".  Until NOM-341 NO CODE DID THAT, and
+    the claim was load-bearing: E7's capability set was bisected against a
+    Debian 12 pgvector digest, and NOM-341 moves that pin to Debian 13.  With
+    no binding, the swap would have left a Debian 12 bisection sitting under a
+    Debian 13 image, reading as approved evidence.
+
+    An entry with no `digest:` records no evidence to invalidate and is not
+    checked.  An entry WITH one whose service does not resolve to a pin is a
+    digest that CANNOT be checked, and that fails — a binding that silently
+    skips what it cannot resolve is not a binding.
+    """
+    bad = []
+    dig = str(e.get("digest") or "").strip()
+    if not dig:
+        return bad
+    eid = f"exception {e.get('id')}"
+    if not re.match(r"^sha256:[0-9a-f]{64}$", dig):
+        return [f"{eid}: digest {dig!r} is not a sha256 digest"]
+    svcs = e.get("service")
+    svcs = svcs if isinstance(svcs, list) else [svcs]
+    try:
+        pins = pinfile.read_pins(os.path.join(ctx.root, "versions.env"))
+    except OSError as exc:
+        return [f"{eid}: cannot read versions.env to bind the digest ({exc})"]
+    resolved, unresolved = {}, []
+    for s in svcs:
+        key = pinfile.pin_key(s)
+        if key in pins:
+            resolved[key] = pins[key]["DIGEST"]
+        else:
+            unresolved.append(f"{s!r} (looked for {key}_DIGEST)")
+    if unresolved:
+        bad.append(f"{eid}: records a digest but its service(s) "
+                   f"{', '.join(unresolved)} resolve to no pin in versions.env "
+                   f"— the digest cannot be bound, so the evidence cannot be "
+                   f"confirmed to still apply")
+    if resolved and dig not in resolved.values():
+        bad.append(f"{eid}: records digest {dig} which is NOT the pinned digest "
+                   f"for its service(s) " +
+                   ", ".join(f"{k}={v}" for k, v in sorted(resolved.items())) +
+                   " — the pin moved, so this entry's evidence was measured "
+                   f"against a different image and does NOT carry over")
+    return bad
+
+
 @check("I9", "web-search flags false in EVERY profile; exceptions register complete")
 def i9(ctx):
     bad = []
@@ -433,6 +484,17 @@ def i9(ctx):
             d = rb if isinstance(rb, datetime.date) else datetime.date.fromisoformat(str(rb))
             if d < today:
                 bad.append(f"exception {e.get('id')} is past its review_by ({rb})")
+        # THE <= 180-DAY CAP, which this file's header promises and nothing
+        # asserted before NOM-341.  The past-due check above is not it: a
+        # `review_by: 2099-01-01` is not past due and never will be, so an
+        # entry could promise a review window it had no intention of keeping.
+        # Measured from `approved_at`, in the shared rule, so the findings
+        # register is held to the same cap the moment it is signed.
+        bad.extend(approvers.check_review_window(
+            f"exception {e.get('id')}", e.get("approved_at"), rb))
+        # THE DIGEST BINDING, likewise promised in this file's header and
+        # likewise unenforced before NOM-341.
+        bad.extend(_exception_digest_binding(ctx, e))
     return bad
 
 
@@ -791,7 +853,60 @@ def i15(ctx):
     return bad
 
 
-ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14, i15]
+@check("I16", "the drill's capability sets equal the shipped ones (no privileged second copy)")
+def i16(ctx):
+    """compose.drill.yaml may not grant a service MORE than compose.yaml does.
+
+    ADDED BY NOM-341, and it is a fourth control beyond the three that ticket
+    asked for — see the handoff.  The reason it is here: NOM-341 narrowed
+    postgres from five capabilities to four, and found the five-capability
+    list ALSO written out in compose.drill.yaml under a `# E7` comment with
+    nothing holding the two equal.
+
+    The drill is the worst possible place for a divergent copy.  Its whole
+    purpose is to prove a restore works, so if it grants MORE than the shipped
+    service, it proves a restore works for a container the operator will never
+    run — and the failure mode of that divergence is a GREEN DRILL, which
+    nobody investigates.  This repository has already been here once: commit
+    e0ccc04 ("the sixth copy was in the drill, where the failure mode is
+    PASS").  I15 holds the app list together for the same reason.
+
+    Equality, not a subset: a drill that grants LESS would fail for a reason
+    the real service does not have, which is a false red and wastes the drill
+    just as thoroughly as a false green.
+    """
+    import yaml as _yaml
+    bad = []
+    path = os.path.join(ctx.root, "compose.drill.yaml")
+    if not os.path.isfile(path):
+        return ["compose.drill.yaml is absent, so the restore drill has no definition"]
+    with open(path) as fh:
+        drill = (_yaml.safe_load(fh) or {}).get("services") or {}
+    for name, dsvc in sorted(drill.items()):
+        dcaps = sorted(c.upper() for c in ((dsvc or {}).get("cap_add") or []))
+        shipped = ctx.services.get(name)
+        if shipped is None:
+            if dcaps:
+                bad.append(f"drill service {name} adds {dcaps} but no such service "
+                           f"exists in compose.yaml to compare against")
+            continue
+        scaps = sorted(c.upper() for c in (shipped.get("cap_add") or []))
+        if dcaps != scaps:
+            extra = [c for c in dcaps if c not in scaps]
+            short = [c for c in scaps if c not in dcaps]
+            bad.append(
+                f"drill service {name} cap_add {dcaps} != shipped {scaps}"
+                + (f"; drill grants MORE: {extra} — the drill would pass against a "
+                   f"container that is not the one shipped" if extra else "")
+                + (f"; drill grants LESS: {short} — the drill would fail for a "
+                   f"reason the shipped service does not have" if short else ""))
+        if "ALL" not in [c.upper() for c in ((dsvc or {}).get("cap_drop") or [])]:
+            bad.append(f"drill service {name} does not cap_drop ALL")
+    return bad
+
+
+ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14,
+       i15, i16]
 
 
 def main():
