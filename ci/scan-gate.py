@@ -377,8 +377,16 @@ def check_approvals(entries, root):
     rejected "Tech Lead" — an agent of this company, and the one the registers
     named as reviewer.  See that module's header.
 
-    An agent cannot satisfy this and must not try.  This check is EXPECTED TO
-    FAIL until a named human approves, and that failure is the control working.
+    An agent cannot satisfy this and must not try.  It failed for the whole
+    life of the register and that failure WAS the control working; a named
+    human approved on 2026-10-20 (NOM-310) and it passes from that date.
+
+    Read a failure here against that.  While NO entry is signed, a failure is
+    the pre-signature state.  Once ANY entry is signed, a failure is a
+    REGRESSION -- a tampered name, an agent signing, a PENDING value put back,
+    or a review_by window widened past the register's own 180-day promise.
+    Those need different fixes, so the caller must not collapse them into
+    "go and get an approval".
     """
     import datetime
     today = datetime.date.today()
@@ -597,9 +605,26 @@ def main():
         for p in approval_problems:
             print("    -", p)
         if approval_problems:
-            fail.append(f"{n_flagged} disposition(s) without a named human approval "
-                        f"— EXPECTED until the named human approver in "
-                        f"security-approvers.yaml approves; this is the control working")
+            # The pre-signature state and a regression on a SIGNED register are
+            # the same failure to this check, but not the same event to the
+            # person reading the output.  Saying "EXPECTED ... this is the
+            # control working" about an already-signed register tells an
+            # operator to ignore a real red light, and asserts a cause (no
+            # approval) that may not be the one the per-entry lines above gave.
+            if n_flagged == n_approvable:
+                fail.append(f"{n_flagged}/{n_approvable} disposition(s) carry no "
+                            f"valid named-human approval — EXPECTED while the "
+                            f"register is unsigned, until the named human approver "
+                            f"in security-approvers.yaml approves; this is the "
+                            f"control working")
+            else:
+                fail.append(f"{n_flagged} of {n_approvable} disposition(s) FAIL the "
+                            f"approval check while {n_approvable - n_flagged} are "
+                            f"signed — a REGRESSION on a signed register, NOT the "
+                            f"pre-signature state. The cause is in the per-entry "
+                            f"line(s) above and may be the approver name, a PENDING "
+                            f"value, or an expired review_by window; those need "
+                            f"different fixes, and re-approving fixes only the first")
 
     if fail:
         print("\nGATE FAILURES (coverage):")

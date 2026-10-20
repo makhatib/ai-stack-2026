@@ -282,6 +282,74 @@ ok "the DOCUMENTED --dispositions form reaches the arithmetic check" yes \
 ok "...and that form still catches the wrong figure" yes \
    "declares units: 62 but the scan measures 79" -- gateflag "$UNITS"
 
+# ---------------------------------------------------------------------------
+# Control 4 — the gate must not call a regression on a SIGNED register
+# "EXPECTED".  Before NOM-310 every approved_by was PENDING, so the one
+# summary line the gate had ("EXPECTED until the named human approver
+# approves; this is the control working") was true.  The signature made it a
+# lie for every later failure: a tampered name, a PENDING value put back, or
+# a widened review_by window would all be reported as expected and
+# self-congratulatory.  It also asserted a cause that may not be the one the
+# per-entry lines gave -- re-approving does not fix a bad date.
+# ---------------------------------------------------------------------------
+echo
+echo "CONTROL 4 — on a signed register, a failure reads as a REGRESSION not as EXPECTED"
+
+SIGNEDREG="$(mkroot signedreg)"
+ok "clean signed register says nothing about regressions" no \
+   "REGRESSION on a signed register" -- gateflag "$SIGNEDREG"
+ok "...and does not call itself unsigned" no \
+   "EXPECTED while the register is unsigned" -- gateflag "$SIGNEDREG"
+
+TAMPER="$(mkroot tampered)"
+python3 - "$TAMPER/security-findings.yaml" <<'PY'
+import sys
+# Put ONE agent name back on an otherwise fully signed register.
+p = sys.argv[1]; s = open(p).read()
+needle = 'approved_by: "Mahmoud Alkhatib"'
+if needle not in s:
+    sys.exit("no signed entry to tamper with -- is the register still signed?")
+open(p, "w").write(s.replace(needle, 'approved_by: "Tech Lead"', 1))
+PY
+ok "one agent name on a signed register is a REGRESSION" yes \
+   "REGRESSION on a signed register" -- gateflag "$TAMPER"
+ok "...and is NOT reported as the expected pre-signature state" no \
+   "EXPECTED while the register is unsigned" -- gateflag "$TAMPER"
+ok "...and still names the real cause per entry" yes \
+   "names an agent of this company" -- gateflag "$TAMPER"
+
+WIDENED="$(mkroot widened)"
+python3 - "$WIDENED/security-findings.yaml" <<'PY'
+import sys
+# A widened window is NOT a missing approval, and must not be reported as one.
+p = sys.argv[1]; lines = open(p).read().split("\n"); out = []; done = False
+for ln in lines:
+    if not done and ln.startswith("    review_by:"):
+        ln = "    review_by: 2099-01-01"; done = True
+    out.append(ln)
+if not done:
+    sys.exit("no review_by found to widen")
+open(p, "w").write("\n".join(out))
+PY
+ok "a widened review_by on a signed register is a REGRESSION" yes \
+   "REGRESSION on a signed register" -- gateflag "$WIDENED"
+ok "...and the summary does not blame a missing approval for it" yes \
+   "may be the approver name, a PENDING value, or an expired review_by window" \
+   -- gateflag "$WIDENED"
+
+UNSIGNED="$(mkroot unsignedreg)"
+python3 - "$UNSIGNED/security-findings.yaml" <<'PY'
+import sys
+# The pre-signature state must STILL read as expected -- the fix must not
+# invert into crying regression at a register nobody has signed yet.
+p = sys.argv[1]; s = open(p).read()
+open(p, "w").write(s.replace('approved_by: "Mahmoud Alkhatib"', "approved_by: PENDING"))
+PY
+ok "a wholly unsigned register is still EXPECTED, not a regression" yes \
+   "EXPECTED while the register is unsigned" -- gateflag "$UNSIGNED"
+ok "...and is not called a regression" no \
+   "REGRESSION on a signed register" -- gateflag "$UNSIGNED"
+
 echo
 echo "cases passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
