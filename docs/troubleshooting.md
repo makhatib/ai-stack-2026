@@ -123,3 +123,55 @@ Models, almost certainly. `bin/aistack doctor` warns past 5 GB of documents,
 but model weights dwarf that — a handful of language models is 50–100 GB.
 Backups deliberately exclude them, because they are re-downloadable and over
 90% of the bytes.
+
+### Reclaiming space: delete by name, never by prune
+
+**The rule.** Write down the exact containers, images and volumes you mean to
+remove, then remove them by name — `docker rm`, `docker image rm`,
+`docker volume rm`. Never `docker system prune`, never `docker image prune -a`,
+never `docker volume prune`. Not with filters, and not "only the dangling
+ones".
+
+This is not tidiness. A prune takes no list, so there is nothing to review
+before it runs, and on this host a prune would have deleted load-bearing state
+three separate times:
+
+- **An untagged image with zero containers can be the pin itself.** MEASURED
+  2026-10-20 (NOM-354): `pgvector/pgvector@sha256:7a7e9f22…` (660 MB) and
+  `ghcr.io/agentgateway/agentgateway@sha256:9d3e6044…` (298 MB) both showed as
+  untagged with no container, and both are the committed pins in
+  `versions.env`. The postgres one is also the digest in
+  `security-exceptions.yaml` E7 (bound by invariant I9) and the pin in
+  `gate.json`. `docker image prune -a` would have deleted both. They looked
+  unused because **a pin can be ahead of the runtime**: `aistack-postgres` was
+  still running the previous digest, so nothing referenced the new one yet.
+- **A cache volume is dangling between the runs that mount it.** MEASURED
+  (NOM-349): `aistack-trivy-cache` has no container attached between scans and
+  is mounted during one.
+- **A tag you no longer run can still be pinned elsewhere.**
+  `n8nio/n8n:2.43.7` is pinned by the NOM-258 CI and fresh-install copies under
+  `~/apps/.nom258-ci` and `~/apps/.nom258-fresh`.
+
+Before deleting an image, prove nothing pins it:
+
+```sh
+grep -rl "<image-id-or-digest>" ~/apps --exclude-dir=.git
+```
+
+A hit in a `versions.env`, a rendered `.env`, a compose file,
+`security-exceptions.yaml` or `gate.json` means the image is pinned. Keep it,
+whatever `docker images` says about containers.
+
+**The build cache is the one safe prune** — `docker builder prune -a` — because
+it is neither an image nor a volume, so nothing can pin it. Pass `-a`; without
+it the command commonly reports 0 B reclaimed.
+
+**Guarded tool.** `~/ops/reclaim/reclaim.sh --dry-run`, then `--apply`. It
+deletes only what `reclaim-allowlist` names, and refuses a target that is in
+`live-state`, is some container's image, or has its id in a config file under
+`~/apps`. `~/ops/reclaim/held` records what was deliberately not reclaimed and
+why — read it before adding a line to the allowlist.
+
+**What is safe to delete in this repo:** `security-report-<UTC>/` directories,
+via `bash scripts/prune-reports.sh`. It keeps the newest three automatic
+reports and never touches a labelled or cited one.
