@@ -73,6 +73,20 @@ TRIVY_TIMEOUT="${TRIVY_TIMEOUT:-45m}"
 printf '\nAI Stack 2026 — security check\n'
 printf 'Report directory: %s\n' "$OUT"
 
+# REPORT RETENTION (NOM-350).  Placed here on purpose:
+#   * AFTER the new directory exists, so the limit counts this run
+#     (3 = this report plus the two before it);
+#   * BEFORE the scan writes anything, so space is freed before it is
+#     needed;
+#   * AFTER warn() is defined, so a prune it could not do is a visible
+#     [warn] line in this script's own output and not just stderr noise.
+# Nothing used to remove these: nineteen had accumulated on AI-Sandbox at
+# 1.1 GB while the host's free disk fell ~1 GB every five minutes
+# (NOM-350).  Hand-labelled and cited report dirs are never pruned - see
+# scripts/prune-reports.sh for exactly what it refuses to touch.
+"$ROOT/scripts/prune-reports.sh" --apply \
+  || warn "report retention could not prune every old report - see the lines above"
+
 # ===========================================================================
 # PART 1 — CONFIGURATION AUDIT.  Ours to fix.
 # ===========================================================================
