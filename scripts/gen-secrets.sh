@@ -3,7 +3,7 @@
 #
 # THE ABSOLUTE RULE: this script prints the PATH, never the VALUE.  Not at
 # install, not in `status`, not in a next-steps banner, not in an error.  A CI
-# test (tests/no-secret-output.bats) runs the installer non-interactively with a
+# test (tests/installer-idempotent.sh, second half) runs the installer with a
 # planted canary and asserts no generated value appears in stdout, stderr, the
 # log file, a config diff, a backup listing, or `aistack support-bundle`.
 #

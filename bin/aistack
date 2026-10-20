@@ -9,7 +9,7 @@
 # descriptor down through AISTACK_LOCK_FD_LIFECYCLE / AISTACK_LOCK_FD_HELPER,
 # and the wrapper SKIPS acquisition when the variable is set — so `aistack up`
 # running a helper under its own held lock cannot deadlock against itself.
-# ci/i14_lock_order.sh greps the command implementations for the other order.
+# ci/invariants.py's I14 greps the command implementations for the other order.
 
 set -euo pipefail
 
@@ -479,6 +479,9 @@ cmd_restore(){ with_lifecycle_lock ex "$ROOT/scripts/restore.sh" "$@"; }
 cmd_drill()  { "$ROOT/scripts/drill.sh" "$@"; }
 cmd_doctor() { "$ROOT/scripts/doctor.sh" "$@"; }
 cmd_security_check() { "$ROOT/scripts/security-check.sh" "$@"; }
+# No lock: the suite reads the repo and drives throwaway fixtures. The one
+# test that re-runs the installer (the root tier) takes install.sh's own locks.
+cmd_test() { "$ROOT/tests/run.sh" "$@"; }
 cmd_support_bundle() { "$ROOT/scripts/support-bundle.sh" "$@"; }
 cmd_remove() { "$ROOT/scripts/remove.sh" "$@"; }
 
@@ -563,6 +566,15 @@ aistack — AI Stack 2026
   samples load        import only, for the backup drill's ciphertext
   manifest counts     regenerate the counts from manifest.yaml
   render-strings      re-render the frozen local-mode copy into every surface
+
+  test [tier]         run the test suite (tests/run.sh). Tiers: fast
+                      (default; no docker, no root, no arguments),
+                      stack (needs docker), root (needs sudo),
+                      archive (needs --archive <path>), all, list.
+                      Exit 1 a test failed, 2 a test REFUSED and so
+                      measured nothing, 0 clean. `aistack test list`
+                      prints every test and what it needs. See the
+                      Tests section of README.md.
 EOF
 }
 
@@ -588,6 +600,7 @@ case "${1:-}" in
   remove) shift; cmd_remove "$@" ;;
   manifest) shift; cmd_manifest "$@" ;;
   render-strings) shift; cmd_render_strings "$@" ;;
+  test) shift; cmd_test "$@" ;;
   samples) shift; cmd_samples "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$1' (try: aistack help)" ;;

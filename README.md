@@ -48,6 +48,54 @@ bin/aistack doctor      # health, pins, secret readability, host listeners
 bin/aistack models pull llama3.2:3b
 ```
 
+## Tests
+
+One command, and it is named in `bin/aistack help`:
+
+```sh
+bin/aistack test              # the fast tier: no docker, no root, ~35s
+bin/aistack test list         # every test and exactly what it needs
+bin/aistack test stack        # needs a working docker daemon, ~85s
+sudo bin/aistack test root    # needs to read root-owned secrets/
+bin/aistack test all
+```
+
+The tiers split on **prerequisite, not speed**, because the prerequisite is
+what decides whether you can run a test at all right now:
+
+| tier | needs | cost |
+|---|---|---|
+| `fast` | python3 and coreutils, nothing else | ~35s |
+| `stack` | a working docker daemon | ~85s |
+| `root` | sudo, to read root-owned `secrets/` | re-runs the installer |
+| `archive` | `--archive <path>` to an encrypted backup | ~10s |
+
+`fast` is the set to run routinely: it starts no container, reads no secret
+and touches no live data.
+
+**A test that cannot run says so.** Several here refuse with exit 2 rather
+than report on a property they were unable to measure —
+`installer-idempotent.sh` when it cannot read `secrets/`, `test-scan-gate.sh`
+when its baseline evidence is not clean. The runner gives refusals their own
+count and their own exit code, and it reprints any `[skip]` from inside a
+passing test, because a green line over a check that never ran is the defect
+most of these tests were written against.
+
+| runner exit | meaning |
+|---|---|
+| 0 | every selected test ran and passed |
+| 1 | a test failed, or `tests/` and the runner's registry disagree |
+| 2 | nothing failed, but a test refused, or nothing ran at all |
+| 3 | `--strict` only: a check inside a passing test was skipped |
+
+`bin/aistack test all` as an ordinary user ends at exit 2 **by design**: the
+`root` tier cannot measure anything without privilege, and saying so is more
+useful than passing.
+
+Every executable in `tests/` must be registered in `tests/run.sh`, with its
+prerequisites. An unregistered test file fails the run. That check is what
+keeps `tests/` from drifting back into a directory of scripts nothing calls.
+
 ## What this release does NOT do
 
 Stated here rather than discovered later:
