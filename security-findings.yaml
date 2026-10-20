@@ -34,9 +34,12 @@
 # both gates would also have ACCEPTED the literal string "Tech Lead" [NOM-310].
 # The authority is now a named human, recorded once in security-approvers.yaml,
 # and ci/approvers.py refuses every agent of this company BY NAME.  Every
-# `approved_by` here is still PENDING and the gate is EXPECTED TO FAIL its
-# approval check until that human approves.  That failure is the control
-# working, not a defect to route around.
+# `approved_by` here now carries that human's name, written on 2026-10-20
+# after he named himself on a human-only question card [NOM-310].  The
+# gate's approval check FAILED for the whole life of this register and
+# passes for the first time with this commit.  That failure was the control
+# working; this pass is not a defect routed around, it is the thing the
+# control was waiting for.
 #
 # THE FIGURES ARE NOW THE CORRECTED ONES [NOM-341] and they are no longer
 # merely written down: `ci/scan-gate.py` fails when any entry's declared
@@ -178,8 +181,8 @@ dispositions:
       None from the image.  If the host kernel is unpatched, that is a live
       risk, tracked where it belongs rather than here.
     fix_available_upstream: "6.1.190-1 — irrelevant to reachability; would only change the header version"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -205,8 +208,8 @@ dispositions:
       which is what makes these CRITICAL — does not apply.
     fix_available_upstream: none
     verify: "compose.yaml declares no chroma service and no chroma port"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -260,8 +263,8 @@ dispositions:
       property WOULD be new, and that is the part worth watching.
     fix_available_upstream: "simple-git 4.0.1, argv-parser 2.0.1, handlebars 4.7.10 — all bundled inside n8n; not independently pinnable"
     recheck_when: "a workflow adds a git, ssh, executeCommand or code node"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -329,8 +332,8 @@ dispositions:
         cap is a promise by the operator, carried here and in
         docs/security-faq.md ("Can I add a second user?"), and a reviewer
         should treat it as exactly that strength and no more.
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead — flagged as the one finding worth reading in full"
 
@@ -361,8 +364,8 @@ dispositions:
       An authenticated user can aim the SSRF at whatever the egress attachment
       permits.  We do not claim the attachment makes it harmless.
     fix_available_upstream: "both fixed upstream, both transitive inside open-webui v0.12.3 (latest)"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -487,8 +490,8 @@ dispositions:
       moved for two unrelated reasons at once and both are stated so neither
       hides the other: +17 from correcting the declaration, -15 CRITICAL-and-
       HIGH churn and +9 new no-fix packages from the base change.
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -552,8 +555,8 @@ dispositions:
       publishable; its capability set was re-bisected against this exact digest
       and came out one capability SMALLER (exception E7).
     required_action: "re-pin when pgvector publishes a trixie build on a fixed Go toolchain and a deb13u3 pcre2"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead — the yes/no is already given; this is now a sign-off on the residue"
 
@@ -599,8 +602,8 @@ dispositions:
       definition.  That is the single largest unmitigated residual in the stack
       after V4, and no amount of container hardening changes it.
     required_action: "bump on the first upstream release built against a fixed Go toolchain"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -726,8 +729,8 @@ dispositions:
       267 vendor-HIGH rpm CVEs remain in a reachable-from-authenticated-users
       service.  Zero are CRITICAL.
     recommendation: "replace the base image, or accept for the MVP and revisit at 1.0"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -781,8 +784,8 @@ dispositions:
       bridge, no published port, never publishable.  Both: cap_drop ALL,
       read_only, no-new-privileges.
     residual: "a perl-reachable code path, if one exists, executes under those restrictions"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -821,8 +824,8 @@ dispositions:
       open-webui v0.12.3).  None is independently pinnable.
     containment: "every one of these three services is behind Authelia; none publishes a port"
     residual: "ordinary dependency lag; no CRITICAL among them"
-    approved_by: PENDING
-    approved_at: null
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
     reviewer_requested: "Tech Lead"
 
@@ -863,7 +866,8 @@ non_vulnerability_findings:
       DEPENDENCY Dockerfiles, not against the images' actual runtime user —
       that question is governed by compose.yaml and exception E2 and is probed
       separately.
-    approved_by: PENDING
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
 
   - id: S1
@@ -883,7 +887,8 @@ non_vulnerability_findings:
       stack.  THE VALUE WAS NOT PRINTED, copied, or recorded anywhere in this
       repo or in the issue thread, and must not be.
     action: none
-    approved_by: PENDING
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-17
 
 # ---------------------------------------------------------------------------
@@ -937,7 +942,7 @@ coverage_limits:
 
 # ---------------------------------------------------------------------------
 approval:
-  state: AUTHORITY SETTLED, SIGNATURE NOT YET WRITTEN
+  state: SIGNED on 2026-10-20 by the named human [NOM-310]
   who_must_approve: "Mahmoud Alkhatib"
   who_must_approve_is: >-
     A HUMAN.  The exact string above is what `approved_by` must equal, and it
@@ -963,10 +968,16 @@ approval:
     pass for an approval ("the team", "approved", "ok").
     WHAT IT DOES NOT ESTABLISH: that the named person consented.  Nothing in a
     repository can.  `authority_record` is the citation a human follows.
-  why_approved_by_is_still_PENDING: >-
-    ONLY BECAUSE NO HUMAN HAS SIGNED YET.  The reason it was waiting is GONE:
-    the figures have been corrected [NOM-341] and the register is ready for one
-    signature pass.
+  why_approved_by_was_PENDING_until_2026_10_20: >-
+    IT IS NO LONGER PENDING.  Every approvable entry now reads `approved_by:
+    "Mahmoud Alkhatib"` with `approved_at: 2026-10-20`.  It stayed PENDING
+    through TWO tickets after the authority was settled, deliberately: the
+    figures were wrong by a known amount, and a signature certifying
+    arithmetic the evidence does not support is worse than no signature at
+    all.  The figures were corrected first [NOM-341], and that sequencing is
+    now a control rather than a promise -- ci/scan-gate.py fails when a
+    declared figure disagrees with what it measures, so this file can no
+    longer carry an approval over arithmetic that does not hold.
     WHAT WAS WRONG, kept here because the correction is only auditable next to
     it: V6 declared `units: 62` against 77 measured, V10 declared 21 against
     22, and the per-entry units summed to 187 against a header total of 203
@@ -1003,13 +1014,68 @@ approval:
     Approve any entry in this file or in security-exceptions.yaml, or add a
     name to security-approvers.yaml.  THE TECH LEAD IS AN AGENT AND IS COVERED
     BY THIS, which is what NOM-310 fixed in the check rather than in the prose.
-    Every `approved_by` here is PENDING and the gate's approval check is
-    EXPECTED TO FAIL until the named human approves.  security-exceptions.yaml
-    additionally still carries `approved_by: "DevOps Engineer (NOM-258),
-    pending Tech Lead review"` on E1, E6, E7, E9 and E10 — an agent
-    self-approval marker that NOM-301 deliberately did NOT clear and NOM-310
-    has left in place, because it is the evidence of the defect it records.
-    The signature pass replaces those five strings; until then I9 reports each
-    of them three times over, once per half of the rule plus the pending
-    marker.
+    The gate's approval check was EXPECTED TO FAIL, and did, for the whole
+    life of this register; it passes from 2026-10-20 because a named human
+    approved, which is the only thing that was ever allowed to make it pass.
+    security-exceptions.yaml additionally carried `approved_by: "DevOps
+    Engineer (NOM-258), pending Tech Lead review"` on E1, E6, E7, E9 and
+    E10 — an agent recording ITSELF as the approver, which NOM-301
+    deliberately did NOT clear and NOM-310 left standing as the evidence of
+    the defect it records.  The signature pass replaced those five strings.
+    While they stood, I9 reported each of them three times over, once per
+    half of the rule plus the pending marker; `git log -p` on that file is
+    where that evidence now lives.
+  signature:
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
+    authority_record: NOM-310
+    entries_signed: 18
+    entries_signed_are: >-
+      V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 M1 S1 here (13), and E1 E6 E7 E9 E10
+      in security-exceptions.yaml (5).  V0 is `approved_by: n/a` (it is the
+      bump that WAS applied) and L1-L3 carry no approval field, so neither is
+      in scope.  E2, E3 and E5 are `scope: deferred` with no approval field
+      and are outside this entirely.
+    how_it_was_recorded: >-
+      The board user answered a question card on NOM-310 with
+      `resolverPolicy: human_only` on 2026-10-20, naming HIMSELF as the
+      approver.  He was shown before answering that the name he gave would be
+      written into all 18 `approved_by` fields as the approval (NOM-310
+      sign-off brief, section 6), and he answered the V4 operating cap in the
+      same card -- see V4's `operating_cap`.  The Tech Lead, an AGENT, then
+      transcribed that name into the 18 fields.
+    WHAT_THIS_DOES_NOT_ESTABLISH: >-
+      THE BYTES WERE WRITTEN BY AN AGENT, and ci/approvers.py cannot tell a
+      transcribed human decision from an invented one.  It checks that the
+      value names no agent of this company and exactly matches a `human: true`
+      entry on security-approvers.yaml -- nothing more, and that module's
+      header says so in its own words.  What makes this a real approval is
+      NOM-310: a human-only question card, answered by the board user, with the
+      answer recorded in the issue thread.  A reader who doubts this signature
+      should read that issue rather than this file, and the same is true of any
+      future signature here.
+    figures_at_signing: >-
+      205 blocking units, 17 CRITICAL, 188 HIGH, 1009 CVE instances, measured
+      in security-report-nom341-20261020T175630Z and asserted against this
+      file's per-entry declarations on every gate run.
+      THE BRIEF HE READ BEFORE ANSWERING SAID 203 / 23 / 180 / 1049.  Those
+      were the pre-correction figures; the V6/V10/V11 corrections and the
+      Debian 13 Postgres base moved them, by CRITICAL -6, CVE instances -40,
+      units +2 and HIGH +8.  He was told in advance that the signature would
+      land on the corrected register and that the numbers would move
+      [NOM-310], which is why the signature was held for NOM-341.  The
+      exposure facts that bounded his decision are unchanged: not published to
+      the internet, no customer or personal data, an internal tool.
+    what_expires_and_when: >-
+      `review_by: 2027-04-17` on every entry here, 179 days after signing, and
+      2027-04-16 in security-exceptions.yaml.  THIS IS NOT A PERMANENT
+      ACCEPTANCE.  ci/approvers.py now caps that window at 180 days from
+      `approved_at` and the cap is live on these entries from this commit --
+      before the signature there was no `approved_at`, so there was no window
+      to measure and the check was honestly vacuous.
+    who_can_re_sign: >-
+      ONE NAME is on security-approvers.yaml.  When `review_by` falls due
+      nobody else is authorised to re-sign, and no agent can be added to that
+      list to cover for it.  Naming a second approver is a four-line diff a
+      human makes, and it wants doing before 2027-04-17 rather than on it.
   read_first: "V4 (PyJWT), then V7 (a yes/no on the Debian 13 base), then V8 (Caddy's Go net/http exposure)"

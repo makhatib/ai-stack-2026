@@ -35,8 +35,8 @@ exceptions:
     mitigation: "one capability and nothing else; C1 confirms no other cap is present"
     scope: all
     permanent: true
-    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
-    approved_at: 2026-10-18
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-16
 
   - id: E6
@@ -62,8 +62,8 @@ exceptions:
       this entry.
     scope: all
     permanent: true
-    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
-    approved_at: 2026-10-18
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-16
 
   - id: E7
@@ -121,8 +121,8 @@ exceptions:
       value to POSTGRES_DIGEST in versions.env and fails when they differ.
     scope: all
     permanent: true
-    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
-    approved_at: 2026-10-18
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-16
 
   - id: E9
@@ -144,8 +144,8 @@ exceptions:
     digest: sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54
     scope: all
     permanent: true
-    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
-    approved_at: 2026-10-18
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-16
 
   - id: E10
@@ -163,8 +163,8 @@ exceptions:
       and there is no docker.sock in any profile.
     scope: all
     permanent: true
-    approved_by: "DevOps Engineer (NOM-258), pending Tech Lead review"
-    approved_at: 2026-10-18
+    approved_by: "Mahmoud Alkhatib"
+    approved_at: 2026-10-20
     review_by: 2027-04-16
 
   # --- deferred: the service that needed them is not shipped ----------------
@@ -195,7 +195,7 @@ exceptions:
 
 # ---------------------------------------------------------------------------
 approval:
-  state: AUTHORITY SETTLED, SIGNATURE NOT YET WRITTEN
+  state: SIGNED on 2026-10-20 by the named human [NOM-310]
   who_must_approve: "Mahmoud Alkhatib"
   authority_record: NOM-310
   authority_settled_on: 2026-10-20
@@ -207,23 +207,28 @@ approval:
     rule now also has a POSITIVE half — the value must be a name on
     security-approvers.yaml — because a denylist of two role names accepted
     every other string, "approved" and "ok" included.
-  what_is_still_wrong_here: >-
-    E1, E6, E7, E9 and E10 carry `approved_by: "DevOps Engineer (NOM-258),
-    pending Tech Lead review"`.  That is an agent recording itself as the
-    approver, it is NOT an approval, and I9 fails on it.  It is deliberately
-    left in place as the evidence of the defect NOM-301 found; the signature
-    pass replaces it.  E2, E3 and E5 are `scope: deferred` and carry no
-    approval field, so they are outside this entirely.
-  why_the_signature_waits: >-
-    IT NO LONGER WAITS ON ANYTHING BUT THE SIGNATURE.  The findings register's
-    figures have been corrected (V6/V10/V11 units and the Debian 13 Postgres
-    base, NOM-341) and both registers are now ready to be signed in ONE pass
-    on the corrected evidence.  See security-findings.yaml `approval:`.
-    ONE THING IN THIS REGISTER CHANGED WITH THAT PASS and a signer should see
+  what_was_wrong_here_until_2026_10_20: >-
+    E1, E6, E7, E9 and E10 carried `approved_by: "DevOps Engineer (NOM-258),
+    pending Tech Lead review"` -- an agent recording ITSELF as the approver,
+    which is not an approval, and I9 failed on each of them three times over.
+    It was left in place deliberately as the evidence of the defect NOM-301
+    found, and the signature pass replaced it on 2026-10-20.  E2, E3 and E5
+    are `scope: deferred` and carry no approval field, so they were outside
+    this entirely and still are.
+  the_signature: >-
+    WRITTEN on 2026-10-20, in one pass over both registers, on the corrected
+    figures (V6/V10/V11 units and the Debian 13 Postgres base, NOM-341).  Its
+    full provenance, including what it does NOT establish and the fact that
+    an AGENT transcribed the name a human gave, is in security-findings.yaml
+    `approval.signature` -- recorded once rather than in two drifting copies,
+    which is this repository's own recorded lesson.
+    ONE THING IN THIS REGISTER CHANGED WITH THAT PASS and a reader should see
     it named rather than finding it in a diff: E7 was re-bisected against the
     new Debian 13 digest and came out ONE CAPABILITY SMALLER — FOWNER is gone
     from E7 and from compose.yaml, measured, not tidied.  E1, E6, E9 and E10
-    are untouched.
+    are untouched.  `approved_at` moved from 2026-10-18 to 2026-10-20 on all
+    five: the old date was when the AGENT wrote its non-approval, and leaving
+    it would have recorded the human approving two days before he was asked.
 
 # DELIBERATELY NOT AN EXCEPTION: the Docker socket.
 # A read-only socket proxy was evaluated and REJECTED.  Read access to the

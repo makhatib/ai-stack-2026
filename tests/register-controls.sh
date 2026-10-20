@@ -137,10 +137,26 @@ W200="$(mkroot window200)"
 python3 - "$W200/security-exceptions.yaml" <<'PY'
 import datetime, re, sys
 p = sys.argv[1]; s = open(p).read()
-# E7's approved_at is 2026-10-18; put review_by 200 days out — NOT past due,
-# which is exactly the case the old past-due-only check waved through.
-far = (datetime.date(2026, 10, 18) + datetime.timedelta(days=200)).isoformat()
-lines = s.split("\n"); out = []; inE7 = False
+# Put E7's review_by 200 days past ITS OWN approved_at — NOT past due, which is
+# exactly the case the old past-due-only check waved through.
+#
+# Read that date from the register; do NOT hard-code it.  It was 2026-10-18
+# when this case was written, the NOM-310 signature pass moved it to
+# 2026-10-20, and the assertion below ("200 days after approved_at") then
+# missed a message that correctly said 198.  The control was right and the test
+# was stale.  `approved_at` moves at every signature, including the next
+# re-signing, so the arithmetic has to follow the file.
+lines = s.split("\n"); approved_at = None; inE7 = False
+for ln in lines:
+    if ln.startswith("  - id: "):
+        inE7 = ln.strip() == "- id: E7"
+    if inE7 and ln.startswith("    approved_at:"):
+        approved_at = ln.split(":", 1)[1].strip().strip('"').strip("'")
+if not approved_at:
+    sys.exit("E7 carries no approved_at, so there is no window to make too long")
+far = (datetime.date.fromisoformat(approved_at)
+       + datetime.timedelta(days=200)).isoformat()
+out = []; inE7 = False
 for ln in lines:
     if ln.startswith("  - id: "):
         inE7 = ln.strip() == "- id: E7"
@@ -148,7 +164,8 @@ for ln in lines:
         ln = "    review_by: " + far
     out.append(ln)
 open(p, "w").write("\n".join(out))
-print("E7 review_by set to", far, "(200 days, still in the future)")
+print("E7 approved_at is", approved_at, "- review_by set to", far,
+      "(200 days out, still in the future)")
 PY
 ok "a 200-day window fails even though it is not past due" yes "200 days after approved_at" -- i9probe "$W200"
 
