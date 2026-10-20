@@ -989,7 +989,10 @@ approval:
     entry's own packages, the per-entry sum equals the header, and the header
     equals the scan — all four asserted on every gate run against
     security-report-nom341-20261020T175630Z, not asserted in prose here.  The
-    gate's ONLY remaining failure is the approval check.  Who signs never
+    approval check was the gate's last remaining failure and the signature
+    cleared it: against that report and this file, ci/scan-gate.py exits 0.
+    A failure of that check from here on is a REGRESSION rather than the
+    pre-signature state, and the gate's own output says so.  Who signs never
     depended on those numbers, which is why it was settled in parallel
     [NOM-310].
   already_decided_on_NOM-310: >-
@@ -1042,8 +1045,13 @@ approval:
       approver.  He was shown before answering that the name he gave would be
       written into all 18 `approved_by` fields as the approval (NOM-310
       sign-off brief, section 6), and he answered the V4 operating cap in the
-      same card -- see V4's `operating_cap`.  The Tech Lead, an AGENT, then
-      transcribed that name into the 18 fields.
+      same card -- see V4's `operating_cap`.  The DevOps Engineer, an AGENT,
+      then transcribed that name into the 18 fields, in commit ebf6854.  The
+      Tech Lead verified that transcription afterwards and did not write it.
+      WHICH AGENT HELD THE PEN IS CHECKABLE, and this line was wrong about it
+      until 2026-10-20: it said the Tech Lead wrote the bytes, because that
+      was the plan recorded on NOM-310 -- and a plan is not a record.
+      `git log -1 --format=%an ebf6854` is the record.
     WHAT_THIS_DOES_NOT_ESTABLISH: >-
       THE BYTES WERE WRITTEN BY AN AGENT, and ci/approvers.py cannot tell a
       transcribed human decision from an invented one.  It checks that the
