@@ -1,0 +1,51 @@
+# AI Stack 2026 — the authorised approvers list.  ONE file, both registers.
+#
+# `approved_by` in security-findings.yaml and in security-exceptions.yaml must
+# be EXACTLY a `name:` on this list.  `ci/approvers.py` holds the rule and both
+# gates call it: `ci/scan-gate.py` for the findings register, `ci/invariants.py`
+# I9 for the exceptions register.  They used to carry two divergent copies of
+# the rule, and neither copy rejected "Tech Lead" — see the header of
+# ci/approvers.py for what that gap was and how it was found.
+#
+# HOW A NAME GETS ON THIS LIST, AND HOW IT DOES NOT.
+#   A human names themselves or someone else, on an issue, and that issue key
+#   goes in `authority_record`.  An agent may transcribe that answer here —
+#   this file was written by one — but an agent MAY NOT ADD ITSELF OR ANOTHER
+#   AGENT, and `ci/approvers.py` refuses the attempt from code rather than
+#   from this comment: every name here is checked against the company's agent
+#   roster, so an agent that adds itself fails the gate it was trying to pass.
+#
+# WHAT THIS FILE DOES NOT ESTABLISH.
+#   That the person named actually said yes.  A repository cannot show that.
+#   `authority_record` is the citation a human follows to check, and the gate
+#   asserts only that the citation is there.  Read ci/approvers.py before
+#   citing this file as more than that.
+
+schema: aistack.security-approvers.v1
+version: 1
+
+approvers:
+  - name: "Mahmoud Alkhatib"
+    human: true
+    role: "founder, Nomad AI — the board user of this Paperclip company"
+    scope: >-
+      Residual security risk on INTERNAL infrastructure that is not published
+      to the internet and holds no customer or personal data.  This is the
+      scope the AI Stack 2026 MVP sits in (NOM-245).  It is NOT a scope that
+      covers the Nomad AI product's own data tier, whose three pre-MVP gates
+      (telecom consent, legal clearance, design-partner agreement) are a
+      separate matter and remain open.
+    authority_record: NOM-310
+    named_on: 2026-10-20
+    named_by: >-
+      Himself.  NOM-310 put the authority question to a human-only question
+      card; he answered "my self" to "who is the authorised named approver",
+      chose "keep the rule: no agent signs — tighten the check so it rejects
+      'Tech Lead' too", and accepted the V4 single-operator cap.
+    name_spelling_note: >-
+      The answer was "my self", not a spelling.  "Mahmoud Alkhatib" is this
+      repository's reading of it: the git author of the human commits here is
+      `makhatib`, the sandbox domain is malkhatib.com, and the company's
+      instructions to its agents name him Mahmoud.  IF THE SPELLING IS WRONG IT
+      IS A ONE-LINE FIX and the authority is unaffected — it is NOM-310 that
+      carries the decision, not this string.

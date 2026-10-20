@@ -28,9 +28,17 @@
 #   the residue needs named approval rather than another bump, and it is why
 #   none of the entries below claims a fix it cannot point at.
 #
-# NO AGENT MAY APPROVE AN ENTRY HERE.  Every `approved_by` is PENDING and the
-# gate is EXPECTED TO FAIL its approval check until the Tech Lead decides.
-# That failure is the control working, not a defect to route around.
+# NO AGENT MAY APPROVE AN ENTRY HERE — THE TECH LEAD INCLUDED.  These three
+# lines used to end "until the Tech Lead decides", which named an agent as the
+# approver and contradicted the `what_no_agent_may_do` field in the same file;
+# both gates would also have ACCEPTED the literal string "Tech Lead" [NOM-310].
+# The authority is now a named human, recorded once in security-approvers.yaml,
+# and ci/approvers.py refuses every agent of this company BY NAME.  Every
+# `approved_by` here is still PENDING and the gate is EXPECTED TO FAIL its
+# approval check until that human approves the CORRECTED figures — see
+# `approval:` at the end of this file for what "corrected" means and why the
+# signature waits.  That failure is the control working, not a defect to route
+# around.
 
 schema: aistack.security-findings.v1
 version: 1
@@ -251,6 +259,26 @@ dispositions:
       Track upstream for the first open-webui release carrying PyJWT >= 2.14.0
       and bump on sight.  This entry is the reason that watch exists.
     expires_on: "the first open-webui release with PyJWT >= 2.14.0"
+    operating_cap:
+      decision: >-
+        ACCEPTED by Mahmoud Alkhatib on 2026-10-20 [NOM-310], as a standing
+        constraint and not as a note: the MVP runs SINGLE-OPERATOR, or with
+        ADMIN-ONLY accounts, until an open-webui release carries
+        PyJWT >= 2.14.0.
+      what_it_forbids: >-
+        Creating a SECOND NON-ADMIN Open WebUI account while this entry is
+        open.  Every account that exists can already forge an Open WebUI
+        identity; the cap is what keeps that inside one trust level instead of
+        across two.  It does not reduce the CVE and is not claimed to.
+      exit_condition: "the first open-webui release with PyJWT >= 2.14.0"
+      NOT_ENFORCED_IN_CODE: >-
+        No check asserts the account count.  Open WebUI owns its own user table,
+        CI does not read a running instance, and nothing in this repository
+        will fail if a second account is created tomorrow.  WHO WILL STILL BE
+        RUNNING: an operator who adds a user and never reads this entry.  The
+        cap is a promise by the operator, carried here and in
+        docs/security-faq.md ("Can I add a second user?"), and a reviewer
+        should treat it as exactly that strength and no more.
     approved_by: PENDING
     approved_at: null
     review_by: 2027-04-17
@@ -756,17 +784,69 @@ coverage_limits:
 
 # ---------------------------------------------------------------------------
 approval:
-  state: PENDING
-  who_must_approve: "Tech Lead"
+  state: AUTHORITY SETTLED, SIGNATURE NOT YET WRITTEN
+  who_must_approve: "Mahmoud Alkhatib"
+  who_must_approve_is: >-
+    A HUMAN.  The exact string above is what `approved_by` must equal, and it
+    must match an entry in security-approvers.yaml, which carries his role and
+    the scope he was asked about.  This field used to read "Tech Lead" — an
+    agent, and the same file's `what_no_agent_may_do` forbade exactly that.
+  authority_record: NOM-310
+  authority_settled_on: 2026-10-20
+  how_the_authority_was_settled: >-
+    NOM-309 reviewed all 18 entries and concluded the Tech Lead could not sign
+    them.  NOM-310 put the question to a HUMAN-ONLY question card, which the
+    board user answered on 2026-10-20: he named HIMSELF as the approver, and
+    chose "keep the rule: no agent signs — tighten the check so it rejects
+    'Tech Lead' too" over amending the check to admit an agent reviewer.
+  what_the_check_now_does: >-
+    ci/approvers.py holds one rule for both registers, called by
+    ci/scan-gate.py and by ci/invariants.py I9.  It has two halves and both
+    must pass: the value must name NO agent of this company (the roster is in
+    code, so a register edit cannot widen it), AND it must exactly equal a
+    name on security-approvers.yaml that declares `human: true` and cites the
+    issue where a human named them.  tests/approval-authority.sh exercises
+    every agent name, the old "Tech Lead" gap, and the strings that used to
+    pass for an approval ("the team", "approved", "ok").
+    WHAT IT DOES NOT ESTABLISH: that the named person consented.  Nothing in a
+    repository can.  `authority_record` is the citation a human follows.
+  why_approved_by_is_still_PENDING: >-
+    BECAUSE THE FIGURES ARE WRONG AND ARE ABOUT TO CHANGE.  Signing today
+    would record a human accepting numbers NOM-309 already measured as
+    understated: V6 declares `units: 62` against 77 measured, V10 declares 21
+    against 22, and the per-entry units sum to 187 against this file's header
+    total of 203 (187 + 15 + 1 = 203, which is the whole of the gap).  On top
+    of that the Tech Lead decided YES on the Debian 13 Postgres base
+    (pgvector:0.8.7-pg17-trixie), which trades 5 CRITICAL for 8 HIGH and
+    re-measures V6, V7 and the totals.  So the correction pass runs first and
+    ONE signature pass follows on the corrected register.  Who signs never
+    depended on those numbers, which is why it was settled in parallel.
+  what_they_are_approving: >-
+    The dispositions above for the CRITICAL and HIGH blocking units that remain
+    after the n8n bump, on the understanding that every image is already at its
+    newest upstream release and no further pin change removes them.  The counts
+    in the header are the figures as measured on 2026-10-19 and are the ones
+    being corrected; the signature pass must restate them from the corrected
+    register rather than from this sentence.
+  already_decided_on_NOM-310: >-
+    The V4 operating cap is ACCEPTED — the MVP runs single-operator or
+    admin-only until open-webui ships PyJWT >= 2.14.0.  See V4's
+    `operating_cap`, including the part that is not enforced in code.
   what_they_are_approving: >-
     The dispositions above for the 23 CRITICAL and 180 HIGH blocking units that
     remain after the n8n bump, on the understanding that every image is already
     at its newest upstream release and no further pin change removes them.
   what_no_agent_may_do: >-
-    Approve any entry in this file or in security-exceptions.yaml.  Every
-    `approved_by` here is PENDING and the gate's approval check is EXPECTED TO
-    FAIL until a named human decides.  security-exceptions.yaml additionally
-    still carries `approved_by: "DevOps Engineer (NOM-258), pending Tech Lead
-    review"` on E1, E6, E7, E9 and E10 — an agent self-approval marker that
-    NOM-301 has deliberately NOT cleared.
+    Approve any entry in this file or in security-exceptions.yaml, or add a
+    name to security-approvers.yaml.  THE TECH LEAD IS AN AGENT AND IS COVERED
+    BY THIS, which is what NOM-310 fixed in the check rather than in the prose.
+    Every `approved_by` here is PENDING and the gate's approval check is
+    EXPECTED TO FAIL until the named human approves.  security-exceptions.yaml
+    additionally still carries `approved_by: "DevOps Engineer (NOM-258),
+    pending Tech Lead review"` on E1, E6, E7, E9 and E10 — an agent
+    self-approval marker that NOM-301 deliberately did NOT clear and NOM-310
+    has left in place, because it is the evidence of the defect it records.
+    The signature pass replaces those five strings; until then I9 reports each
+    of them three times over, once per half of the rule plus the pending
+    marker.
   read_first: "V4 (PyJWT), then V7 (a yes/no on the Debian 13 base), then V8 (Caddy's Go net/http exposure)"

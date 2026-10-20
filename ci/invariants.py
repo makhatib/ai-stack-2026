@@ -18,6 +18,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import approvers  # noqa: E402  — the approval-authority rule, shared with the scan gate
+
 try:
     import yaml
 except ImportError:
@@ -401,6 +404,8 @@ def i9(ctx):
         bad.append("security-exceptions.yaml is missing")
         return bad
     reg = yaml.safe_load(open(exc)) or {}
+    APPROVERS, approver_problems = approvers.load_approvers(ctx.root)
+    bad.extend(approver_problems)
     import datetime
     today = datetime.date.today()
     for e in reg.get("exceptions") or []:
@@ -413,19 +418,16 @@ def i9(ctx):
         # `approved_by`, so the agent-authored string
         #   "DevOps Engineer (NOM-258), pending Tech Lead review"
         # satisfied it — the register recorded its own author as the approver
-        # and CI called that complete [NOM-301].  An agent cannot approve a
-        # security exception, and a string that still says "pending" is a
-        # request for approval, not an approval.  This is the same rule
-        # ci/scan-gate.py applies to security-findings.yaml; the two registers
-        # are now held to one standard instead of the weaker of two.
-        ab = str(e.get("approved_by") or "")
-        if ab:
-            if re.search(r"pending|tbd|unapproved", ab, re.I):
-                bad.append(f"exception {e.get('id')} approved_by is still pending "
-                           f"({ab!r}) — a request for approval is not an approval")
-            elif re.search(r"\bagent\b|Engineer \(agent\)|DevOps Engineer", ab, re.I):
-                bad.append(f"exception {e.get('id')} approved_by names an agent "
-                           f"({ab!r}) — an agent cannot approve a security exception")
+        # and CI called that complete [NOM-301].  It was then tightened to
+        # reject `pending` and two agent role names, and STILL accepted the
+        # literal "Tech Lead" [NOM-310].  The rule now lives in one place,
+        # ci/approvers.py, shared with ci/scan-gate.py, so the two registers
+        # are held to one standard instead of the weaker of two — and it has a
+        # positive half: the value must be a name on security-approvers.yaml,
+        # not merely a string that fails to look like an agent.
+        bad.extend(approvers.check_approved_by(
+            f"exception {e.get('id')}", e.get("approved_by"),
+            APPROVERS, "security exception"))
         rb = e.get("review_by")
         if rb:
             d = rb if isinstance(rb, datetime.date) else datetime.date.fromisoformat(str(rb))

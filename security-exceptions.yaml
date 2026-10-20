@@ -3,9 +3,10 @@
 # Every service merges the `x-hardened` anchor.  EVERY DEVIATION IS AN ENTRY
 # HERE THAT A REVIEWER CAN GREP FOR — there are no quiet overrides.
 #
-# Every entry carries `approved_by` and `approved_at` (a named authorised
-# reviewer) and a `review_by` date <= 180 days EVEN WHEN THE ENTRY IS
-# PERMANENT.  CI fails the build when an entry is missing approval, is past
+# Every entry carries `approved_by` and `approved_at` (A NAMED HUMAN, who must
+# be on security-approvers.yaml — see `approval:` at the end of this file and
+# ci/approvers.py for the rule, which no agent of this company can satisfy)
+# and a `review_by` date <= 180 days EVEN WHEN THE ENTRY IS PERMANENT.  CI fails the build when an entry is missing approval, is past
 # `review_by`, or records a digest that no longer matches the pin — a change
 # invalidates its own evidence rather than inheriting it.
 
@@ -146,6 +147,32 @@ exceptions:
     exception: "cap_add: NET_ADMIN"
     scope: deferred
     returns_with: "the `remote-access` group"
+
+# ---------------------------------------------------------------------------
+approval:
+  state: AUTHORITY SETTLED, SIGNATURE NOT YET WRITTEN
+  who_must_approve: "Mahmoud Alkhatib"
+  authority_record: NOM-310
+  authority_settled_on: 2026-10-20
+  the_rule_is_shared: >-
+    This register and security-findings.yaml are held to ONE rule, in
+    ci/approvers.py.  They were not: both checks rejected `PENDING` and the
+    string "DevOps Engineer", and NEITHER rejected "Tech Lead", an agent of
+    this company and the one both registers named as reviewer [NOM-310].  The
+    rule now also has a POSITIVE half — the value must be a name on
+    security-approvers.yaml — because a denylist of two role names accepted
+    every other string, "approved" and "ok" included.
+  what_is_still_wrong_here: >-
+    E1, E6, E7, E9 and E10 carry `approved_by: "DevOps Engineer (NOM-258),
+    pending Tech Lead review"`.  That is an agent recording itself as the
+    approver, it is NOT an approval, and I9 fails on it.  It is deliberately
+    left in place as the evidence of the defect NOM-301 found; the signature
+    pass replaces it.  E2, E3 and E5 are `scope: deferred` and carry no
+    approval field, so they are outside this entirely.
+  why_the_signature_waits: >-
+    The findings register's figures are being corrected first (V6/V10 units and
+    the Debian 13 Postgres base), and both registers are signed in ONE pass on
+    the corrected evidence.  See security-findings.yaml `approval:`.
 
 # DELIBERATELY NOT AN EXCEPTION: the Docker socket.
 # A read-only socket proxy was evaluated and REJECTED.  Read access to the

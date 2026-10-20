@@ -45,6 +45,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import approvers  # noqa: E402  — the approval-authority rule, shared with I9
+
 SEV_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "NEGLIGIBLE": 4, "UNKNOWN": 5}
 BLOCKING = ("CRITICAL", "HIGH")
 OS_TYPES = ("rpm", "deb", "apk")
@@ -236,16 +239,23 @@ def load_dispositions(path):
     return claim, entries
 
 
-def check_approvals(entries):
-    """Every entry needs a NAMED human approver and a live review_by.
+def check_approvals(entries, root):
+    """Every entry needs a NAMED HUMAN approver and a live review_by.
 
-    An agent cannot satisfy this and must not try: a value of PENDING, or one
-    naming an agent, is a failure.  This check is EXPECTED TO FAIL until the
-    Tech Lead decides, and that failure is the control working.
+    The rule itself lives in ci/approvers.py and is shared with
+    `ci/invariants.py` I9, because this check and that one are the same rule
+    applied to two registers and two copies of it drifted apart once already:
+    both rejected `PENDING` and the string "DevOps Engineer", and NEITHER
+    rejected "Tech Lead" — an agent of this company, and the one the registers
+    named as reviewer.  See that module's header.
+
+    An agent cannot satisfy this and must not try.  This check is EXPECTED TO
+    FAIL until a named human approves, and that failure is the control working.
     """
     import datetime
     today = datetime.date.today()
-    problems, flagged = [], set()
+    approvers_list, problems = approvers.load_approvers(root)
+    flagged = set()
     for e in entries:
         if not e.get("approvable"):
             continue
@@ -253,10 +263,11 @@ def check_approvals(entries):
         if ab in ("n/a", "null"):
             continue
         before = len(problems)
-        if not ab or ab == "PENDING" or ab == "null":
-            problems.append(f"{e['id']}: approved_by is PENDING — no named human has approved it")
-        elif re.search(r"agent|DevOps Engineer|Engineer \(agent\)", ab, re.I):
-            problems.append(f"{e['id']}: approved_by names an agent ({ab!r}) — an agent cannot approve a security disposition")
+        if not ab:
+            problems.append(f"{e['id']}: approved_by is empty — no named human has approved it")
+        else:
+            problems.extend(approvers.check_approved_by(
+                e["id"], ab, approvers_list, "security disposition"))
         if rb and rb not in ("null", "n/a"):
             try:
                 d = datetime.date.fromisoformat(rb)
@@ -370,14 +381,16 @@ def main():
                 print("    -", x)
             fail.append(f"{len(double)} blocking unit(s) claimed by more than one disposition")
 
-        approval_problems, n_approvable, n_flagged = check_approvals(entries)
+        approval_problems, n_approvable, n_flagged = check_approvals(
+            entries, os.path.dirname(os.path.abspath(disp_path)) or ".")
         print(f"\napproval state: {n_approvable - n_flagged}/{n_approvable} "
               f"entries carry a named human approval")
         for p in approval_problems:
             print("    -", p)
         if approval_problems:
             fail.append(f"{n_flagged} disposition(s) without a named human approval "
-                        f"— EXPECTED until the Tech Lead decides; this is the control working")
+                        f"— EXPECTED until the named human approver in "
+                        f"security-approvers.yaml approves; this is the control working")
 
     if fail:
         print("\nGATE FAILURES (coverage):")

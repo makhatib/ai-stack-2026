@@ -146,6 +146,28 @@ n8n cannot read Authelia's session secret or the Postgres superuser
 password. `aistack doctor` proves that direction by asking each container,
 rather than inferring it from the mode.
 
+## Can I add a second user?
+
+Not on this release, and that is a recorded decision rather than an oversight.
+
+Open WebUI validates its own session and API tokens with PyJWT, and the copy
+bundled inside open-webui v0.12.3 carries an authentication-bypass flaw
+(CVE-2026-102268). v0.12.3 is the newest release there is and PyJWT is a
+transitive dependency inside it, so no pin fixes this today. Authelia sits in
+front of all four Open WebUI route groups, so nobody who has not passed
+Authelia can use it -- but somebody who **has** passed Authelia can forge or
+escalate an Open WebUI identity.
+
+With one operator account, that buys an attacker nothing they did not already
+have. With two accounts it is a privilege escalation between your users.
+
+So this release runs **single-operator, or admin-only accounts**, until an
+open-webui version ships PyJWT 2.14.0 or newer. Nothing here enforces the
+count: Open WebUI owns its own user table and no check in this repository
+reads it, so if you add a user tomorrow nothing fails. It is a constraint on
+how you run the stack, it is entry V4 in `security-findings.yaml`, and it is
+one of the things the residual-risk sign-off covers.
+
 ## What runs as root?
 
 More than we would like, and it is written down rather than glossed.
