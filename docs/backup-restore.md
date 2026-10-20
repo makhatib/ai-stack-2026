@@ -31,6 +31,30 @@ The n8n encryption key is in the set on purpose. Without it, every credential
 in the database dump is undecryptable, and a backup that restores a workflow
 list but none of its credentials is not a backup.
 
+## How many archives are kept
+
+Three, newest first. Each archive is about 240 MB, `bin/aistack update` takes
+one before every update, and nothing used to remove any of them — so the
+folder grew by 240 MB per update, forever. Retention runs at the end of a
+successful backup and bounds `backups/` at roughly 720 MB.
+
+Three is the number because of what reads an archive. The drill reads the
+newest one only. A rollback reads the backup taken before the update, in the
+words of `bin/aistack rollback`, and that archive has to outlive the update
+long enough for the update to be trusted — keeping three lets it survive two
+further backups.
+
+Change it with `AISTACK_BACKUP_RETAIN=N bin/aistack backup`, or see for
+yourself what would go first:
+
+```sh
+scripts/prune-backups.sh              # dry run; deletes nothing
+```
+
+Only a name of the shape `aistack-<UTC>.tar.gz.enc` is ever pruned. An archive
+you renamed or copied in by hand is left alone, and an `--offsite` copy is
+never touched from here.
+
 ## Two keys, and you must hold both
 
 `secrets/backup.key` encrypts the archive. `secrets/backup.hmac` signs its

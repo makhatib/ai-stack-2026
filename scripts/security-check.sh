@@ -40,8 +40,6 @@ python3 -c 'import yaml' 2>/dev/null || {
   printf 'This is a developer/operator tool.  The INSTALLER does not need it.\n' >&2
   exit 2
 }
-OUT="$ROOT/security-report-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$OUT"
 
 ok()   { printf '  [ ok ] %s\n' "$*"; }
 bad()  { printf '  [FAIL] %s\n' "$*"; RC=1; }
@@ -68,7 +66,38 @@ SKIP_SCAN=0
 # silently unscanned.  Image size decides this, not content -- raise it
 # on a slow disk.
 TRIVY_TIMEOUT="${TRIVY_TIMEOUT:-45m}"
-[ "${1:-}" = "--audit-only" ] && SKIP_SCAN=1
+
+ALLOW_LOW_DISK=0
+SKIP_REASON=""
+# AN ARGUMENT LOOP, NOT "$1".  The old form read the FIRST argument only, so
+# `security-check.sh --allow-low-disk --audit-only` would have run the full
+# scan: the new override flag would have silently cancelled --audit-only.  An
+# unknown argument is refused rather than ignored, for the same reason — a
+# typo that reads as "no flags" is a scan nobody asked for.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --audit-only)     SKIP_SCAN=1; SKIP_REASON="--audit-only" ;;
+    --allow-low-disk) ALLOW_LOW_DISK=1 ;;
+    -h|--help)
+      printf 'usage: security-check.sh [--audit-only] [--allow-low-disk]\n\n'
+      printf '  --audit-only      configuration audit only; scan nothing\n'
+      printf '  --allow-low-disk  run the scan even when free disk is below what\n'
+      printf '                    it needs (see scripts/preflight-disk.sh)\n'
+      exit 0 ;;
+    *) printf 'security-check: unknown argument %s\n' "$1" >&2
+       printf 'security-check: usage: security-check.sh [--audit-only] [--allow-low-disk]\n' >&2
+       exit 2 ;;
+  esac
+  shift
+done
+
+# THE REPORT DIRECTORY IS CREATED AFTER THE ARGUMENTS ARE READ, not before.
+# It used to be created at the top of the script, so `security-check.sh
+# --typo` exited having left an empty security-report-<UTC>/ behind — one more
+# directory for retention to count, created by a run that did nothing
+# (NOM-352).
+OUT="$ROOT/security-report-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$OUT"
 
 printf '\nAI Stack 2026 — security check\n'
 printf 'Report directory: %s\n' "$OUT"
@@ -86,6 +115,45 @@ printf 'Report directory: %s\n' "$OUT"
 # scripts/prune-reports.sh for exactly what it refuses to touch.
 "$ROOT/scripts/prune-reports.sh" --apply \
   || warn "report retention could not prune every old report - see the lines above"
+
+# PRE-FLIGHT DISK ASSERTION (NOM-352).  Placed here on purpose:
+#   * AFTER retention above, so the measurement reflects the space retention
+#     just freed rather than the space it was about to free;
+#   * BEFORE the audit, so an operator who is about to be told the scan
+#     cannot run is told it now and not after the audit's output;
+#   * ONLY when a scan was actually asked for.  The audit half downloads
+#     nothing and needs no room, so --audit-only pre-flights nothing.
+#
+# A WARNING WITH AN OVERRIDE, NOT A GATE.  Tech Lead decision on the NOM-350
+# review: a hard refusal would stop someone regenerating NOM-310 evidence at
+# exactly the wrong moment.  So low disk SKIPS the scan half and reports it
+# as NOT RUN — the disposition this script already uses for every other
+# unrun scan, because an unrun scan must never summarise as clean — and
+# names --allow-low-disk, which runs it anyway.
+#
+# WHY IT MATTERS THAT THE SCAN STOPS RATHER THAN FILLS THE DISK.  A scan that
+# runs the host out of space writes TRUNCATED JSON, and truncated JSON parses
+# as FEWER findings — a quieter report for a worse scan.  And at about 2 GB
+# free on AI-Sandbox the root Traefik ingress starts failing, so it takes
+# every unrelated *.sandbox.malkhatib.com app down with it (NOM-350).
+if [ "$SKIP_SCAN" -eq 0 ]; then
+  hdr "Pre-flight: free disk for the scan half"
+  "$ROOT/scripts/preflight-disk.sh"
+  PREFLIGHT_RC=$?
+  if [ "$PREFLIGHT_RC" -eq 0 ]; then
+    ok "enough free disk for the scan"
+  elif [ "$ALLOW_LOW_DISK" -eq 1 ]; then
+    warn "LOW DISK — running the scan anyway because --allow-low-disk was given."
+    warn "If the host fills, this run's reports will be truncated JSON that parses"
+    warn "as FEWER findings, and other services on this host will start failing."
+  else
+    SKIP_SCAN=1; SKIP_REASON="low disk"
+    warn "The SCAN half will NOT RUN: too little free disk (see above)."
+    warn "Free some space, or scan anyway with:"
+    warn "    bin/aistack security-check --allow-low-disk"
+    warn "The audit half below still runs in full."
+  fi
+fi
 
 # ===========================================================================
 # PART 1 — CONFIGURATION AUDIT.  Ours to fix.
@@ -460,7 +528,17 @@ else
   IMAGES=""; NIMAGES=0
 fi
 
-if [ "$SKIP_SCAN" -eq 1 ]; then
+if [ "$SKIP_SCAN" -eq 1 ] && [ "$SKIP_REASON" = "low disk" ]; then
+  # A DIFFERENT DISPOSITION FROM --audit-only, deliberately.  --audit-only is
+  # a request that was honoured, so it does not fail the run.  This is a scan
+  # the operator ASKED FOR and did not get, so RC=1: the script's contract is
+  # that an unrun scan is never reported as clean.
+  warn "NOT RUN — too little free disk (see the pre-flight above). NO IMAGE WAS"
+  warn "SCANNED. Re-run with --allow-low-disk to scan anyway. This is NOT a"
+  warn "clean result and must not be summarised as one."
+  echo "scan: NOT RUN (low disk)" > "$OUT/trivy-NOT-RUN.txt"
+  RC=1
+elif [ "$SKIP_SCAN" -eq 1 ]; then
   warn "SKIPPED (--audit-only). NOT a clean result — nothing was scanned."
 elif [ "$NIMAGES" -eq 0 ]; then
   warn "NOT RUN — the image list could not be resolved as $(id -un), so NO"
@@ -556,7 +634,9 @@ PY
 fi
 
 hdr "Scan: SBOM"
-if [ "$SKIP_SCAN" -eq 1 ]; then
+if [ "$SKIP_SCAN" -eq 1 ] && [ "$SKIP_REASON" = "low disk" ]; then
+  warn "NOT RUN — too little free disk. No SBOM was produced."
+elif [ "$SKIP_SCAN" -eq 1 ]; then
   warn "SKIPPED (--audit-only)."
 elif [ "$NIMAGES" -eq 0 ]; then
   warn "NOT RUN — no image list (see above). No SBOM was produced."

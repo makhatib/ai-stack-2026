@@ -175,3 +175,30 @@ why — read it before adding a line to the allowlist.
 **What is safe to delete in this repo:** `security-report-<UTC>/` directories,
 via `bash scripts/prune-reports.sh`. It keeps the newest three automatic
 reports and never touches a labelled or cited one.
+Old backup archives go the same
+way, via `bash scripts/prune-backups.sh` — newest three, and a successful
+`bin/aistack backup` has already run it. See [backup and
+restore](backup-restore.md) for why three.
+
+### The scan says NOT RUN — too little free disk
+
+`bin/aistack security-check` measures free space before its scan half and
+stops rather than scanning into a full disk. A scan that fills the host writes
+truncated JSON, and truncated JSON parses as FEWER findings — a quieter report
+for a worse scan. Other services on the machine start failing before it
+finishes, too.
+
+Only the scan is skipped; the audit half always runs, and the skipped scan is
+reported as NOT RUN, never as clean. Either free some space, or scan anyway:
+
+```sh
+bin/aistack security-check --allow-low-disk
+```
+
+What it wants is room for the largest image it is about to read, plus 2 GB for
+the vulnerability database and the report. Ask for the number without running
+anything:
+
+```sh
+scripts/preflight-disk.sh
+```

@@ -180,6 +180,23 @@ chmod 0600 "$ARCHIVE"
 
 echo "  wrote $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 
+# --- retention (NOM-352) ----------------------------------------------------
+# AFTER the new archive exists, and only then.  Pruning first would free space
+# before it is needed -- which is what scripts/prune-reports.sh does for
+# reports -- but a backup that prunes an old restore point and THEN fails to
+# write a new one has reduced the number of ways back, which is the opposite
+# of this script's job.  240 MB of transient overlap is the cheaper mistake.
+#
+# Only $DEST is bounded.  An --offsite destination is never pruned from here:
+# that copy is the only one that is not on this host, and deleting one is a
+# decision for whoever owns that storage.
+#
+# `|| true` is not laziness: this script runs under `set -e`, and a prune that
+# could not remove a file must not turn a SUCCESSFUL backup into a failed
+# command.  prune-backups.sh prints its own failure and the exact command to
+# finish it by hand.
+"$ROOT/scripts/prune-backups.sh" --apply --dir "$DEST" || true
+
 if [ -n "$OFFSITE" ]; then
   echo "  copying to $OFFSITE"
   cp "$ARCHIVE" "$OFFSITE/" || die "offsite copy failed"
