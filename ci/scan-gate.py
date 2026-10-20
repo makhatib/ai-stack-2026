@@ -418,9 +418,58 @@ def check_approvals(entries, root):
     return problems, approvable, len(flagged)
 
 
+USAGE = ("usage: ci/scan-gate.py --dispositions REGISTER versions.env REPORT_DIR...\n"
+         "       ci/scan-gate.py --coverage-only       versions.env REPORT_DIR...\n")
+
+
+def parse_args(argv):
+    """Pin set, report dirs and the register, off the command line.
+
+    THE REGISTER HALF OF THIS GATE IS NOT SKIPPABLE IN SILENCE [NOM-341].
+    security-findings.yaml's own header documents the invocation as
+    `ci/scan-gate.py --dispositions security-findings.yaml`, and that flag did
+    not exist: the register arrived only through the DISPOSITIONS environment
+    variable.  So running the DOCUMENTED command ran the coverage half, skipped
+    the claim / arithmetic / approval half entirely, printed COVERAGE COMPLETE
+    and exited 0 — a gate reporting success for three checks it never made.
+    That is the same defect one level up as the declared figure nobody checked.
+
+    The flag is real now, the environment variable still works for callers that
+    already use it, and asking for NEITHER is an error rather than a quieter
+    gate.  --coverage-only keeps the narrower run available to whoever wants
+    it, and makes them say so out loud.
+    """
+    disp, coverage_only, rest = os.environ.get("DISPOSITIONS"), False, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--dispositions" and i + 1 < len(argv):
+            disp, i = argv[i + 1], i + 2
+        elif a.startswith("--dispositions="):
+            disp, i = a.split("=", 1)[1], i + 1
+        elif a == "--coverage-only":
+            coverage_only, i = True, i + 1
+        elif a.startswith("-"):
+            sys.exit(f"unknown option {a}\n{USAGE}")
+        else:
+            rest.append(a)
+            i += 1
+    if len(rest) < 2:
+        sys.exit(USAGE)
+    if disp and coverage_only:
+        sys.exit("--coverage-only and a register contradict each other; pick one.\n"
+                 + USAGE)
+    if not coverage_only and not disp:
+        sys.exit("REGISTER CHECKS DID NOT RUN — and a gate that did not look is not a\n"
+                 "gate that found nothing.  Name the register:\n"
+                 "    ci/scan-gate.py --dispositions security-findings.yaml "
+                 "versions.env REPORT_DIR\n"
+                 "or ask for the narrower run explicitly with --coverage-only.\n")
+    return rest[0], rest[1:], (None if coverage_only else disp)
+
+
 def main():
-    pins_path, dirs = sys.argv[1], sys.argv[2:]
-    disp_path = os.environ.get("DISPOSITIONS")
+    pins_path, dirs, disp_path = parse_args(sys.argv[1:])
     claim, entries, header = (load_dispositions(disp_path) if disp_path
                               else (None, None, {}))
     pins = read_pins(pins_path)
@@ -559,6 +608,12 @@ def main():
     else:
         print("\nCOVERAGE COMPLETE: every pin scanned at its exact digest, "
               "every OS layer covered by at least one scanner, grype ran on all.")
+    if disp_path is None:
+        # --coverage-only was asked for explicitly, so say in the output what
+        # this run does NOT cover.  "The gate passed" must not be sayable
+        # about a run that never opened the register.
+        print("\nREGISTER NOT CHECKED (--coverage-only): the claim, arithmetic and\n"
+              "approval checks did not run.  This output is about the scans only.")
     return 1 if fail else 0
 
 

@@ -9,6 +9,11 @@
 #   2. the review_by <= 180-day cap  ci/approvers.py, called by I9 and the gate
 #   3. per-entry unit arithmetic     ci/scan-gate.py
 #
+# CONTROL 0 is the one that carries the other three: the gate's register half
+# used to be reachable only through a DISPOSITIONS environment variable, so the
+# invocation the register itself documents ran the coverage half, skipped
+# controls 1-3 and exited 0.  A control you can skip by accident is a note too.
+#
 # Each case below makes ONE wrong edit on a SCRATCH COPY of the register and
 # asserts the check names it.  Every case also asserts the check is QUIET on
 # the unmutated file, because a check that fires on everything is as useless as
@@ -230,6 +235,35 @@ for ln in lines:
 open(p, "w").write("\n".join(out))
 PY
 ok "entries right, HEADER stale — still fails" yes "header totals_after_V0_bump.blocking_units says 203" -- gate "$HEADER"
+
+# ---------------------------------------------------------------------------
+# Control 0 — the register half cannot be skipped without saying so.
+# ---------------------------------------------------------------------------
+echo
+echo "CONTROL 0 — the gate cannot run its coverage half alone in silence"
+gateflag() {   # gateflag <scratch-root>  — the invocation the register documents
+  GATE_JSON="$1/gate.json" env -u DISPOSITIONS \
+    python3 ci/scan-gate.py --dispositions "$1/security-findings.yaml" \
+      versions.env "$EVIDENCE"
+}
+gatebare() {   # no register named at all
+  GATE_JSON="$SCRATCH/bare.json" env -u DISPOSITIONS \
+    python3 ci/scan-gate.py versions.env "$EVIDENCE"
+}
+gatecov() {    # the narrower run, asked for out loud
+  GATE_JSON="$SCRATCH/cov.json" env -u DISPOSITIONS \
+    python3 ci/scan-gate.py --coverage-only versions.env "$EVIDENCE"
+}
+ok "no register named at all FAILS, it does not pass quietly" yes \
+   "REGISTER CHECKS DID NOT RUN" -- gatebare
+ok "...and does not print a clean verdict while skipping them" no \
+   "COVERAGE COMPLETE" -- gatebare
+ok "--coverage-only runs, and says what it did not check" yes \
+   "REGISTER NOT CHECKED" -- gatecov
+ok "the DOCUMENTED --dispositions form reaches the arithmetic check" yes \
+   "unit arithmetic: per-entry declarations vs this scan" -- gateflag "$UNITS"
+ok "...and that form still catches the wrong figure" yes \
+   "declares units: 62 but the scan measures 79" -- gateflag "$UNITS"
 
 echo
 echo "cases passed: $PASS   failed: $FAIL"
