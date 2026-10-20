@@ -13,6 +13,17 @@
 #   name its package.  Package lists below are EXHAUSTIVE for that reason — no
 #   wildcards, so a reviewer can see precisely what was accepted.
 #
+#   WHO RUNS IT.  Until NOM-353 the command above was the ONLY thing that ran
+#   the gate, so this control fired when a person typed it and at no other
+#   time -- the standing audit ran ci/invariants.py alone.  Three controls
+#   lived only here and therefore fired for nobody: the unclaimed-unit check
+#   above, the per-entry unit arithmetic below, and the named-human approval
+#   check.  scripts/security-check.sh (`aistack security-check`) now runs the
+#   gate on every invocation, --audit-only included, and A FAILING GATE FAILS
+#   THE AUDIT.  tests/test-scan-gate.sh holds that wire down: it perturbs one
+#   declared figure in this file and asserts the audit goes red, and runs the
+#   pre-NOM-353 audit over the same defect to show it went green.
+#
 # THE UNIT OF DISPOSITION is the (image, package, installed-version) triple,
 # not the CVE.  One bump or one acceptance disposes of every CVE a triple
 # carries, and the CVE counts are recorded so nothing is hidden by grouping.
