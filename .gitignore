@@ -49,3 +49,13 @@ __pycache__/
 # because that is the one path bind-mounted into the n8n container.
 samples/fixtures/synthetic.pdf
 samples/.run/
+
+# THE GATE MUST NOT BE ABLE TO COMMIT ITS OWN OUTPUT — and this block has
+# already been lost once.  4345e96 added it; f98b0c6 rewrote the tail of this
+# file and took it away with no mention in its message, so for a day
+# `ci/scan-gate.py` left an untracked 110KB gate.json in the repo root where
+# any `git add -A` from a neighbouring change would have committed it.
+# `ci/scan-gate.py` writes gate.json unless GATE_JSON names somewhere else.
+# Ignored for the same reason as security-report-*/ above, and I6 now ASSERTS
+# this entry is here rather than trusting that nobody deletes it again.
+gate.json

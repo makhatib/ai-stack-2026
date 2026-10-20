@@ -339,6 +339,23 @@ def i6(ctx):
         for phrase in banned:
             if re.search(rf"\b{re.escape(phrase)}\b", text, re.I):
                 bad.append(f"{f} contains the banned assurance string {phrase!r}")
+
+    # THE GATE MUST NOT BE ABLE TO COMMIT ITS OWN OUTPUT [NOM-301].  The
+    # .gitignore entry for gate.json was added in 4345e96 and silently removed
+    # in f98b0c6, which rewrote the tail of that file for an unrelated change.
+    # Nothing noticed, because the entry was a line in a file rather than a
+    # condition anything checked.  I6 is the right home: committing scan output
+    # is what turned I6 red on a clean clone once already.
+    ign = subprocess.run(["git", "check-ignore", "-q", "gate.json"], cwd=ctx.root,
+                         capture_output=True, text=True)
+    if ign.returncode == 1:
+        bad.append("gate.json is not git-ignored — `ci/scan-gate.py` writes it into "
+                   "the repo root by default, so running the gate dirties the tree "
+                   "and any `git add -A` can commit scan output")
+    elif ign.returncode != 0:
+        bad.append(f"could not ask git whether gate.json is ignored "
+                   f"(git check-ignore exited {ign.returncode}); this check is "
+                   f"UNKNOWN, not passing")
     return bad
 
 
