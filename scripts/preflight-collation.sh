@@ -22,7 +22,15 @@
 # this is a correctness gate rather than observed corruption.  It is still a
 # gate: "we checked one locale and one sample" is not "any locale is safe".
 #
-# This is a PREVENTIVE check.  It exits non-zero and the caller stops.
+# PERFORMED, 2026-10-23 (NOM-354): this cluster was moved onto the trixie pin
+# with the procedure below.  Doing it measured what the rehearsal had missed --
+# the base swap moved TWO providers, glibc 2.36 -> 2.41 AND ICU 153.120 ->
+# 153.128, and the database-level refresh leaves pg_collation untouched.  See
+# the live-staleness section further down; that check exists because this
+# script reported "ok" over 5663 stale rows.
+#
+# This is BOTH a preventive check and the proof the migration finished.  It
+# exits non-zero and the caller stops.
 #
 # Usage: preflight-collation.sh [--image <ref>] [--container <name>]
 #   --image      image reference to test against (default: the rendered pin)
@@ -98,8 +106,91 @@ done <<EOF3
 $RECORDED
 EOF3
 
+# --- IS THE CLUSTER CONSISTENT WITH THE BASE IT IS ALREADY ON? -------------
+# Everything above compares the TARGET image against pg_database, which is
+# what you need BEFORE a swap.  It is not sufficient AFTER one, and this is
+# measured, not theoretical: on 2026-10-23 this script reported
+#
+#     ok — all 7 databases record collation version 2.41
+#
+# on a cluster that still had 5663 STALE pg_collation rows.  Two reasons:
+#
+#   * pg_database is not the only catalog with a version.  Every row in
+#     pg_collation carries its own collversion, and ALTER DATABASE ...
+#     REFRESH COLLATION VERSION does not touch them.  Postgres warns when
+#     such a collation is USED, so the warning survives a migration that
+#     looks finished.
+#   * glibc is not the only provider.  The Debian 12 -> 13 base swap moved
+#     BOTH: glibc 2.36 -> 2.41 and ICU 153.120 -> 153.128.  Reading only
+#     ldd's version sees half of the change -- 2 stale libc rows per
+#     database, and 807 stale ICU ones.
+#
+# So ask the running cluster what it still records against what it NOW
+# provides.  That question is provider-agnostic and needs no knowledge of
+# the image, and it is the one that makes this script usable as the final
+# proof of the migration rather than only as the gate before it.
+DBLIST="$(docker exec "$C_NAME" sh -c 'psql -U "$POSTGRES_USER" -d postgres -At -c "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname"' 2>/dev/null)"
+if [ -z "$DBLIST" ]; then
+  echo "preflight-collation: REFUSE — could not list the connectable databases, so live staleness was not checked." >&2
+  exit 2
+fi
+
+STALE_DB=0; STALE_COLL=0; NDB=0; STALE_DETAIL=""
+for db in $DBLIST; do
+  row="$(docker exec "$C_NAME" sh -c 'psql -U "$POSTGRES_USER" -d "$1" -At -F" " -c "
+    SELECT
+      (SELECT count(*) FROM pg_database d
+         WHERE d.datname = current_database()
+           AND d.datcollversion IS NOT NULL AND d.datcollversion <> chr(32)
+           AND d.datcollversion <> coalesce(pg_database_collation_actual_version(d.oid), d.datcollversion)),
+      (SELECT count(*) FROM pg_collation c
+         WHERE c.collversion IS NOT NULL AND c.collversion <> chr(32)
+           AND c.collversion <> coalesce(pg_collation_actual_version(c.oid), c.collversion))
+  "' sh "$db" 2>/dev/null)"
+  # "could not measure" is never reported as "nothing stale".
+  case "$row" in
+    [0-9]*' '[0-9]*) : ;;
+    *) echo "preflight-collation: REFUSE — could not read collation staleness from database '$db', so it was not checked." >&2
+       exit 2 ;;
+  esac
+  NDB=$((NDB+1))
+  sdb="${row%% *}"; scoll="${row##* }"
+  STALE_DB=$((STALE_DB+sdb)); STALE_COLL=$((STALE_COLL+scoll))
+  if [ "$sdb" != "0" ] || [ "$scoll" != "0" ]; then
+    STALE_DETAIL="$STALE_DETAIL
+                     $db: $sdb stale database default, $scoll stale pg_collation row(s)"
+  fi
+done
+
+if [ -n "$STALE_DETAIL" ]; then
+  cat >&2 <<MSG2
+preflight-collation: REFUSE — this cluster is already inconsistent with the
+base it is running on, so a swap is not the next thing to fix.
+
+  databases checked $NDB
+  stale database defaults      $STALE_DB
+  stale pg_collation rows      $STALE_COLL
+$STALE_DETAIL
+
+Finish the migration that was started.  Per database, and it is idempotent:
+
+  bash scripts/migrate-collation.sh --yes
+
+or by hand, per database:
+
+  psql -c 'REINDEX DATABASE <db>'
+  psql -c 'ALTER DATABASE <db> REFRESH COLLATION VERSION'
+  psql -c 'ALTER COLLATION <name> REFRESH VERSION'   -- per stale row
+
+Refreshing a collation whose indexes were built under the old version
+records a version that is not true of those indexes, so REINDEX first.
+MSG2
+  exit 1
+fi
+
 if [ -z "$BAD" ]; then
   echo "preflight-collation: ok — all $N databases record collation version $PROVIDES, which $C_IMAGE provides."
+  echo "preflight-collation: ok — $NDB databases are consistent with the base they run on (0 stale database defaults, 0 stale pg_collation rows)."
   exit 0
 fi
 
@@ -112,13 +203,22 @@ under an existing cluster, and nothing here reindexes.
   $NBAD of $N databases disagree:$BAD
 
 Every text index in those databases was built under the recorded version.
-Do not proceed with a plain recreate.  The supported path, per database:
+Do not proceed with a plain recreate.  The supported path:
 
-  1. bash scripts/backup.sh          # and verify it, this is the way back
-  2. docker compose up -d postgres   # the new base
-  3. psql -c 'REINDEX DATABASE <db>'
-  4. psql -c 'ALTER DATABASE <db> REFRESH COLLATION VERSION'
-  5. bin/aistack doctor              # must be clean
+  1. bash scripts/backup.sh              # the way back.  Note that it dumps
+                                         # only the databases named in
+                                         # secrets/app_db_passwords.
+  2. docker compose up -d postgres       # the new base
+  3. bash scripts/migrate-collation.sh --yes
+                                         # REINDEX, then refresh the database
+                                         # default AND the pg_collation rows,
+                                         # per database, for every provider
+  4. bash scripts/preflight-collation.sh # must now say both oks
+  5. bin/aistack doctor                  # must be clean
+
+A base swap can move MORE THAN ONE collation provider: Debian 12 -> 13 moved
+glibc 2.36 -> 2.41 and ICU 153.120 -> 153.128 together.  The glibc number
+above is the trigger, not the whole change.
 
 See NOM-354 for the rehearsal this procedure was measured on, and the
 POSTGRES block in versions.env for the condition that came with the pin.

@@ -90,6 +90,64 @@ Since this release the health check asserts those roles exist, so this state
 reports as **unhealthy** instead of healthy, and `bin/aistack up` prints the
 missing objects rather than only naming Postgres.
 
+## Postgres warns about a collation version mismatch
+
+Every connection prints something like:
+
+```
+WARNING:  database "n8n" has a collation version mismatch
+DETAIL:  The database was created using collation version 2.36, but the
+         operating system provides version 2.41.
+```
+
+This means the postgres **base image changed under an existing PGDATA**. The
+data is fine; what is in doubt is every text index, because each was built
+with the sort order of the old library and nothing has rebuilt them.
+
+**Do not just silence it.** `ALTER DATABASE … REFRESH COLLATION VERSION` on
+its own re-records the version without rebuilding anything, which hides the
+warning and keeps the risk.
+
+Fix it:
+
+```sh
+bash scripts/backup.sh                      # the way back, first
+bash scripts/migrate-collation.sh --dry-run # what is stale; changes nothing
+bash scripts/migrate-collation.sh --yes     # REINDEX, then re-record
+bash scripts/preflight-collation.sh         # must print both oks
+bin/aistack doctor                          # must be clean
+```
+
+It REINDEXes every database, so apps block on those locks while it runs. It is
+idempotent — a second run finds nothing stale and says so.
+
+**A base swap can move more than one collation provider.** MEASURED 2026-10-23
+(NOM-354): Debian 12 → 13 moved glibc 2.36 → 2.41 **and** ICU 153.120 →
+153.128. The warning above names only the glibc one, and `ALTER DATABASE …
+REFRESH COLLATION VERSION` covers only the database default — after doing
+exactly that, this cluster still held **5663 stale `pg_collation` rows**
+(2 libc + 807 ICU per database), and `preflight-collation.sh` reported
+`ok — all 7 databases record collation version 2.41` over the top of them.
+Postgres warns again as soon as such a collation is named explicitly
+(`ORDER BY x COLLATE "en_US.utf8"`). Both scripts now check both catalogs; if
+you do this by hand, `ALTER COLLATION … REFRESH VERSION` per stale row is the
+step people miss.
+
+To see what is actually stale, per database:
+
+```sh
+docker exec aistack-postgres psql -U aistack_admin -d <db> -c "
+  SELECT collname, collversion, pg_collation_actual_version(oid)
+  FROM pg_collation
+  WHERE collversion IS NOT NULL AND collversion <> ''
+    AND collversion <> coalesce(pg_collation_actual_version(oid), collversion)"
+```
+
+**Before you change the base at all**, `scripts/preflight-collation.sh` is
+wired into `update.sh` as step 2 and refuses the swap, so an ordinary
+`aistack update` cannot walk into this. A fresh install is unaffected — there
+is no existing PGDATA to migrate.
+
 ## A health check says unhealthy but the service works
 
 Check the probe before the service. Two of the obvious probes are wrong for
