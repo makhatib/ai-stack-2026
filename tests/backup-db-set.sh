@@ -480,9 +480,12 @@ if [ ! -s "$RBLOCK" ]; then
   or the block between them is empty, so NOTHING WAS MEASURED about what the
   restore hands the drill. Restore the markers, or update this test."
 fi
-grep -q 'record_restored_db' "$RBLOCK" \
-  || refuse "the extracted block does not define record_restored_db(); the
-  markers are around the wrong lines and nothing was measured."
+for fn in is_app_db record_restored_db create_database_sql require_database_present; do
+  grep -q "^$fn()" "$RBLOCK" \
+    || refuse "the extracted block does not define $fn(); the markers are around
+  the wrong lines, or the function moved out from between them, and NOTHING WAS
+  MEASURED about it."
+done
 ok "extracted the shipped classification from scripts/restore.sh ($(grep -c '' "$RBLOCK") lines)"
 
 # $1 = RESTORE_DB_RECORDED, $2 = app dbs, $3 = dumps present.  Sets RECORDED.
@@ -535,6 +538,174 @@ else
   bad "an archive with no dump produced '$RECORDED'"
 fi
 
+# --- 12b. WHOSE DATABASE IT IS, which decides the CREATE DATABASE owner -----
+#
+# The same predicate now has a second caller, and the second one can lose data.
+# `CREATE DATABASE %I OWNER %I` with the database name for both holds only
+# where role and database share a name -- true of the four app databases,
+# FALSE of the kind NOM-378 widened the set to include.  On a restore into a
+# FRESH cluster, `CREATE DATABASE metrics OWNER metrics` fails with "role does
+# not exist", the failure is swallowed, and pg_restore then reports
+# "warnings" -- so a database that IS in the archive does not come back and
+# nothing refuses.  That is this ticket's shape in the disaster-recovery path.
+printf '\n  -- the owner clause, and the refusal when the database is not there --\n'
+
+# $1 = RESTORE_DB_RECORDED, $2 = app dbs, $3 = db.  Sets APPKIND.
+appkind() {
+  APPKIND="$(
+    RESTORE_DB_RECORDED="$1" RESTORE_APP_DBS="$2" DB="$3" bash -c '
+      set -euo pipefail
+      . "$1"
+      if is_app_db "$DB"; then echo app; else echo cluster; fi
+    ' _ "$RBLOCK"
+  )"
+}
+
+# Same arguments.  Sets SQL_OUT to the shipped CREATE DATABASE statement.
+createsql() {
+  SQL_OUT="$(
+    RESTORE_DB_RECORDED="$1" RESTORE_APP_DBS="$2" DB="$3" bash -c '
+      set -euo pipefail
+      . "$1"
+      create_database_sql "$DB"
+    ' _ "$RBLOCK"
+  )"
+}
+
+# SYNTHETIC app names, same as the dump-set fixture above and for the same two
+# reasons: CI invariant I15 fails any second literal copy of the app list, and
+# nothing here depends on which apps exist today -- only on whether a database
+# has a role of its own.  `aistack` and `metrics` are named exactly, because
+# those are the two cases the review is about.
+APPS='app_a app_b'
+
+appkind 1 "$APPS" app_a
+[ "$APPKIND" = app ] && ok "is_app_db: an app database is 'app'" \
+  || bad "is_app_db says app_a is '$APPKIND', expected app"
+appkind 1 "$APPS" aistack
+[ "$APPKIND" = cluster ] && ok "is_app_db: aistack is 'cluster' (owned by aistack_admin)" \
+  || bad "is_app_db says aistack is '$APPKIND', expected cluster"
+appkind 0 "" aistack
+[ "$APPKIND" = app ] \
+  && ok "is_app_db: a legacy archive calls every dump an app, the old behaviour" \
+  || bad "legacy is_app_db says '$APPKIND', expected app"
+
+createsql 1 "$APPS" app_a
+case "$SQL_OUT" in
+  *"CREATE DATABASE %I OWNER %I"*":'db', :'db'"*)
+    ok "an app database is created OWNER <its own role>" ;;
+  *) bad "app CREATE DATABASE is not the OWNER form:"; note "$SQL_OUT" ;;
+esac
+
+# THE DEFECT.  A cluster-kind database must NOT name an owner: omitting the
+# clause makes the owner the connecting superuser, which is what the live
+# cluster has, and is the only form that works where no same-named role exists.
+createsql 1 "$APPS" aistack
+case "$SQL_OUT" in
+  *OWNER*)
+    bad "a cluster-kind database is still created OWNER <db>; on a FRESH cluster"
+    note "that fails with 'role \"aistack\" does not exist' and the dump is lost"
+    note "$SQL_OUT" ;;
+  *"CREATE DATABASE %I"*)
+    ok "a cluster-kind database is created with NO owner clause (the superuser owns it)" ;;
+  *) bad "cluster CREATE DATABASE is not recognisable:"; note "$SQL_OUT" ;;
+esac
+# Reached through a hand-made database, which is the case the widening was
+# written for and the one that is NOT masked by POSTGRES_DB on the live stack.
+createsql 1 "$APPS" metrics
+case "$SQL_OUT" in
+  *OWNER*) bad "an operator-created 'metrics' would still be CREATE ... OWNER metrics" ;;
+  *) ok "and so is an operator-created database with no role of its own" ;;
+esac
+# A legacy archive keeps the old form exactly: every dump in one is an app.
+createsql 0 "" app_a
+case "$SQL_OUT" in
+  *OWNER*) ok "a legacy archive still uses the OWNER form, unchanged" ;;
+  *) bad "legacy CREATE DATABASE lost its OWNER clause:"; note "$SQL_OUT" ;;
+esac
+# The guard and the quoting are not optional in EITHER form: without
+# WHERE NOT EXISTS the create fails on a live stack where the database already
+# exists, and without \gexec the format() string is selected and never run.
+MISSING=""
+for db in app_a aistack; do
+  createsql 1 "$APPS" "$db"
+  for want in "WHERE NOT EXISTS" '\gexec'; do
+    printf '%s' "$SQL_OUT" | grep -qF -- "$want" || MISSING="$MISSING $db:'$want'"
+  done
+done
+[ -z "$MISSING" ] \
+  && ok "both forms keep WHERE NOT EXISTS and \\gexec, so the name is quoted by format()" \
+  || bad "the generated SQL is missing:$MISSING"
+
+# $1 = db_exists outcome (0 = present, 1 = absent), $2 = db.  Sets P_RC/P_OUT.
+# db_exists is overridden AFTER sourcing, so the real one -- which needs docker
+# and a running postgres -- is never called.
+present() {
+  P_OUT="$(
+    EXISTS="$1" DB="$2" bash -c '
+      set -euo pipefail
+      die() { printf "DIE: %s\n" "$*"; exit 9; }
+      . "$1"
+      db_exists() { return "$EXISTS"; }
+      require_database_present "$DB"
+      echo RETURNED-0
+    ' _ "$RBLOCK" 2>&1
+  )"
+  P_RC=$?
+}
+
+present 1 metrics
+if [ "$P_RC" -ne 0 ] && printf '%s' "$P_OUT" | grep -q 'metrics'; then
+  ok "a database that is NOT there after the create attempt REFUSES, and names it"
+else
+  bad "absent database: exit=$P_RC did not refuse naming metrics"; note "$P_OUT"
+fi
+present 0 metrics
+if [ "$P_RC" -eq 0 ] && printf '%s' "$P_OUT" | grep -q 'RETURNED-0'; then
+  ok "and a database that IS there passes quietly, so a normal restore is unaffected"
+else
+  bad "present database: exit=$P_RC"; note "$P_OUT"
+fi
+
+# AND BOTH ARE REACHED FROM THE LOOP, in this order.  The two functions above
+# can be perfectly correct and never called: that is the same silence with more
+# code in it.  The create must come from create_database_sql (not a literal
+# statement left behind beside it), the check must sit between the create and
+# the load, and pg_restore must be the last of the three -- refusing AFTER
+# loading a dump into a database that is not there is not a refusal.
+if python3 - "$ROOT/scripts/restore.sh" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+loop = src.find('for dump in "$WORK"/payload/*.dump')
+if loop == -1:
+    sys.exit(2)                      # the restore loop moved; nothing measured
+body = src[loop:]
+# Anchored on the COMMANDS, not on the words: the loop's own comments mention
+# pg_restore several lines above the call, and matching prose would compare the
+# wrong positions and fail a correct loop.
+WANT = ('create_database_sql "$db"',
+        'require_database_present "$db"',
+        'dc exec -T postgres pg_restore')
+at = [body.find(s) for s in WANT]
+if -1 in at:
+    print("        missing from the restore loop: %s" % ", ".join(
+        w for w, i in zip(WANT, at) if i == -1))
+    sys.exit(1)
+if not at[0] < at[1] < at[2]:
+    print("        the restore loop calls them out of order: %r"
+          % (dict(zip(WANT, at)),))
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  ok "the restore loop creates, then REFUSES if absent, then loads -- in that order"
+else
+  rc=$?
+  [ "$rc" = 2 ] && refuse "the per-dump restore loop was not found in
+  scripts/restore.sh, so nothing was measured about where the refusal sits."
+  bad "the restore loop does not reach the refusal between create and load"
+fi
+
 # --- 13. the read-only path the docs promise actually exists ---------------
 # docs/backup-restore.md tells an operator to run `aistack verify <archive>`.
 # It said so BEFORE the subcommand existed -- a documented capability with no
@@ -547,25 +718,103 @@ grep -q -- '--verify-only' "$ROOT/scripts/restore.sh" \
 grep -qE '^ *verify\) *shift; *cmd_verify' "$ROOT/bin/aistack" \
   && ok "bin/aistack dispatches 'verify'" \
   || bad "bin/aistack does not dispatch 'verify', but docs/backup-restore.md tells operators to run it"
-# It must be restore.sh's own verify phase, not a second implementation that
-# can drift from what a real restore says.
-grep -q 'cmd_verify.*restore\.sh.*--verify-only' "$ROOT/bin/aistack" \
-  && ok "and does it by running restore.sh --verify-only, so the two cannot disagree" \
-  || bad "aistack verify does not delegate to restore.sh --verify-only"
+# READ-ONLY MUST NOT DEPEND ON HOW ARGV LANDS.
+#
+# cmd_verify was `restore.sh "$@" --verify-only`, with the flag AFTER the
+# caller's arguments.  `aistack verify a.enc --into-drill-project` therefore
+# let --into-drill-project consume `--verify-only` as its project name,
+# VERIFY_ONLY stayed 0, and execution continued past the read-only exit.  The
+# request now travels out of band, where another option's argument cannot eat
+# it -- so this asserts BOTH that it is set and that no flag is appended.
+if python3 - "$ROOT/bin/aistack" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r'^cmd_verify\(\)\s*\{(.*?)^\}', src, re.S | re.M) \
+    or re.search(r'^cmd_verify\(\)\s*\{([^\n]*)\}', src, re.M)
+if not m:
+    sys.exit(2)          # nothing measured
+body = m.group(1)
+problems = []
+if "AISTACK_VERIFY_ONLY=1" not in body:
+    problems.append("does not set AISTACK_VERIFY_ONLY=1")
+if "restore.sh" not in body:
+    problems.append("does not delegate to restore.sh")
+if "--verify-only" in body:
+    problems.append("still appends --verify-only, which another option's "
+                    "argument can consume")
+if problems:
+    print("        cmd_verify() " + "; ".join(problems))
+sys.exit(1 if problems else 0)
+PY
+then
+  ok "and does it by running restore.sh with AISTACK_VERIFY_ONLY=1, out of band"
+else
+  rc=$?
+  [ "$rc" = 2 ] && refuse "cmd_verify() was not found in bin/aistack, so nothing
+  was measured about how 'aistack verify' requests read-only."
+  bad "aistack verify's read-only request is argv-dependent (see above)"
+fi
+
+# ...and restore.sh honours that channel.  Driven through the SHIPPED
+# resolution, same as the dump set, so a refactor cannot leave this asserting
+# a copy.
+VBLOCK="$WORK/verifyonly.sh"
+awk '/^# >>> verify-only resolution/{f=1; next} /^# <<< verify-only resolution/{f=0} f' \
+  "$ROOT/scripts/restore.sh" > "$VBLOCK"
+if [ ! -s "$VBLOCK" ]; then
+  refuse "the 'verify-only resolution' markers are not in scripts/restore.sh, or
+  the block between them is empty, so NOTHING WAS MEASURED about whether
+  read-only can be requested out of band. Restore the markers, or update this
+  test."
+fi
+grep -q '^verify_only_requested()' "$VBLOCK" \
+  || refuse "the extracted block does not define verify_only_requested(); the
+  markers are around the wrong lines and nothing was measured."
+
+# $1 = how to set AISTACK_VERIFY_ONLY (unset|0|1), $2 = the flag's value.
+vo() {
+  local env=(env)
+  case "$1" in
+    unset) env=(env -u AISTACK_VERIFY_ONLY) ;;
+    *) env=(env "AISTACK_VERIFY_ONLY=$1") ;;
+  esac
+  VO="$("${env[@]}" FLAG="$2" bash -c '
+      set -euo pipefail
+      . "$1"
+      if verify_only_requested "$FLAG"; then echo READONLY; else echo WRITES; fi
+    ' _ "$VBLOCK" 2>&1)"
+}
+
+vo unset 0
+[ "$VO" = WRITES ] \
+  && ok "no flag and no env: a real restore still writes" \
+  || bad "an unrequested restore resolved to '$VO', expected WRITES"
+vo unset 1
+[ "$VO" = READONLY ] \
+  && ok "--verify-only alone still works for anyone driving restore.sh directly" \
+  || bad "--verify-only resolved to '$VO', expected READONLY"
+vo 1 0
+[ "$VO" = READONLY ] \
+  && ok "AISTACK_VERIFY_ONLY=1 with NO flag is read-only, which is how aistack verify asks" \
+  || bad "AISTACK_VERIFY_ONLY=1 resolved to '$VO', expected READONLY"
+vo 0 0
+[ "$VO" = WRITES ] \
+  && ok "and AISTACK_VERIFY_ONLY=0 is not a read-only request" \
+  || bad "AISTACK_VERIFY_ONLY=0 resolved to '$VO', expected WRITES"
 
 # The exit must sit ABOVE the first thing that writes, so "read-only" is a
 # property of where the code stops rather than a promise in a comment.
 if python3 - "$ROOT/scripts/restore.sh" <<'PY'
 import sys
 src = open(sys.argv[1]).read()
-exit_at = src.find('VERIFY_ONLY" -eq 1')
+exit_at = src.find('if verify_only_requested "$VERIFY_ONLY_FLAG"')
 write_at = src.find('echo "4/4  restoring"')
 sys.exit(0 if exit_at != -1 and write_at != -1 and exit_at < write_at else 1)
 PY
 then
-  ok "the --verify-only exit sits above the restore phase, so it cannot write"
+  ok "the verify-only exit sits above the restore phase, so it cannot write"
 else
-  bad "the --verify-only exit is missing or BELOW the restore phase"
+  bad "the verify-only exit is missing or BELOW the restore phase"
 fi
 
 printf '\n== %d passed, %d failed ==\n\n' "$PASS" "$FAIL"

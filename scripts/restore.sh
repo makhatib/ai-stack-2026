@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 ARCHIVE=""
 DRILL_PROJECT=""
 ASSUME_YES=0
-VERIFY_ONLY=0
+VERIFY_ONLY_FLAG=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -27,13 +27,35 @@ while [ $# -gt 0 ]; do
     # live data at step 4 -- not a question anyone should have to risk
     # asking, and the docs promised an answer that did not exist
     # (NOM-378).
-    --verify-only) VERIFY_ONLY=1; shift ;;
+    --verify-only) VERIFY_ONLY_FLAG=1; shift ;;
     -*) echo "restore: unknown option '$1'" >&2; exit 2 ;;
     *) ARCHIVE="$1"; shift ;;
   esac
 done
 
 die() { printf 'restore: %s\n' "$*" >&2; exit 1; }
+
+# >>> verify-only resolution: tests/backup-db-set.sh extracts and runs these lines >>>
+# READ-ONLY IS REQUESTED OUT OF BAND, not only by an appended flag.
+#
+# bin/aistack used to build the call as `restore.sh "$@" --verify-only`, with
+# the flag AFTER the caller's arguments.  `aistack verify a.enc
+# --into-drill-project` therefore let --into-drill-project consume
+# `--verify-only` as its project name, VERIFY_ONLY stayed 0, and execution
+# continued past the read-only exit.  Whether a command can write must not
+# depend on how argv happens to land, so the environment variable is the
+# primary channel and the flag stays for anyone driving this script directly.
+#
+# Fail-safe direction: an AISTACK_VERIFY_ONLY left set in a shell turns a
+# restore into a verification that changes nothing and says so.  The opposite
+# mistake is the one that costs data.
+verify_only_requested() {
+  # $1 = the --verify-only flag's value.
+  [ "${AISTACK_VERIFY_ONLY:-0}" = "1" ] && return 0
+  [ "${1:-0}" = "1" ] && return 0
+  return 1
+}
+# <<< verify-only resolution <<<
 
 [ -n "$ARCHIVE" ] || die "usage: aistack restore <archive.tar.gz.enc> [--into-drill-project NAME] [--verify-only]"
 [ -f "$ARCHIVE" ] || die "no such archive: $ARCHIVE"
@@ -157,9 +179,9 @@ PY
 # below is the first thing that writes.  Exiting here is non-destructive BY
 # CONSTRUCTION rather than by promise -- there is no branch to get wrong,
 # because the code that overwrites has not been reached yet.
-if [ "$VERIFY_ONLY" -eq 1 ]; then
-  echo "--verify-only: the archive verified and stated its database set above."
-  echo "               Nothing was restored and nothing was changed."
+if verify_only_requested "$VERIFY_ONLY_FLAG"; then
+  echo "verify-only: the archive verified and stated its database set above."
+  echo "             Nothing was restored and nothing was changed."
   exit 0
 fi
 
@@ -242,26 +264,96 @@ if [ -n "$RESTORED_DBS_FILE" ]; then
     || die "cannot write AISTACK_RESTORED_DBS_FILE=$RESTORED_DBS_FILE"
 fi
 
-# A FUNCTION, not three ifs inside the restore loop, for one reason: the loop
-# body also runs pg_restore against a live cluster, so the only way to test the
-# classification inline would be to perform a restore.  Out here,
+# FUNCTIONS, not ifs inside the restore loop, for one reason: the loop body
+# also runs pg_restore against a live cluster, so the only way to test these
+# decisions inline would be to perform a restore.  Out here,
 # tests/backup-db-set.sh extracts these lines and runs THEM -- the drill's
-# expectation is derived from this decision, and a decision nothing can test
-# without downtime is one that gets verified by hoping.
+# expectation and the CREATE DATABASE owner are both derived from the first
+# decision, and a decision nothing can test without downtime is one that gets
+# verified by hoping.
 #
 # >>> restored-db classification: tests/backup-db-set.sh extracts and runs these lines >>>
-record_restored_db() {
-  local db="$1" a is_app=0
-  [ -n "${RESTORED_DBS_FILE:-}" ] || return 0
-  if [ "${RESTORE_DB_RECORDED:-0}" = "1" ]; then
-    for a in ${RESTORE_APP_DBS:-}; do
-      if [ "$a" = "$db" ]; then is_app=1; break; fi
-    done
-  else
-    is_app=1   # legacy archive: every dump in one is an app database
+# IS THIS AN APP DATABASE -- one with its own non-superuser role of the same
+# name?  Read from the ARCHIVE's recorded kinds, never from this checkout.  Two
+# callers depend on it and they must not disagree: what the drill is told to
+# expect a role for, and whose name goes in CREATE DATABASE ... OWNER.
+#
+# A pre-NOM-378 archive records no kinds, and every dump in one is an app
+# database, so the fallback is exactly the old behaviour.
+is_app_db() {
+  local db="$1" a
+  if [ "${RESTORE_DB_RECORDED:-0}" != "1" ]; then
+    return 0   # legacy archive: every dump in one is an app database
   fi
-  [ "$is_app" = "1" ] || return 0
+  for a in ${RESTORE_APP_DBS:-}; do
+    if [ "$a" = "$db" ]; then return 0; fi
+  done
+  return 1
+}
+
+record_restored_db() {
+  local db="$1"
+  [ -n "${RESTORED_DBS_FILE:-}" ] || return 0
+  is_app_db "$db" || return 0
   printf '%s\n' "$db" >> "$RESTORED_DBS_FILE"
+}
+
+# THE OWNER COMES FROM THE KIND, NOT FROM THE DATABASE NAME.
+#
+# This used to be `CREATE DATABASE %I OWNER %I` with :'db' for both, which
+# holds only where role and database share a name.  That is true of the four
+# app databases and false of the kind NOM-378 widened the set to include:
+# `aistack` is owned by aistack_admin, and a non-superuser `aistack` role
+# deliberately does not exist.
+#
+# On the live stack and in the drill project it was masked -- POSTGRES_DB
+# creates `aistack`, so WHERE NOT EXISTS short-circuits.  The reachable case is
+# the one the widening was written for: an operator creates `metrics`, owned by
+# the superuser, it is now dumped, and a restore into a FRESH cluster ran
+# `CREATE DATABASE metrics OWNER metrics` -> role does not exist -> swallowed,
+# then pg_restore reported "warnings" because the database was not there.  A
+# restore onto a fresh host is the disaster-recovery path; it is the last place
+# that should degrade a missing database to a warning.
+#
+# For a cluster-kind database the OWNER clause is omitted, which makes the
+# owner the connecting superuser -- aistack_admin, which is what the live
+# cluster has.  The identifier is still quoted by format() from a psql
+# variable, never spliced by this shell.
+create_database_sql() {
+  local db="$1"
+  if is_app_db "$db"; then
+    printf "SELECT format('%s', :'db', :'db')\n" 'CREATE DATABASE %I OWNER %I'
+  else
+    printf "SELECT format('%s', :'db')\n" 'CREATE DATABASE %I'
+  fi
+  printf '%s\n' "WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db')" '\gexec'
+}
+
+db_exists() {
+  # Over stdin, not -c: psql does not expand :'var' in a -c string -- the same
+  # query through -c fails with `syntax error at or near ":"`, measured.
+  #
+  # Any answer that is not "yes" counts as absent, including one we could not
+  # obtain: under `set -o pipefail` a psql that cannot connect fails the
+  # pipeline and this returns 1.  Refusing on an unanswerable question is the
+  # safe direction, since the alternative is loading a dump into nothing.
+  dc exec -T postgres psql -tAq -U aistack_admin -d postgres -v db="$1" 2>/dev/null <<'SQL' | grep -qx 1
+SELECT 1 FROM pg_database WHERE datname = :'db'
+SQL
+}
+
+# A DUMP THAT CANNOT BE LOADED AT ALL IS NOT A WARNING.  If the create above
+# failed for any reason, pg_restore's own failure is reduced to a one-line
+# "(pg_restore reported warnings)" and a database that IS in the archive does
+# not come back -- this ticket's defect, moved into the restore path.  Refusing
+# here stops with the reason named while the operator is still watching.
+require_database_present() {
+  local db="$1"
+  if db_exists "$db"; then return 0; fi
+  die "'$db' is in this archive but does not exist after the create attempt, so
+$db.dump cannot be loaded.  Databases restored before this one are already in
+place; nothing after it has been touched.  Check the cluster for a missing
+owner role, then re-run the restore -- it is idempotent."
 }
 # <<< restored-db classification <<<
 for dump in "$WORK"/payload/*.dump; do
@@ -283,13 +375,15 @@ for dump in "$WORK"/payload/*.dump; do
   #
   # Guarded by `WHERE NOT EXISTS` rather than `IF NOT EXISTS`, which CREATE
   # DATABASE does not support, and run through \gexec so the identifier is
-  # quoted by format() rather than interpolated by the shell.
-  dc exec -T postgres psql -v ON_ERROR_STOP=1 -U aistack_admin -d postgres \
-    -v db="$db" >/dev/null 2>&1 <<'SQL' || true
-SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'db')
-WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db')
-\gexec
-SQL
+  # quoted by format() rather than interpolated by the shell.  Whose database
+  # it is comes from the archive's recorded kind — see create_database_sql().
+  create_database_sql "$db" \
+    | dc exec -T postgres psql -v ON_ERROR_STOP=1 -U aistack_admin -d postgres \
+        -v db="$db" >/dev/null 2>&1 || true
+  # ... and the create either worked or this restore stops. `|| true` above is
+  # still right — the database usually already exists — but "it is not there
+  # afterwards" is a refusal, not a warning.
+  require_database_present "$db"
   dc exec -T postgres pg_restore --clean --if-exists -U aistack_admin -d "$db" \
     < "$WORK/payload/$db.dump" >/dev/null 2>&1 || echo "      (pg_restore reported warnings for $db)"
 done

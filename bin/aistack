@@ -478,10 +478,20 @@ cmd_backup() { with_lifecycle_lock sh with_helper_lock "$ROOT/scripts/backup.sh"
 cmd_restore(){ with_lifecycle_lock ex "$ROOT/scripts/restore.sh" "$@"; }
 # READ-ONLY, so it takes the SHARED lock, not the exclusive one: asking what
 # an archive contains must not wait behind -- or block -- a backup or an
-# `up`.  It is restore.sh's own verify phase with --verify-only, not a
-# second implementation, so what `verify` says and what a real restore says
-# cannot drift (NOM-378).
-cmd_verify() { with_lifecycle_lock sh "$ROOT/scripts/restore.sh" "$@" --verify-only; }
+# `up`.  It is restore.sh's own verify phase, not a second implementation, so
+# what `verify` says and what a real restore says cannot drift (NOM-378).
+#
+# OUT OF BAND, not an appended flag.  This line was
+# `restore.sh "$@" --verify-only`, which put the flag after the caller's
+# arguments: `aistack verify a.enc --into-drill-project` made
+# --into-drill-project eat `--verify-only` as its project name and execution
+# continued past the read-only exit.  An environment variable cannot be
+# consumed by another option's argument, so read-only no longer depends on how
+# argv lands.
+cmd_verify() {
+  export AISTACK_VERIFY_ONLY=1
+  with_lifecycle_lock sh "$ROOT/scripts/restore.sh" "$@"
+}
 cmd_drill()  { "$ROOT/scripts/drill.sh" "$@"; }
 cmd_doctor() { "$ROOT/scripts/doctor.sh" "$@"; }
 cmd_security_check() { "$ROOT/scripts/security-check.sh" "$@"; }
