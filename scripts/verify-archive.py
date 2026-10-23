@@ -71,6 +71,60 @@ def audit_member(member, target_root):
         raise Refuse(f"member {name!r} resolves outside the target: {resolved}")
 
 
+def dump_members(manifest):
+    """The database names the archive actually carries a dump for."""
+    return sorted(
+        entry["path"][: -len(".dump")]
+        for entry in manifest.get("members", [])
+        if entry.get("path", "").endswith(".dump")
+    )
+
+
+def database_statement(manifest):
+    """What this archive can and cannot return, database-wise (NOM-378).
+
+    WHY THIS IS NOT DERIVED FROM THE MEMBERS.  The members are the dumps that
+    are present, and the thing worth stating is the one that is ABSENT.  An
+    omission has no member, so no inventory of members can express it; the set
+    has to have been RECORDED at backup time or it is not recoverable
+    afterwards.
+
+    A legacy archive -- written before NOM-378, when the dump set was the four
+    app databases and nothing wrote down that it was only four -- therefore
+    reports `recorded: False`.  It does NOT report an empty exclusion list.
+    "Nothing was excluded" and "what was excluded was never written down" are
+    different statements, and an empty list would say the first while meaning
+    the second, which is the same false green this ticket is about.
+    """
+    present = dump_members(manifest)
+    db = manifest.get("databases")
+    if not isinstance(db, dict):
+        return {
+            "recorded": False,
+            "returns": [{"name": n, "kind": "app"} for n in present],
+            "does_not_return": [],
+            "note": (
+                "this archive predates NOM-378 and did not record its database "
+                "set: the dumps it carries are listed, but what it left out was "
+                "never written down and cannot be reconstructed from it"
+            ),
+        }
+    dumped = [e for e in db.get("dumped", []) if isinstance(e, dict) and e.get("name")]
+    return {
+        "recorded": True,
+        "returns": sorted(
+            ({"name": e["name"], "kind": e.get("kind", "app")} for e in dumped),
+            key=lambda e: e["name"],
+        ),
+        "does_not_return": [
+            {"name": e["name"], "reason": e.get("reason", "no reason recorded")}
+            for e in db.get("excluded", [])
+            if isinstance(e, dict) and e.get("name")
+        ],
+        "note": None,
+    }
+
+
 def verify(payload_dir, hmac_key_path, archive_label="archive"):
     mpath = os.path.join(payload_dir, "MANIFEST.json")
     hpath = os.path.join(payload_dir, "MANIFEST.hmac")
@@ -132,6 +186,35 @@ def verify(payload_dir, hmac_key_path, archive_label="archive"):
                 f"(expected {entry['sha256'][:16]}…, got {actual[:16]}…)"
             )
 
+    # THE RECORDED DATABASE SET MUST MATCH THE DUMPS THAT ARE THERE (NOM-378).
+    #
+    # Without this, `databases` is prose inside a JSON file: it could claim a
+    # database the archive does not carry, restore.sh would print that claim,
+    # and the restore would quietly not restore it -- which is the defect this
+    # block was added for, moved one layer up into the thing that describes it.
+    # Checked here, under the HMAC and before any extraction, so a disagreement
+    # refuses rather than reports.
+    db = manifest.get("databases")
+    if isinstance(db, dict):
+        claimed = sorted(
+            {e["name"] for e in db.get("dumped", [])
+             if isinstance(e, dict) and e.get("name")}
+        )
+        actual_dumps = dump_members(manifest)
+        if claimed != actual_dumps:
+            raise Refuse(
+                "the manifest's recorded database set disagrees with the dumps "
+                f"it lists: recorded {claimed}, dumps present {actual_dumps}"
+            )
+        overlap = sorted(
+            {e["name"] for e in db.get("excluded", [])
+             if isinstance(e, dict) and e.get("name")}.intersection(actual_dumps)
+        )
+        if overlap:
+            raise Refuse(
+                f"the manifest lists {overlap} as both dumped and excluded"
+            )
+
     return manifest
 
 
@@ -157,6 +240,9 @@ def main():
         "created_at": manifest.get("created_at"),
         "members": len(manifest.get("members", [])),
         "excluded_by_design": manifest.get("excluded_by_design"),
+        # So `aistack verify <archive>` answers "which databases is this?"
+        # without the operator having to decrypt and read the manifest by hand.
+        "databases": database_statement(manifest),
     }, indent=2))
     return 0
 

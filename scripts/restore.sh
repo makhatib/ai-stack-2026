@@ -94,6 +94,57 @@ echo "3/4  verifying (set equality, digests, HMAC) — BEFORE anything is overwr
 AISTACK_ROOT="$ROOT" python3 "$ROOT/scripts/verify-archive.py" \
   --payload-dir "$WORK/payload" --hmac-key "$HMAC_KEY" || die "archive refused; nothing was changed"
 
+# --- WHAT THIS ARCHIVE CAN AND CANNOT RETURN (NOM-378) ----------------------
+#
+# Printed BEFORE the confirmation prompt below, because this is exactly the
+# thing an operator needs in front of them while deciding to overwrite live
+# data, and after verification, because an unverified manifest is not a
+# statement about anything.
+#
+# It is read from the ARCHIVE, never from this checkout: the archive is the
+# authoritative statement of what there was to restore, and a four-app
+# checkout must be able to restore a five-app archive.  scripts/backup.sh
+# records the set; scripts/verify-archive.py owns the one function that reads
+# it, so this script and `aistack verify` cannot drift in what they say.
+DBSTATE="$WORK/dbstate.sh"
+AISTACK_ROOT="$ROOT" python3 - "$WORK/payload/MANIFEST.json" "$DBSTATE" <<'PY' || die "could not read the archive's database set; nothing was changed"
+import importlib.util, json, os, shlex, sys
+
+root = os.environ.get("AISTACK_ROOT") or os.getcwd()
+spec = importlib.util.spec_from_file_location(
+    "verify_archive", os.path.join(root, "scripts", "verify-archive.py"))
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+manifest = json.load(open(sys.argv[1]))
+st = mod.database_statement(manifest)
+
+apps = [e["name"] for e in st["returns"] if e.get("kind") == "app"]
+others = [e["name"] for e in st["returns"] if e.get("kind") != "app"]
+
+print("    databases this archive RETURNS:")
+for e in st["returns"]:
+    print("      %-14s (%s)" % (e["name"], e.get("kind", "app")))
+if st["does_not_return"]:
+    print("    databases it does NOT return, by design:")
+    for e in st["does_not_return"]:
+        print("      %-14s %s" % (e["name"], e["reason"]))
+    print("    Anything stored directly in those is not in this archive and")
+    print("    will be whatever initdb created, not what you had.")
+elif not st["recorded"]:
+    print("    this archive does NOT state what it left out:")
+    print("      %s" % st["note"])
+    print("    Treat the list above as the complete contents and nothing more;")
+    print("    in particular a pre-NOM-378 archive carries no `aistack` dump.")
+
+with open(sys.argv[2], "w") as fh:
+    fh.write("RESTORE_APP_DBS=%s\n" % shlex.quote(" ".join(apps)))
+    fh.write("RESTORE_OTHER_DBS=%s\n" % shlex.quote(" ".join(others)))
+    fh.write("RESTORE_DB_RECORDED=%s\n" % ("1" if st["recorded"] else "0"))
+PY
+# shellcheck source=/dev/null
+. "$DBSTATE"
+
 echo "4/4  restoring"
 
 if [ -n "$DRILL_PROJECT" ]; then
@@ -154,6 +205,19 @@ dc exec -T postgres psql -U aistack_admin -d postgres < "$WORK/payload/globals.s
 # five-app archive whose fifth role never came back: the fifth app could
 # neither be counted present nor counted missing.  Unset in normal operation,
 # in which case nothing is written and nothing changes.
+#
+# IT IS THE APP DATABASES, NOT EVERY RESTORED DATABASE (NOM-378).  The set this
+# loop walks now includes `aistack`, which is the POSTGRES_DB and is owned by
+# the superuser -- there is no non-superuser `aistack` role and there should
+# not be one.  Writing it here would make the drill look for a role that
+# correctly does not exist and fail a good restore.
+#
+# The split still comes from the ARCHIVE (the manifest's recorded kinds), not
+# from a list retyped here and not from this checkout's secrets, so the
+# property NOM-307 bought is intact: a fifth app in the archive gets its role
+# asserted without anyone editing the drill.  A pre-NOM-378 archive records no
+# kinds, and every dump in one is an app database, so RESTORE_DB_RECORDED=0
+# falls back to exactly the old behaviour.
 RESTORED_DBS_FILE="${AISTACK_RESTORED_DBS_FILE:-}"
 if [ -n "$RESTORED_DBS_FILE" ]; then
   : > "$RESTORED_DBS_FILE" \
@@ -167,7 +231,17 @@ for dump in "$WORK"/payload/*.dump; do
   # fails to load is still a database the drill expects a role for.  An
   # expectation that shrinks when the thing it measures fails is not one.
   if [ -n "$RESTORED_DBS_FILE" ]; then
-    printf '%s\n' "$db" >> "$RESTORED_DBS_FILE"
+    is_app=0
+    if [ "${RESTORE_DB_RECORDED:-0}" = "1" ]; then
+      for a in ${RESTORE_APP_DBS:-}; do
+        if [ "$a" = "$db" ]; then is_app=1; break; fi
+      done
+    else
+      is_app=1   # legacy archive: every dump in one is an app database
+    fi
+    if [ "$is_app" = "1" ]; then
+      printf '%s\n' "$db" >> "$RESTORED_DBS_FILE"
+    fi
   fi
   # CREATE THE DATABASE IF IT IS NOT THERE.
   #

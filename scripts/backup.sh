@@ -5,12 +5,17 @@
 # is a rollback aid.  No DR claim is permitted without a restore from an
 # off-host copy, which is B3 and is 1.0.
 #
-# IN THE SET:  pg_dump --format=custom per database, pg_dumpall --globals-only,
-#              secrets/ (including N8N_ENCRYPTION_KEY), .env + versions.env +
-#              config/, and tars of n8n-data, openwebui-data, caddy-data,
-#              authelia-data.
-# EXCLUDED BY DESIGN, AND SAID OUT LOUD: every model volume.  They are
-#              re-downloadable and are over 90% of the bytes.
+# IN THE SET:  pg_dump --format=custom for every CONNECTABLE database the
+#              cluster reports, minus the two named below; pg_dumpall
+#              --globals-only; secrets/ (including N8N_ENCRYPTION_KEY), .env +
+#              versions.env + config/, and tars of n8n-data, openwebui-data,
+#              caddy-data, authelia-data.
+# EXCLUDED BY DESIGN, AND SAID OUT LOUD: every model volume (re-downloadable,
+#              over 90% of the bytes), and the `postgres` and `template1`
+#              databases.  The database exclusions are recorded in
+#              MANIFEST.json so the restore path can state them -- see the
+#              long note at the derivation below for why each is left out and
+#              what is consequently not returned (NOM-378).
 #
 # The integrity design, and why each piece is there:
 #   * MANIFEST.json lists EVERY member with its path and SHA-256.
@@ -83,15 +88,122 @@ echo "Backing up to $DEST/aistack-$STAMP.tar.gz.enc"
 # --- postgres ---------------------------------------------------------------
 echo "  pg_dumpall --globals-only"
 dc exec -T postgres pg_dumpall --globals-only -U aistack_admin > "$STAGE/globals.sql"
-# WHICH databases, DERIVED — not another literal copy of the app list.  A
-# hardcoded list fails here in the worst available direction: an app added to
-# gen-secrets.sh but not to this line is an app whose database is simply
-# absent from an archive that reports success, and nothing says so until a
-# restore comes up short.  The preflight above has already asserted every file
-# under secrets/ is readable, so this read cannot be the thing that fails.
+
+# The cluster's OWN answer to "what databases are here".  datallowconn is the
+# filter rather than datistemplate: it is what pg_dump can actually read, and
+# it is what excludes template0 (datallowconn = false) without naming it.
+#
+# Defined ABOVE the derivation block below, and deliberately outside it, so
+# tests/backup-db-set.sh can drive that block against a synthetic cluster
+# without a postgres and without this repo's secrets.
+cluster_databases() {
+  dc exec -T postgres psql -tAq -U aistack_admin -d postgres \
+    -c 'SELECT datname FROM pg_database WHERE datallowconn ORDER BY 1' \
+    | tr -d '\r'
+}
+
+# --- WHICH databases, and the ones that are NOT in the set (NOM-378) --------
+#
+# DERIVED FROM THE CLUSTER.  This used to read the key set of
+# secrets/app_db_passwords, which was itself a deliberate fix for a hardcoded
+# list (NOM-307) and is still the right source for WHICH APPS EXIST.  But it
+# answers a different question than the one a backup asks: "the app databases"
+# and "the databases in this cluster" were assumed to be the same set.
+#
+# Measured 2026-10-23: the cluster held SEVEN connectable databases and every
+# archive in backups/ contained FOUR.  `aistack` -- the POSTGRES_DB itself,
+# holding aistack_slot and action_state_edges -- was in none of them, and
+# NOTHING SAID SO.  restore.sh verifies an archive against its own manifest,
+# and the manifest is a faithful list of what this script chose to include, so
+# the check and the gap agreed with each other and nothing failed.
+#
+# So the candidate set is now the cluster's answer, which also means a database
+# created outside this repo is backed up rather than silently skipped.
+# Anything left out is left out BY NAME, WITH A REASON, is recorded in
+# MANIFEST.json so the restore path can state it, and is asserted by
+# tests/backup-db-set.sh so the set cannot drift silently again.
+#
+# NOT IN THE SET, DELIBERATELY -- and `pg_dumpall --globals-only` above already
+# carries roles and passwords, so those survive either way:
+#
+#   postgres   The maintenance database.  initdb recreates it, and restore.sh
+#              applies globals.sql THROUGH it, so restoring over it would mean
+#              overwriting the database the restore is connected to.  Anything
+#              an operator stored in `postgres` itself is NOT returned.
+#   template1  The template every new database is cloned from.  It cannot be
+#              dropped while it is the default template, so `pg_restore
+#              --clean` into it is a cluster-wide hazard rather than a restore.
+#              This stack installs its extensions per-database
+#              (config/postgres/init/), so template1 here is the vanilla initdb
+#              one.  Objects an operator added to template1 are NOT returned.
+#
+# template0 is not in this list because it is never a candidate: datallowconn
+# is false, pg_dump cannot read it, and initdb recreates it.
+#
+# >>> db-set derivation: tests/backup-db-set.sh extracts and runs these lines >>>
+DB_EXCLUDE=(
+  "postgres|the maintenance database; initdb recreates it, and a restore applies globals.sql through it"
+  "template1|the template new databases are cloned from; it cannot be dropped while it is the default template"
+)
+
+CLUSTER_DBS="$(cluster_databases)" \
+  || die "cannot ask postgres which databases exist — is the stack up? Refusing to guess the set from secrets/."
+[ -n "$CLUSTER_DBS" ] \
+  || die "postgres reported no connectable databases; refusing to write an archive with no database in it"
+
+# STILL READ, for two jobs that are not "which databases to dump": it says
+# which of them is an APP -- one with its own non-superuser role, which is the
+# set scripts/drill.sh asserts over -- and it is the half of the NOM-307
+# coupling that catches an app whose database never got created.
 APP_DBS="$(sed -n 's/^\([A-Za-z0-9_][A-Za-z0-9_]*\)=.*/\1/p' "$ROOT/secrets/app_db_passwords" | sort -u)"
 [ -n "$APP_DBS" ] || die "secrets/app_db_passwords names no databases; run scripts/gen-secrets.sh"
-for db in $APP_DBS; do
+
+# A DECLARED APP WITH NO DATABASE IS A FAILURE, NOT A SMALLER BACKUP.  Deriving
+# the set from the cluster alone would mean an app whose database was never
+# created is simply absent from a successful archive -- the same shape this
+# ticket is about, one level over.  The cluster says what to dump; the
+# declaration says what must be there to dump.
+MISSING_APPS=""
+for app in $APP_DBS; do
+  printf '%s\n' "$CLUSTER_DBS" | grep -qxF -- "$app" || MISSING_APPS="$MISSING_APPS $app"
+done
+[ -z "$MISSING_APPS" ] || die "secrets/app_db_passwords declares app(s) with no database in the cluster:$MISSING_APPS
+Run 'bin/aistack db-init' to create them. Refusing to write an archive that is
+missing a declared app without saying so."
+
+DUMP_DBS=""; DUMP_APP=""; DUMP_CLUSTER=""; DB_SKIPPED=""
+while IFS= read -r db; do
+  [ -n "$db" ] || continue
+  skip=""
+  for e in "${DB_EXCLUDE[@]}"; do
+    [ "$db" = "${e%%|*}" ] && { skip=1; break; }
+  done
+  if [ -n "$skip" ]; then DB_SKIPPED="$DB_SKIPPED $db"; continue; fi
+  # The name is about to become both a `pg_dump -d` argument and the filename
+  # "$STAGE/$db.dump", so anything outside [A-Za-z0-9_] is refused rather than
+  # spliced -- same rule as config/postgres/healthcheck.sh and drill.sh (S06).
+  case "$db" in
+    *[!A-Za-z0-9_]*)
+      die "postgres reported a database named '$db', which is not a bare identifier; refusing to build a member path from it" ;;
+  esac
+  DUMP_DBS="$DUMP_DBS $db"
+  if printf '%s\n' "$APP_DBS" | grep -qxF -- "$db"; then
+    DUMP_APP="$DUMP_APP $db"
+  else
+    DUMP_CLUSTER="$DUMP_CLUSTER $db"
+  fi
+done <<EOF
+$CLUSTER_DBS
+EOF
+
+[ -n "$DUMP_DBS" ] || die "every connectable database is on the exclusion list; there is nothing to dump"
+# <<< db-set derivation <<<
+
+echo "  databases: dumping$DUMP_DBS"
+if [ -n "$DB_SKIPPED" ]; then
+  echo "  NOT dumped, by design:$DB_SKIPPED (recorded in MANIFEST.json)"
+fi
+for db in $DUMP_DBS; do
   echo "  pg_dump $db"
   dc exec -T postgres pg_dump --format=custom -U aistack_admin -d "$db" > "$STAGE/$db.dump"
 done
@@ -136,6 +248,17 @@ tar czf "$STAGE/secrets.tar.gz" -C "$ROOT" secrets
 
 # --- the member digest inventory -------------------------------------------
 echo "  building MANIFEST.json"
+# The database decision travels WITH the archive, under the HMAC.
+#
+# `members` can only ever list what is present, and the whole defect this
+# ticket is about is a thing that is ABSENT: an omission has no member, so an
+# inventory of members can never state one.  Recording the set here is what
+# lets restore.sh tell its caller which databases the archive cannot return,
+# instead of the caller inferring "all of them" from a manifest that is
+# internally consistent and silent.
+AISTACK_DB_APP="$DUMP_APP" \
+AISTACK_DB_CLUSTER="$DUMP_CLUSTER" \
+AISTACK_DB_EXCLUDED="$(printf '%s\n' "${DB_EXCLUDE[@]}")" \
 python3 - "$STAGE" "$STAMP" <<'PY'
 import hashlib, json, os, sys
 stage, stamp = sys.argv[1], sys.argv[2]
@@ -149,6 +272,30 @@ for name in sorted(os.listdir(stage)):
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     members.append({"path": name, "sha256": h.hexdigest(), "bytes": os.path.getsize(p)})
+
+
+def env_names(var):
+    return sorted(set(os.environ.get(var, "").split()))
+
+
+# "app" means a database with its own non-superuser role, which is the set
+# scripts/drill.sh asserts one role apiece over.  "cluster" means dumped but
+# owned by the superuser -- `aistack` is the POSTGRES_DB itself.  The
+# distinction is here rather than in the drill because the drill must derive
+# its expectation from the archive, and a role expectation for `aistack` would
+# look for a non-superuser `aistack` role that correctly does not exist.
+databases = {
+    "dumped": sorted(
+        [{"name": n, "kind": "app"} for n in env_names("AISTACK_DB_APP")]
+        + [{"name": n, "kind": "cluster"} for n in env_names("AISTACK_DB_CLUSTER")],
+        key=lambda d: d["name"],
+    ),
+    "excluded": [
+        {"name": line.split("|", 1)[0], "reason": line.split("|", 1)[1]}
+        for line in os.environ.get("AISTACK_DB_EXCLUDED", "").splitlines()
+        if "|" in line
+    ],
+}
 manifest = {
     "schema": "aistack.backup.v1",
     "created_at": stamp,
@@ -158,6 +305,7 @@ manifest = {
         "aistack-whisper-models", "aistack-kokoro-models", "aistack-comfyui-data",
     ],
     "excluded_reason": "model weights are re-downloadable and are >90% of the bytes",
+    "databases": databases,
     "members": members,
 }
 # Canonicalised: sorted keys, no insignificant whitespace.  The HMAC is taken

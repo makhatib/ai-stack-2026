@@ -19,13 +19,35 @@ different host**. Until then it is a file you hope is good.
 
 ## What is in it
 
-In: every database (dumped individually, plus global roles), `secrets/`
-including the n8n encryption key, your `.env`, your pins, your `config/`, and
-the data volumes for n8n, Open WebUI, Caddy and Authelia.
+In: every **connectable** database except the two named below (dumped
+individually, plus global roles), `secrets/` including the n8n encryption key,
+your `.env`, your pins, your `config/`, and the data volumes for n8n, Open
+WebUI, Caddy and Authelia.
 
 Out, deliberately: **every model volume**. They are re-downloadable and they
 are over 90% of the bytes. The manifest inside each archive lists what was
 excluded and why, so this is checkable rather than a promise.
+
+Also out, deliberately, and this one is about databases:
+
+| database | why it is not dumped | what you therefore do not get back |
+|---|---|---|
+| `postgres` | the maintenance database; `initdb` recreates it, and a restore applies the global roles *through* it | anything stored directly in `postgres` |
+| `template1` | the template new databases are cloned from; it cannot be dropped while it is the default template, so restoring into it is a cluster-wide hazard rather than a restore | objects an operator added to `template1` so new databases would inherit them |
+
+`template0` is never a candidate: it is not connectable, so `pg_dump` cannot
+read it, and `initdb` recreates it.
+
+Both exclusions are recorded **inside** each archive, so the restore path can
+state them rather than leaving you to infer the set. `aistack verify
+<archive>` and `aistack restore` both print which databases the archive
+returns and which it does not.
+
+Archives written before this was recorded (anything from before 2026-10-23)
+dumped only the four app databases — `authelia`, `litellm`, `n8n`,
+`openwebui` — and did not carry `aistack`. Restoring one says so: it reports
+that the archive does not state what it left out, which is the honest answer
+rather than an empty exclusion list.
 
 The n8n encryption key is in the set on purpose. Without it, every credential
 in the database dump is undecryptable, and a backup that restores a workflow
