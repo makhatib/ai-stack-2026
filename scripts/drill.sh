@@ -2,8 +2,9 @@
 # AI Stack 2026 — the Tier-A restore drill (B4).
 #
 # Restores an UNTAMPERED backup into a FRESH THROWAWAY PROJECT and asserts the
-# data came back: workflow list, CREDENTIAL DECRYPTION, documents, and user
-# permissions.  Then destroys the project.
+# data came back: workflow list, CREDENTIAL DECRYPTION, documents, user
+# permissions, and the CONTENTS of the cluster-kind databases.  Then destroys
+# the project.
 #
 # It validates RESTORABILITY and the documentation says exactly that.  It does
 # NOT claim containment, and it inherits the Tier-A host-listener residual
@@ -107,7 +108,14 @@ ok "lifecycle lock held EXCLUSIVE; no serving container or bridge exists"
 RESTORED_DBS="$(mktemp "${TMPDIR:-/tmp}/aistack-drill-dbs.XXXXXX")"
 export AISTACK_RESTORED_DBS_FILE="$RESTORED_DBS"
 
-trap 'echo; echo "Destroying the drill project..."; clean; rm -f "$RESTORED_DBS"; exec {LFD}>&-' EXIT
+# ...AND THE KIND OF EACH, for assertion 5.  The file above is app databases
+# only; this one is `<kind> <name>` for every database the restore walked, so
+# the cluster-kind ones -- which have no role to assert and were therefore
+# asserted about in no way at all -- can be asserted over too (NOM-392).
+RESTORED_KINDS="$(mktemp "${TMPDIR:-/tmp}/aistack-drill-kinds.XXXXXX")"
+export AISTACK_RESTORED_DB_KINDS_FILE="$RESTORED_KINDS"
+
+trap 'echo; echo "Destroying the drill project..."; clean; rm -f "$RESTORED_DBS" "$RESTORED_KINDS"; exec {LFD}>&-' EXIT
 
 # --- restore into the throwaway project ------------------------------------
 echo
@@ -247,6 +255,100 @@ else
     ok "all $EXPECTED app roles restored ($(printf '%s' "$APPS" | tr '\n' ' ')), none of them a superuser"
   else
     bad "app roles after restore: $PRESENT/$EXPECTED present${MISSING:+; MISSING:$MISSING}${SUPER:+; SUPERUSER:$SUPER}${UNANSWERED:+; NOT ANSWERED:$UNANSWERED}"
+  fi
+
+  # 5. CLUSTER-KIND DATABASES — PRESENT, AND NOT EMPTY.
+  #
+  # Assertions 1 and 2 query `n8n`, 3 queries `openwebui`, and 4 walks the APP
+  # databases.  Nothing above this line touches `aistack` — the stack's own
+  # control database, which NOM-378 put into the archive precisely because it
+  # had been in none of them.  A pg_restore that loaded nothing into it printed
+  #
+  #     (pg_restore reported warnings for aistack)
+  #
+  # from the `|| echo` in restore.sh's loop, DRILL_RC stayed 0, and this script
+  # appended PASS to drill-log.txt.  That is the parent ticket's shape exactly:
+  # a dump that is in the archive, does not come back, and is a warning.
+  #
+  # require_database_present() is not this assertion.  It proves the database
+  # EXISTS, which is what an empty one does too; it is a refusal aimed at a
+  # failed CREATE, not at a failed load.
+  #
+  # SO COUNT TABLES AND ROWS, BOTH.  Tables alone pass a schema-only restore,
+  # which is a database that did not come back with anything in it.  Neither
+  # the names nor the expected counts are typed here: the set is the
+  # cluster-kind half of what restore.sh's loop WALKED (read from the archive,
+  # same as assertion 4's), and what is counted is whatever that database
+  # turns out to hold.
+  CLUSTER_DBS="$(awk '$1 == "cluster" { print $2 }' "$RESTORED_KINDS" 2>/dev/null | sort -u)"
+  LEGACY_DBS="$(awk '$1 == "legacy"  { print $2 }' "$RESTORED_KINDS" 2>/dev/null | sort -u)"
+  if [ -n "$CLUSTER_DBS" ]; then
+    for db in $CLUSTER_DBS; do
+      # Same filter and same reason as assertion 4: the name is spliced into
+      # SQL below, so anything outside [A-Za-z0-9_] is refused rather than
+      # quoted-and-hoped (S06).
+      case "$db" in
+        *[!A-Za-z0-9_]*)
+          bad "restore reported '$db' as a restored cluster-kind database, which is not a bare identifier"
+          continue ;;
+      esac
+      # `checked:` sentinel again: a psql that answers NOTHING — container
+      # gone, connection refused, query rejected — must not read as "nothing
+      # is wrong with this database".
+      E=$(q postgres "SELECT 'checked:' || CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname = '$db') THEN 'present' ELSE 'missing' END;")
+      case "$E" in
+        checked:present) ;;
+        checked:missing)
+          bad "cluster-kind database '$db' is in the archive but is not in the cluster after the restore"
+          continue ;;
+        *)
+          bad "cluster-kind database '$db': the cluster did not answer whether it exists"
+          continue ;;
+      esac
+      # Counted over the database's own catalog rather than a table list typed
+      # here, so this says "it came back with contents" for any cluster-kind
+      # database an operator adds, not only for the one that exists today.
+      # query_to_xml runs a real count per table — reltuples is -1 until
+      # something analyses, and a restore has not.
+      C=$(q "$db" "SELECT 'checked:'
+             || (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE c.relkind IN ('r','p') AND n.nspname NOT IN ('pg_catalog','information_schema')
+                    AND n.nspname !~ '^pg_toast')
+             || ':'
+             || (SELECT coalesce(sum(cnt), 0) FROM (
+                   SELECT (xpath('/row/c/text()', query_to_xml(
+                             format('SELECT count(*) AS c FROM %I.%I', n.nspname, c.relname),
+                             false, true, '')))[1]::text::bigint AS cnt
+                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname !~ '^pg_toast') s);")
+      case "$C" in checked:*:*) ;; *)
+        bad "cluster-kind database '$db' exists but did not answer how much is in it"
+        continue ;;
+      esac
+      REST="${C#checked:}"; TABLES="${REST%%:*}"; ROWS="${REST#*:}"
+      case "$TABLES$ROWS" in *[!0-9]*)
+        bad "cluster-kind database '$db' answered '$C', which is not two counts"
+        continue ;;
+      esac
+      if [ "$TABLES" -eq 0 ]; then
+        bad "cluster-kind database '$db' restored with NO TABLE — it exists and is empty, which is the warning this assertion exists to turn into a failure"
+      elif [ "$ROWS" -eq 0 ]; then
+        bad "cluster-kind database '$db' restored $TABLES table(s) and 0 rows — schema only, so its contents did not come back"
+      else
+        ok "cluster-kind database '$db' restored and is not empty ($TABLES tables, $ROWS rows)"
+      fi
+    done
+  elif [ -n "$LEGACY_DBS" ]; then
+    # A pre-NOM-378 archive records no database kinds and carries no `aistack`
+    # dump, so there is genuinely no cluster-kind database to assert over.  Say
+    # so in those words rather than silently skipping: "nothing to check" and
+    # "checked nothing" print the same on a green run.
+    echo "  [note] this archive records no database kinds (pre-NOM-378), so it"
+    echo "         carries no cluster-kind database and none was asserted."
+    echo "         Drill a current archive to exercise assertion 5."
+  else
+    bad "the restore recorded no cluster-kind database and did not report a legacy archive either, so assertion 5 checked nothing; an expectation of nothing cannot fail"
   fi
 fi
 

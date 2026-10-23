@@ -480,7 +480,7 @@ if [ ! -s "$RBLOCK" ]; then
   or the block between them is empty, so NOTHING WAS MEASURED about what the
   restore hands the drill. Restore the markers, or update this test."
 fi
-for fn in is_app_db record_restored_db create_database_sql require_database_present; do
+for fn in is_app_db restored_db_kind record_restored_db create_database_sql require_database_present; do
   grep -q "^$fn()" "$RBLOCK" \
     || refuse "the extracted block does not define $fn(); the markers are around
   the wrong lines, or the function moved out from between them, and NOTHING WAS
@@ -536,6 +536,113 @@ if [ -z "${RECORDED// /}" ]; then
   ok "and an archive with no dump hands over nothing, which drill.sh refuses as vacuous"
 else
   bad "an archive with no dump produced '$RECORDED'"
+fi
+
+# --- 12a. AND WHAT IT HANDS THE DRILL ABOUT THE DATABASES IT DROPS ---------
+#
+# The expectation above is app databases only, and it has to be: the drill
+# asserts a non-superuser role per entry and a cluster-kind database has none.
+# But "not in the role expectation" and "not mentioned at all" were the same
+# line, so `aistack` could restore EMPTY and the drill still appended PASS --
+# the parent ticket's shape, inside the thing written to catch it (NOM-392).
+#
+# So record_restored_db() writes a SECOND file, `<kind> <name>` per line, and
+# the kind is a recorded fact rather than an absence.  Two properties are under
+# test and they are different: that a cluster-kind database reaches the drill
+# at all, and that an archive which states NO kinds is distinguishable from one
+# whose cluster-kind recording broke.  Both produce an empty cluster set; only
+# the first is allowed to be a note instead of a failure.
+printf '\n  -- the kinds the restore hands the drill --\n'
+
+# $1 = RESTORE_DB_RECORDED, $2 = app dbs, $3 = dumps present.  Sets KINDS to
+# the file contents with newlines turned into ';' so it can be matched whole,
+# and APPSIDE to what the same call wrote to the app expectation.
+kinds() {
+  local kout="$WORK/kinds.txt" aout="$WORK/restored2.txt"
+  : > "$kout"; : > "$aout"
+  KINDS="$(
+    RESTORE_DB_RECORDED="$1" RESTORE_APP_DBS="$2" \
+    RESTORED_DB_KINDS_FILE="$kout" RESTORED_DBS_FILE="$aout" \
+    DUMPS="$3" bash -c '
+      set -uo pipefail
+      . "$1"
+      for db in $DUMPS; do record_restored_db "$db"; done
+      tr "\n" ";" < "$RESTORED_DB_KINDS_FILE"
+    ' _ "$RBLOCK"
+  )"
+  APPSIDE="$(tr '\n' ' ' < "$aout")"
+}
+
+# A current archive: the cluster-kind database is named, with its kind.
+kinds 1 "app_a app_b" "aistack app_a app_b"
+if [ "$KINDS" = "cluster aistack;app app_a;app app_b;" ]; then
+  ok "a current archive hands over the kinds: $KINDS"
+else
+  bad "current archive hands over '$KINDS', expected 'cluster aistack;app app_a;app app_b;'"
+fi
+# Stated separately because it is the assertion the ticket is about: the drill
+# cannot assert over `aistack` if nothing ever tells it `aistack` was restored.
+case "$KINDS" in
+  *"cluster aistack"*) ok "aistack reaches the drill as cluster-kind, so assertion 5 has something to assert" ;;
+  *) bad "aistack does NOT reach the drill; a cluster-kind database can restore empty and pass" ;;
+esac
+# ...and the app expectation is BYTE-FOR-BYTE what it was before the second
+# file existed.  A change that fixed the gap by widening the role expectation
+# would fail a good restore, which is the failure NOM-378 wrote the filter for.
+if [ "$APPSIDE" = "app_a app_b " ]; then
+  ok "and the app-role expectation is unchanged by the second file: $APPSIDE"
+else
+  bad "the app-role expectation changed to '$APPSIDE', expected 'app_a app_b '"
+fi
+
+# A LEGACY archive: every dump is `legacy`, and NOTHING is `cluster`.  This is
+# the line that lets drill.sh treat an empty cluster set as a note here and as
+# a failure everywhere else.
+kinds 0 "" "app_a app_b"
+if [ "$KINDS" = "legacy app_a;legacy app_b;" ]; then
+  ok "a pre-NOM-378 archive says 'legacy', so the drill knows it was never told"
+else
+  bad "legacy archive hands over '$KINDS', expected 'legacy app_a;legacy app_b;'"
+fi
+case "$KINDS" in
+  *cluster*) bad "a legacy archive claimed a cluster-kind database; the drill would assert over a database the archive never recorded" ;;
+  *) ok "and nothing in a legacy archive is claimed as cluster-kind" ;;
+esac
+
+# The kinds file is OPT-IN.  With the variable unset nothing is written and the
+# app expectation is exactly what it always was -- `aistack verify` and a
+# plain `aistack restore` must not change behaviour because the drill wanted a
+# second file.
+UNSET_OUT="$(
+  RESTORE_DB_RECORDED=1 RESTORE_APP_DBS="app_a app_b" \
+  RESTORED_DBS_FILE="$WORK/restored3.txt" DUMPS="aistack app_a app_b" \
+  bash -c '
+    set -uo pipefail
+    : > "$RESTORED_DBS_FILE"
+    . "$1"
+    for db in $DUMPS; do record_restored_db "$db"; done
+    tr "\n" " " < "$RESTORED_DBS_FILE"
+  ' _ "$RBLOCK" 2>&1
+)"
+if [ "$UNSET_OUT" = "app_a app_b " ]; then
+  ok "with AISTACK_RESTORED_DB_KINDS_FILE unset, nothing is written and the old path is unchanged"
+else
+  bad "with the kinds file unset the app expectation became '$UNSET_OUT', expected 'app_a app_b '"
+fi
+
+# restored_db_kind() and is_app_db() DISAGREE ON PURPOSE for a legacy archive,
+# and that disagreement is the whole mechanism: is_app_db() must say "app"
+# (the OWNER clause depends on it) while restored_db_kind() must say "we were
+# never told".  Asserted together so a later edit that "tidies" one into the
+# other has to come here first.
+LK="$(RESTORE_DB_RECORDED=0 RESTORE_APP_DBS="" bash -c \
+      'set -euo pipefail; . "$1"; restored_db_kind app_a; is_app_db app_a && echo app || echo cluster' \
+      _ "$RBLOCK")"
+if [ "$LK" = "legacy
+app" ]; then
+  ok "on a legacy archive restored_db_kind says 'legacy' while is_app_db still says 'app'"
+else
+  bad "legacy disagreement is gone: got '$(printf '%s' "$LK" | tr '\n' '/')', expected 'legacy/app'"
 fi
 
 # --- 12b. WHOSE DATABASE IT IS, which decides the CREATE DATABASE owner -----

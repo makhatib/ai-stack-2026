@@ -66,12 +66,32 @@ services:
       - postgres_superuser_password
     environment:
       POSTGRES_USER: aistack_admin
-      POSTGRES_DB: aistack
+      # NO POSTGRES_DB, AND THE ABSENCE IS THE POINT (NOM-392).
+      #
+      # This file used to set `POSTGRES_DB: aistack`, so initdb created the
+      # one cluster-kind database in the archive BEFORE the restore ran.
+      # restore.sh creates a missing database with `CREATE DATABASE %I`
+      # guarded by `WHERE NOT EXISTS`, so the guard short-circuited and the
+      # no-OWNER branch — the one NOM-378's follow-up added, and the one the
+      # restore-onto-a-fresh-host path depends on — was NEVER EXECUTED BY THE
+      # DRILL.  A drill that cannot reach the branch it is meant to prove
+      # proves the other branch instead.
+      #
+      # With it gone the entrypoint falls back to POSTGRES_DB=$POSTGRES_USER,
+      # initdb makes `aistack_admin`, and `aistack` arrives from the restore
+      # through the shipped code path — which is also what makes assertion 5
+      # in scripts/drill.sh mean something: an `aistack` that is present and
+      # full is one the restore put there.
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
       PGDATA: /var/lib/postgresql/data/pgdata
     mem_limit: 1g
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aistack_admin -d aistack"]
+      # -d postgres, and it MOVED WITH the POSTGRES_DB above rather than being
+      # left pointing at `aistack`: that database does not exist until the
+      # restore creates it, so the old target would never go healthy and every
+      # `depends_on: service_healthy` in this file would hang.  `postgres` is
+      # created by initdb in every cluster and no restore depends on it.
+      test: ["CMD-SHELL", "pg_isready -U aistack_admin -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 20

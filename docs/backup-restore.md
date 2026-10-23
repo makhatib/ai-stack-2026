@@ -122,8 +122,19 @@ bin/aistack drill run
 ```
 
 Restores into a **separate throwaway project** with its own volumes and
-networks, then checks that workflows, credentials, documents and permissions
-all came back, and destroys the project.
+networks, then checks that workflows, credentials, documents, permissions and
+the stack's own control database all came back, and destroys the project.
+
+The control database (`aistack`) is checked for **contents**, not only for
+existence. A `pg_restore` that loads nothing still leaves the database there,
+and that used to print one line of warning on a drill that then passed. The
+drill project also no longer pre-creates it, so the restore's own
+`CREATE DATABASE` path — the one a restore onto a fresh host depends on — runs
+in every drill instead of being short-circuited.
+
+Drilling a **pre-NOM-378 archive** is still a valid thing to do: those record
+no database kinds and carry no `aistack` dump, so the drill says so in a note
+and asserts the four app databases as before.
 
 It cannot touch your live data, and that is enforced by a lock rather than by
 convention: the drill holds an exclusive lock for its whole lifetime and the

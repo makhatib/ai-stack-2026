@@ -264,6 +264,26 @@ if [ -n "$RESTORED_DBS_FILE" ]; then
     || die "cannot write AISTACK_RESTORED_DBS_FILE=$RESTORED_DBS_FILE"
 fi
 
+# ...AND THE KIND OF EVERY DATABASE THE LOOP WALKS, which is the half the drill
+# did not get (NOM-392).  The file above is app databases only, for a good
+# reason -- the drill asserts a non-superuser ROLE per entry and a cluster-kind
+# database has none -- but "drop it" and "say nothing about it" were the same
+# line of code, so `aistack` could restore EMPTY and the drill still passed.
+#
+# Two facts per line, `<kind> <name>`, because the drill needs both: which
+# databases to assert presence-and-contents for, and whether this archive
+# states kinds AT ALL.  Without the second, an empty cluster-kind set is
+# ambiguous -- a pre-NOM-378 archive legitimately has none, and so does a
+# recording that quietly broke.  `legacy` names the first case, so the drill
+# can take the one as a note and the other as a failure instead of treating
+# both as nothing to do.  Unset in normal operation, in which case nothing is
+# written and nothing changes.
+RESTORED_DB_KINDS_FILE="${AISTACK_RESTORED_DB_KINDS_FILE:-}"
+if [ -n "$RESTORED_DB_KINDS_FILE" ]; then
+  : > "$RESTORED_DB_KINDS_FILE" \
+    || die "cannot write AISTACK_RESTORED_DB_KINDS_FILE=$RESTORED_DB_KINDS_FILE"
+fi
+
 # FUNCTIONS, not ifs inside the restore loop, for one reason: the loop body
 # also runs pg_restore against a live cluster, so the only way to test these
 # decisions inline would be to perform a restore.  Out here,
@@ -291,8 +311,32 @@ is_app_db() {
   return 1
 }
 
+# WHAT KIND OF DATABASE THIS IS, as a recorded fact rather than as an absence.
+#
+# `app` and `cluster` are the two kinds a current archive records.  `legacy` is
+# the third state and it is NOT a kind the manifest carries: it means the
+# archive states no kinds, so is_app_db() is answering from its fallback and
+# calling every dump an app.  A reader that only saw `app` lines could not tell
+# that case from a current archive whose cluster-kind recording stopped
+# working, and those two must not look alike -- one is a note, the other is the
+# defect this function exists to stop.
+#
+# The `!= 1` test is the same condition is_app_db() falls back on, written out
+# here because the ANSWER is different: is_app_db() has to say "app" for a
+# legacy archive (that is the old behaviour, and the OWNER clause depends on
+# it), while this has to say "we were never told".  tests/backup-db-set.sh runs
+# both against the same inputs so the two cannot drift apart unnoticed.
+restored_db_kind() {
+  local db="$1"
+  if [ "${RESTORE_DB_RECORDED:-0}" != "1" ]; then printf 'legacy\n'; return 0; fi
+  if is_app_db "$db"; then printf 'app\n'; else printf 'cluster\n'; fi
+}
+
 record_restored_db() {
   local db="$1"
+  if [ -n "${RESTORED_DB_KINDS_FILE:-}" ]; then
+    printf '%s %s\n' "$(restored_db_kind "$db")" "$db" >> "$RESTORED_DB_KINDS_FILE"
+  fi
   [ -n "${RESTORED_DBS_FILE:-}" ] || return 0
   is_app_db "$db" || return 0
   printf '%s\n' "$db" >> "$RESTORED_DBS_FILE"
