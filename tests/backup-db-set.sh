@@ -755,6 +755,53 @@ else
   bad "aistack verify's read-only request is argv-dependent (see above)"
 fi
 
+# ...AND THE CHANNEL ACTUALLY REACHES THE CHILD PROCESS.
+#
+# The check above reads the TEXT of cmd_verify, and text is not a channel.
+# Drop the `export` and `AISTACK_VERIFY_ONLY=1` is still in the body, still
+# satisfies every assertion above -- while restore.sh, a separate process,
+# never sees it, VERIFY_ONLY_FLAG stays 0 and `aistack verify` RESTORES.
+# Measured: the same stub child below reports UNSET under that one-word edit.
+# So drive the SHIPPED function and ask the child what it got.
+VSTUB="$WORK/vstub"
+mkdir -p "$VSTUB/scripts"
+cat > "$VSTUB/scripts/restore.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'SAW=%s ARGV=%s\n' "${AISTACK_VERIFY_ONLY:-UNSET}" "$*"
+STUB
+chmod +x "$VSTUB/scripts/restore.sh"
+if python3 - "$ROOT/bin/aistack" "$WORK/cmd_verify.sh" <<'PY'
+import re, sys
+m = re.search(r'^cmd_verify\(\)\s*\{(.*?)^\}', open(sys.argv[1]).read(), re.S | re.M) \
+    or re.search(r'^cmd_verify\(\)\s*\{[^\n]*\}', open(sys.argv[1]).read(), re.M)
+if not m:
+    sys.exit(2)                       # nothing measured
+open(sys.argv[2], "w").write(m.group(0) + "\n")
+PY
+then
+  # The lifecycle lock is not what is measured here, and taking it would need a
+  # live stack; stubbing it drops the mode argument and runs the command.
+  SAW="$(env -u AISTACK_VERIFY_ONLY ROOT="$VSTUB" bash -c '
+      set -euo pipefail
+      with_lifecycle_lock() { shift; "$@"; }
+      . "$1"
+      cmd_verify fixture.enc
+    ' _ "$WORK/cmd_verify.sh" 2>&1)"
+  case "$SAW" in
+    *"SAW=1 ARGV=fixture.enc"*)
+      ok "and the child process receives it, with the archive still in argv" ;;
+    *SAW=1*)
+      bad "read-only reached the child but the archive did not:"; note "$SAW" ;;
+    *)
+      bad "the shipped cmd_verify did not deliver read-only to its child, so"
+      note "'aistack verify' would reach the write phase. Child reported:"
+      note "$SAW" ;;
+  esac
+else
+  refuse "cmd_verify() was not found in bin/aistack, so NOTHING WAS MEASURED
+  about whether its read-only request reaches restore.sh at all."
+fi
+
 # ...and restore.sh honours that channel.  Driven through the SHIPPED
 # resolution, same as the dump set, so a refactor cannot leave this asserting
 # a copy.
