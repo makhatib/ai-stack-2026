@@ -67,8 +67,12 @@
 #         2  REFUSED before scanning anything: bad argument, no image list, or
 #            too little free disk.  NOTHING was measured.
 #         3  STOPPED part way on disk.  The images already written are real;
-#            the rest were not scanned.  Free space and re-run — present
-#            outputs are skipped, so it resumes.
+#            the rest were not scanned.  $OUT/NOT-RUN.txt names the STEP that
+#            stopped — which is not always an image: the repo config+secret
+#            pass is last, and ci/scan-gate.py does not read its report at
+#            all, so that marker is the only signal it was skipped.  Free
+#            space and re-run — present outputs are skipped, so it resumes,
+#            and a run that gets past the refusals clears the old marker.
 #
 # Rollback: this script only writes into its own $OUT directory and two named
 # Docker volumes.  To undo it completely:
@@ -121,8 +125,11 @@ say() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$LOG"; }
 # Named volumes so a re-run reuses the vulnerability databases rather than
 # re-downloading them, and so no database ever lands in the report directory
 # (it would then be scanned as part of the repo on the next pass).  Created
-# LAZILY, when a tool is actually about to run: a run that refuses on disk or
-# finds every output already present should leave nothing new on the host.
+# LAZILY, when a tool is actually about to run: a run that refuses on disk, or
+# that finds every output already present, adds NO VOLUME to the host.  It does
+# still leave its report directory, images.txt, disk.log and the NOT-RUN marker
+# — deliberately, because the marker IS the output of a refusal.  Lazy creation
+# is about the volumes only.
 CACHES_READY=0
 ensure_caches() {
   [ "$CACHES_READY" -eq 1 ] && return 0
@@ -209,7 +216,21 @@ elif [ "$ALLOW_LOW_DISK" -eq 1 ]; then
   fi
   say "If the host fills, these reports will be TRUNCATED JSON that parses as"
   say "FEWER findings, and other services on this host will start failing."
-  say "The mid-run floor still applies: the scan stops below ${HARD_FLOOR_MB}MB free."
+  # SAY WHAT THE FLOOR ACTUALLY DOES, not what it does in the common case.  The
+  # floor compares a NUMBER, so there are two ways for it not to stop anything:
+  # the floor is 0, or free space could not be measured and there is no number.
+  # The flat sentence that used to be here promised a stop in both.
+  if [ "$HARD_FLOOR_MB" -eq 0 ]; then
+    say "AISTACK_SCAN_HARD_FLOOR_MB=0, so there is NO mid-run floor either:"
+    say "nothing will stop this run, whatever happens to free space."
+  elif [ "$PREFLIGHT_RC" -eq 2 ]; then
+    say "The mid-run floor (${HARD_FLOOR_MB}MB) can only compare a number, and free"
+    say "space did not answer here — so it will stop this run only if df starts"
+    say "answering mid-run. Watch the host yourself."
+  else
+    say "The mid-run floor still applies: the scan stops below ${HARD_FLOOR_MB}MB free,"
+    say "unless free space stops being measurable at all."
+  fi
 else
   if [ "$PREFLIGHT_RC" -eq 2 ]; then
     say "SCAN NOT RUN — free disk could NOT BE MEASURED (see above). NO IMAGE WAS SCANNED."
@@ -221,6 +242,16 @@ else
   echo "scan: NOT RUN (low disk: ${DISK_FREE_MB:-unmeasured}MB free, needs ${NEED_MB:-unknown}MB)" > "$OUT/NOT-RUN.txt"
   exit 2
 fi
+
+# A RESUME MUST NOT INHERIT THE LAST RUN'S VERDICT (NOM-372).  Resuming is the
+# path this script's own header advertises: stop on disk, free some space,
+# re-run, present outputs are skipped.  The stopped run left a NOT-RUN marker
+# behind, and without this line the successful resume finishes, prints DONE and
+# exits 0 with a marker still on disk saying the evidence set is incomplete —
+# so a COMPLETE set routinely carried a note that it was not.
+# Removed only here, past every refusal above: a run that refuses writes its
+# own marker and exits without reaching this line.
+rm -f "$OUT/NOT-RUN.txt"
 
 DONE_IMAGES=0
 # The in-loop re-check.  Returns 0 to continue, 1 to stop the run.
@@ -255,12 +286,24 @@ guard_disk() {
   return 1
 }
 
-# Called when guard_disk says stop: says how far the run actually got, so the
-# operator knows which images have real evidence and which were never read.
+# Called when guard_disk says stop.  Takes the SAME step label guard_disk took,
+# because the image count alone describes the wrong thing when the stop is not
+# in the image loop: a stop at the repo config+secret pass has scanned every
+# image, and the old wording then read "STOPPED AFTER 1 of 1 images. The 0
+# image(s) not listed above were NOT SCANNED" and never named the step that
+# actually did not run.  That step matters more than most: the repo pass is the
+# only SECRET scan in the evidence set, and ci/scan-gate.py does not read its
+# report at all — this marker is the only signal that it was skipped.
 stop_short() {
-  say "STOPPED AFTER $DONE_IMAGES of $IMAGES images. The $((IMAGES - DONE_IMAGES))"
-  say "image(s) not listed above were NOT SCANNED — that is not a clean result."
-  echo "scan: STOPPED after $DONE_IMAGES of $IMAGES images (disk)" > "$OUT/NOT-RUN.txt"
+  local step="$1"
+  if [ "$DONE_IMAGES" -lt "$IMAGES" ]; then
+    say "STOPPED at $step — $DONE_IMAGES of $IMAGES images scanned."
+    say "The other $((IMAGES - DONE_IMAGES)) image(s) were NOT SCANNED — not a clean result."
+  else
+    say "STOPPED at $step — all $IMAGES images were scanned, but THIS STEP DID NOT RUN."
+    say "The image evidence above is real; this step is missing — not a clean result."
+  fi
+  echo "scan: STOPPED at $step after $DONE_IMAGES of $IMAGES images (disk)" > "$OUT/NOT-RUN.txt"
   exit 3
 }
 
@@ -268,7 +311,10 @@ RC=0
 while read -r img; do
   [ -n "$img" ] || continue
   name="$(printf '%s' "$img" | sed 's#[/:@]#_#g' | cut -c1-80)"
-  guard_disk "${img%%@*} (before trivy)" || stop_short
+  # One variable per call site, so the label guard_disk reports and the label
+  # stop_short puts in the marker cannot drift apart.
+  step="${img%%@*} (before trivy)"
+  guard_disk "$step" || stop_short "$step"
 
   if [ -s "$OUT/trivy/${name}.json" ]; then
     say "trivy  SKIP (present) ${img%%@*}"
@@ -286,7 +332,8 @@ while read -r img; do
         "$img" >"$OUT/trivy/${name}.out" 2>"$OUT/trivy/${name}.err"
     say "trivy  END   ${img%%@*} rc=$?"
   fi
-  guard_disk "${img%%@*} (before syft)" || stop_short
+  step="${img%%@*} (before syft)"
+  guard_disk "$step" || stop_short "$step"
 
   if [ -s "$OUT/syft/${name}.syft.json" ]; then
     say "syft   SKIP (present) ${img%%@*}"
@@ -303,7 +350,8 @@ while read -r img; do
         >"$OUT/syft/${name}.out" 2>"$OUT/syft/${name}.err"
     say "syft   END   ${img%%@*} rc=$?"
   fi
-  guard_disk "${img%%@*} (before grype)" || stop_short
+  step="${img%%@*} (before grype)"
+  guard_disk "$step" || stop_short "$step"
 
   # Feeding grype the SBOM rather than the image means the 15GB docling layers
   # are extracted ONCE, by syft, instead of twice.
@@ -343,7 +391,8 @@ done < "$OUT/images.txt"
 if [ -s "$OUT/trivy-repo-config-secret.json" ]; then
   say "trivy  SKIP (present) repo config+secret scan"
 else
-  guard_disk "repo config+secret scan" || stop_short
+  step="repo config+secret scan"
+  guard_disk "$step" || stop_short "$step"
   ensure_caches
   say "trivy  START repo config+secret scan (see L1 — misconfig coverage is NONE here)"
   docker run --rm \
