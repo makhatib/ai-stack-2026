@@ -454,5 +454,119 @@ else
   bad "verify() recorded-set assertions failed (see SUBTOTAL above)"
 fi
 
+# --- 12. what the RESTORE hands the drill as its expectation ---------------
+#
+# WHY THIS IS NOT LEFT TO THE DRILL.  scripts/drill.sh is the real end-to-end
+# proof, and it refuses to run alongside serving containers -- by design, since
+# a drill beside a live stack is what its lock exists to prevent.  So the only
+# way to exercise this decision through the drill is planned downtime, and a
+# decision that can only be checked during downtime is one that gets checked
+# by hoping.  The classification lives in a function for exactly that reason,
+# and the shipped lines are extracted and run here, same as the dump set.
+#
+# The decision matters in a way that is easy to miss.  The dump set now
+# includes `aistack`, which is the POSTGRES_DB and is owned by the superuser:
+# there is no non-superuser `aistack` role and there should not be one.  If
+# `aistack` reached the drill's expectation list, drill.sh would look for that
+# role, not find it, and FAIL A GOOD RESTORE -- the fix for a silent gap
+# turning itself into a false alarm.
+printf '\n  -- the expectation the restore hands the drill --\n'
+
+RBLOCK="$WORK/classify.sh"
+awk '/^# >>> restored-db classification/{f=1; next} /^# <<< restored-db classification/{f=0} f' \
+  "$ROOT/scripts/restore.sh" > "$RBLOCK"
+if [ ! -s "$RBLOCK" ]; then
+  refuse "the 'restored-db classification' markers are not in scripts/restore.sh,
+  or the block between them is empty, so NOTHING WAS MEASURED about what the
+  restore hands the drill. Restore the markers, or update this test."
+fi
+grep -q 'record_restored_db' "$RBLOCK" \
+  || refuse "the extracted block does not define record_restored_db(); the
+  markers are around the wrong lines and nothing was measured."
+ok "extracted the shipped classification from scripts/restore.sh ($(grep -c '' "$RBLOCK") lines)"
+
+# $1 = RESTORE_DB_RECORDED, $2 = app dbs, $3 = dumps present.  Sets RECORDED.
+classify() {
+  local out="$WORK/restored.txt"
+  : > "$out"
+  RECORDED="$(
+    RESTORE_DB_RECORDED="$1" RESTORE_APP_DBS="$2" RESTORED_DBS_FILE="$out" \
+    DUMPS="$3" bash -c '
+      set -uo pipefail
+      . "$1"
+      for db in $DUMPS; do record_restored_db "$db"; done
+      tr "\n" " " < "$RESTORED_DBS_FILE"
+    ' _ "$RBLOCK"
+  )"
+}
+
+# A current archive: five dumps, four of them apps.
+classify 1 "authelia litellm n8n openwebui" "aistack authelia litellm n8n openwebui"
+if [ "$RECORDED" = "authelia litellm n8n openwebui " ]; then
+  ok "a current archive hands the drill the 4 app databases: $RECORDED"
+else
+  bad "current archive hands the drill '$RECORDED', expected the 4 apps"
+fi
+case "$RECORDED" in
+  *aistack*) bad "aistack reached the drill's expectation; it has no non-superuser role, so this FAILS A GOOD RESTORE" ;;
+  *) ok "aistack is NOT in it, so the drill does not demand a role that must not exist" ;;
+esac
+
+# A fifth app, with nobody editing the drill.
+classify 1 "authelia litellm n8n openwebui app_e" "aistack app_e authelia litellm n8n openwebui"
+case "$RECORDED" in
+  *app_e*) ok "a fifth app in the archive gets its role asserted with no edit to the drill" ;;
+  *) bad "a fifth app did not reach the drill's expectation: $RECORDED" ;;
+esac
+
+# A LEGACY archive records no kinds, and every dump in one IS an app database,
+# so the fallback must be the old behaviour exactly -- not an empty
+# expectation, which drill.sh would have to treat as a vacuous pass.
+classify 0 "" "authelia litellm n8n openwebui"
+if [ "$RECORDED" = "authelia litellm n8n openwebui " ]; then
+  ok "a pre-NOM-378 archive falls back to all 4 dumps, the old behaviour exactly"
+else
+  bad "legacy fallback hands the drill '$RECORDED', expected the 4 dumps"
+fi
+classify 0 "" ""
+if [ -z "${RECORDED// /}" ]; then
+  ok "and an archive with no dump hands over nothing, which drill.sh refuses as vacuous"
+else
+  bad "an archive with no dump produced '$RECORDED'"
+fi
+
+# --- 13. the read-only path the docs promise actually exists ---------------
+# docs/backup-restore.md tells an operator to run `aistack verify <archive>`.
+# It said so BEFORE the subcommand existed -- a documented capability with no
+# code behind it, which is the same shape as a manifest that is internally
+# consistent and silent.  Asserted so the doc and the CLI cannot diverge again.
+printf '\n  -- the read-only path --\n'
+grep -q -- '--verify-only' "$ROOT/scripts/restore.sh" \
+  && ok "scripts/restore.sh accepts --verify-only" \
+  || bad "scripts/restore.sh has no --verify-only flag, but the docs promise one"
+grep -qE '^ *verify\) *shift; *cmd_verify' "$ROOT/bin/aistack" \
+  && ok "bin/aistack dispatches 'verify'" \
+  || bad "bin/aistack does not dispatch 'verify', but docs/backup-restore.md tells operators to run it"
+# It must be restore.sh's own verify phase, not a second implementation that
+# can drift from what a real restore says.
+grep -q 'cmd_verify.*restore\.sh.*--verify-only' "$ROOT/bin/aistack" \
+  && ok "and does it by running restore.sh --verify-only, so the two cannot disagree" \
+  || bad "aistack verify does not delegate to restore.sh --verify-only"
+
+# The exit must sit ABOVE the first thing that writes, so "read-only" is a
+# property of where the code stops rather than a promise in a comment.
+if python3 - "$ROOT/scripts/restore.sh" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+exit_at = src.find('VERIFY_ONLY" -eq 1')
+write_at = src.find('echo "4/4  restoring"')
+sys.exit(0 if exit_at != -1 and write_at != -1 and exit_at < write_at else 1)
+PY
+then
+  ok "the --verify-only exit sits above the restore phase, so it cannot write"
+else
+  bad "the --verify-only exit is missing or BELOW the restore phase"
+fi
+
 printf '\n== %d passed, %d failed ==\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

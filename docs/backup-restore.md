@@ -39,9 +39,16 @@ Also out, deliberately, and this one is about databases:
 read it, and `initdb` recreates it.
 
 Both exclusions are recorded **inside** each archive, so the restore path can
-state them rather than leaving you to infer the set. `aistack verify
-<archive>` and `aistack restore` both print which databases the archive
-returns and which it does not.
+state them rather than leaving you to infer the set:
+
+```
+aistack verify <archive>     # read-only: says what it would restore, changes nothing
+```
+
+`aistack restore` prints the same statement, from the same code, before it
+asks you to confirm — so the list is in front of you while you are deciding
+to overwrite live data, not after. `verify` is that phase and then an exit;
+it is not a second implementation, so the two cannot disagree.
 
 Archives written before this was recorded (anything from before 2026-10-23)
 dumped only the four app databases — `authelia`, `litellm`, `n8n`,

@@ -15,11 +15,19 @@ ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 ARCHIVE=""
 DRILL_PROJECT=""
 ASSUME_YES=0
+VERIFY_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --into-drill-project) DRILL_PROJECT="${2:?needs a project name}"; shift 2 ;;
     --yes) ASSUME_YES=1; shift ;;
+    # READ-ONLY.  Verify the archive and state what it can and cannot
+    # return, then stop.  Without this the only way to ask "which
+    # databases is this archive?" was to begin a restore that overwrites
+    # live data at step 4 -- not a question anyone should have to risk
+    # asking, and the docs promised an answer that did not exist
+    # (NOM-378).
+    --verify-only) VERIFY_ONLY=1; shift ;;
     -*) echo "restore: unknown option '$1'" >&2; exit 2 ;;
     *) ARCHIVE="$1"; shift ;;
   esac
@@ -27,7 +35,7 @@ done
 
 die() { printf 'restore: %s\n' "$*" >&2; exit 1; }
 
-[ -n "$ARCHIVE" ] || die "usage: aistack restore <archive.tar.gz.enc> [--into-drill-project NAME]"
+[ -n "$ARCHIVE" ] || die "usage: aistack restore <archive.tar.gz.enc> [--into-drill-project NAME] [--verify-only]"
 [ -f "$ARCHIVE" ] || die "no such archive: $ARCHIVE"
 
 ENC_KEY="$ROOT/secrets/backup.key"
@@ -145,6 +153,16 @@ PY
 # shellcheck source=/dev/null
 . "$DBSTATE"
 
+# THE READ-ONLY EXIT (NOM-378).  Everything above this line reads; step 4
+# below is the first thing that writes.  Exiting here is non-destructive BY
+# CONSTRUCTION rather than by promise -- there is no branch to get wrong,
+# because the code that overwrites has not been reached yet.
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+  echo "--verify-only: the archive verified and stated its database set above."
+  echo "               Nothing was restored and nothing was changed."
+  exit 0
+fi
+
 echo "4/4  restoring"
 
 if [ -n "$DRILL_PROJECT" ]; then
@@ -223,6 +241,29 @@ if [ -n "$RESTORED_DBS_FILE" ]; then
   : > "$RESTORED_DBS_FILE" \
     || die "cannot write AISTACK_RESTORED_DBS_FILE=$RESTORED_DBS_FILE"
 fi
+
+# A FUNCTION, not three ifs inside the restore loop, for one reason: the loop
+# body also runs pg_restore against a live cluster, so the only way to test the
+# classification inline would be to perform a restore.  Out here,
+# tests/backup-db-set.sh extracts these lines and runs THEM -- the drill's
+# expectation is derived from this decision, and a decision nothing can test
+# without downtime is one that gets verified by hoping.
+#
+# >>> restored-db classification: tests/backup-db-set.sh extracts and runs these lines >>>
+record_restored_db() {
+  local db="$1" a is_app=0
+  [ -n "${RESTORED_DBS_FILE:-}" ] || return 0
+  if [ "${RESTORE_DB_RECORDED:-0}" = "1" ]; then
+    for a in ${RESTORE_APP_DBS:-}; do
+      if [ "$a" = "$db" ]; then is_app=1; break; fi
+    done
+  else
+    is_app=1   # legacy archive: every dump in one is an app database
+  fi
+  [ "$is_app" = "1" ] || return 0
+  printf '%s\n' "$db" >> "$RESTORED_DBS_FILE"
+}
+# <<< restored-db classification <<<
 for dump in "$WORK"/payload/*.dump; do
   [ -f "$dump" ] || continue
   db="$(basename "$dump" .dump)"
@@ -230,19 +271,7 @@ for dump in "$WORK"/payload/*.dump; do
   # Recorded BEFORE the restore of this database is attempted, so a dump that
   # fails to load is still a database the drill expects a role for.  An
   # expectation that shrinks when the thing it measures fails is not one.
-  if [ -n "$RESTORED_DBS_FILE" ]; then
-    is_app=0
-    if [ "${RESTORE_DB_RECORDED:-0}" = "1" ]; then
-      for a in ${RESTORE_APP_DBS:-}; do
-        if [ "$a" = "$db" ]; then is_app=1; break; fi
-      done
-    else
-      is_app=1   # legacy archive: every dump in one is an app database
-    fi
-    if [ "$is_app" = "1" ]; then
-      printf '%s\n' "$db" >> "$RESTORED_DBS_FILE"
-    fi
-  fi
+  record_restored_db "$db"
   # CREATE THE DATABASE IF IT IS NOT THERE.
   #
   # `pg_restore -d n8n` needs `n8n` to already exist, and into a LIVE stack it

@@ -476,6 +476,12 @@ cmd_update() { "$ROOT/scripts/update.sh" "$@"; }
 cmd_rollback(){ "$ROOT/scripts/rollback.sh" "$@"; }
 cmd_backup() { with_lifecycle_lock sh with_helper_lock "$ROOT/scripts/backup.sh" "$@"; }
 cmd_restore(){ with_lifecycle_lock ex "$ROOT/scripts/restore.sh" "$@"; }
+# READ-ONLY, so it takes the SHARED lock, not the exclusive one: asking what
+# an archive contains must not wait behind -- or block -- a backup or an
+# `up`.  It is restore.sh's own verify phase with --verify-only, not a
+# second implementation, so what `verify` says and what a real restore says
+# cannot drift (NOM-378).
+cmd_verify() { with_lifecycle_lock sh "$ROOT/scripts/restore.sh" "$@" --verify-only; }
 cmd_drill()  { "$ROOT/scripts/drill.sh" "$@"; }
 cmd_doctor() { "$ROOT/scripts/doctor.sh" "$@"; }
 cmd_security_check() { "$ROOT/scripts/security-check.sh" "$@"; }
@@ -550,6 +556,8 @@ aistack — AI Stack 2026
 
   backup              nightly-style backup, encrypted, HMAC'd inventory
   restore <archive>   verify then restore; REFUSES without the HMAC key
+  verify <archive>    verify only: say which databases it can and cannot
+                      return, change nothing
   drill run|clean     Tier-A restore drill in a throwaway project
 
   doctor              health, pins, secret readability, host listeners
@@ -593,6 +601,7 @@ case "${1:-}" in
   rollback) shift; cmd_rollback "$@" ;;
   backup) shift; cmd_backup "$@" ;;
   restore) shift; cmd_restore "$@" ;;
+  verify) shift; cmd_verify "$@" ;;
   drill) shift; cmd_drill "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   security-check) shift; cmd_security_check "$@" ;;
