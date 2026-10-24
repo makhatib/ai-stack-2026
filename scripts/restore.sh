@@ -210,18 +210,43 @@ echo "4/4  restoring"
 # up because somebody else is using it, and the drill path exists precisely so
 # that a restore can be rehearsed without stopping anything.
 #
-# THE DRILL PATH IS UNAFFECTED: this is called only from the live branch below.
-# A drill restores into `restore-drill-<ts>` with compose.drill.yaml, whose
-# containers and volumes are project-prefixed, so a running live stack is none
-# of its business.
+# THE DRILL PATH IS UNAFFECTED, IN BOTH DIRECTIONS.  This is called only from
+# the live branch below, so a drill never consults the live stack.  And a
+# running drill does not block a live restore either, INCLUDING one the
+# operator named `aistack-drill` — which is the label rule below doing that
+# work, not the name rule.
 #
 # WHAT COUNTS AS RUNNING.  Plain `docker ps`, NOT `--filter status=running`: a
 # restarting or a paused container still holds its connections and
-# `status=running` lists neither.  A container counts if its name carries the
-# live project's prefix OR if it carries the live project's compose label —
-# the first catches one started by hand or left behind by an older compose
-# file, the second catches one whose `container_name` was changed.  The one
-# container this script starts itself is the only exception.
+# `status=running` lists neither.
+#
+# WHAT COUNTS AS THIS STACK.  A container blocks when EITHER
+#
+#   * its compose project LABEL is the live project — whatever the container
+#     is called, which catches one whose `container_name` was changed; or
+#   * its NAME carries the live project's prefix AND no other project claims
+#     it by label, which catches one started by hand or left behind by an
+#     older compose file.  Neither of those carries a label.
+#
+# The name prefix ALONE is not enough, and that was this guard's first defect:
+# `aistack-*` also matches every container of a project called
+# `aistack-staging`, `aistack-v2` or `aistack-drill`.  None of those holds
+# anything this restore overwrites, `bin/aistack down` — the command the
+# refusal names — does not stop them, and there is deliberately no override
+# flag, so that refusal could not be cleared by its own advice.  The drill is
+# the sharpest case, because the refusal's last paragraph invites the operator
+# to name a drill project and `aistack-drill` is the obvious thing to type.
+#
+# THE ONE CONTAINER THIS SCRIPT STARTS ITSELF is skipped by name.  Matching it
+# by name AND label was considered and deliberately not done: a container named
+# `aistack-postgres` that some other project owns answers PROCEED either way —
+# skipped as ours by the name, or not blocking as somebody else's by the label
+# rule above — so the extra condition would be a guard that cannot change an
+# answer.  PROCEED is also the right answer there: container names are unique
+# per daemon, so `dc up -d postgres` below cannot start and fails on the name
+# collision before anything is overwritten.  Measured on a scratch project:
+# compose exits 1 with `Conflict. The container name "/<name>" is already in
+# use`, and `set -e` makes that fatal.
 blocking_live_containers() {
   # $1 = the live compose project, $2 = the container restore.sh starts itself.
   # Prints one blocking container name per line.  Returns 2 if docker could not
@@ -232,13 +257,26 @@ blocking_live_containers() {
   # Fed in through a heredoc rather than a pipe, so `read` still sees a final
   # newline when docker's last line has none -- that case fills the variable
   # and returns 1, which a pipe would read as the end of the list.
+  #
+  # The two rules are `if` blocks and not `&&` chains: the name rule is now a
+  # conjunction (prefix AND unclaimed), and under `set -euo pipefail` a
+  # short-circuiting `&&` list as the loop body's last statement leaves the
+  # body non-zero.
   while read -r name proj; do
     [ -n "$name" ] || continue
     [ "$name" = "$keep" ] && continue
-    case "$name" in
-      "$project"-*) printf '%s\n' "$name"; continue ;;
-    esac
-    [ "$proj" = "$project" ] && printf '%s\n' "$name"
+    # Rule 1: the label says it is ours.
+    if [ "$proj" = "$project" ]; then
+      printf '%s\n' "$name"
+      continue
+    fi
+    # Rule 2: named like ours AND claimed by nobody.  A non-empty label naming
+    # a DIFFERENT project is that project's container, prefix or no prefix.
+    if [ -z "$proj" ]; then
+      case "$name" in
+        "$project"-*) printf '%s\n' "$name" ;;
+      esac
+    fi
   done <<EOF
 $ps
 EOF

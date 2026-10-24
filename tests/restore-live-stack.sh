@@ -228,6 +228,52 @@ paperless-ar-webserver-1 paperless-ar
 nom-82-hello-web-1 nom-82-hello
 " 0 PROCEED
 
+# ANOTHER PROJECT WHOSE NAME STARTS WITH THE LIVE PROJECT'S.  The first version
+# of this guard blocked on the name prefix alone, so `aistack-staging-n8n`
+# refused a live restore while holding nothing the restore overwrites -- and
+# `bin/aistack down`, the only command the refusal names, does not stop it.
+# With no override flag, that refusal could not be cleared by its own advice.
+# The rows above did NOT cover this: `restore-drill-<ts>` and `paperless-ar`
+# have no `aistack-` prefix, so they never reached the prefix rule.
+run_guard "a container of project aistack-staging does NOT block" \
+  "aistack-staging-n8n aistack-staging
+" 0 PROCEED
+run_guard "aistack-v2 and aistack-staging alongside a stopped live stack do NOT block" \
+  "aistack-staging-postgres aistack-staging
+aistack-staging-n8n aistack-staging
+aistack-v2-n8n aistack-v2
+" 0 PROCEED
+
+# THE ONE THAT CLOSES THE LOOP: the refusal's own last paragraph invites the
+# operator to rehearse with --into-drill-project, whose name they choose.
+# `--into-drill-project aistack-drill` is the obvious thing to type, and under
+# the prefix rule those containers then blocked every later live restore.
+run_guard "a drill project the operator named aistack-drill does NOT block" \
+  "aistack-drill-postgres-1 aistack-drill
+aistack-drill-n8n-1 aistack-drill
+" 0 PROCEED
+
+# AND IT IS STILL SELECTIVE.  Same daemon, both up: the live n8n blocks, the
+# look-alike does not, and the refusal must not name the look-alike -- naming a
+# container the operator cannot stop with the command we give them is the
+# expensive half of this defect.
+run_guard "the live n8n blocks while aistack-staging-n8n is up" \
+  "aistack-postgres aistack
+aistack-n8n aistack
+aistack-staging-n8n aistack-staging
+aistack-drill-n8n-1 aistack-drill
+" 0 REFUSE 'aistack-n8n' 'aistack-staging-n8n|aistack-drill-n8n'
+
+# RECORDED, NOT FIXED (reviewer's call to either).  `keep` is matched by name
+# only, so a container named aistack-postgres carrying another project's label
+# is skipped as ours.  The answer is PROCEED either way -- rule 2 would also
+# let it through as somebody else's -- so tightening `keep` to name AND label
+# could not change an outcome.  Measured separately: `dc up -d postgres` then
+# fails on the unique-name collision before anything is overwritten.
+run_guard "aistack-postgres owned by another project: PROCEED, by name or by label" \
+  "aistack-postgres aistack-staging
+" 0 PROCEED
+
 # A restarting container is listed by plain `docker ps` and holds its
 # connections.  --filter status=running lists neither restarting nor paused,
 # which is why the block must not use it.
