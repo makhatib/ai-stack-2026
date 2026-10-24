@@ -71,13 +71,28 @@ export AISTACK_RUNDIR="$RUNDIR"
 LIFECYCLE_LOCK="$RUNDIR/lifecycle.lock"
 HELPER_LOCK="$RUNDIR/helper.lock"
 
-# The serving lifetime hold's own files.  All four are tmpfs scratch beside the
-# locks, for the same reason: a reboot must clear them.
+# The serving lifetime hold's own files.  All of them are tmpfs scratch beside
+# the locks, for the same reason: a reboot must clear them.
 HOLDER_PID="$RUNDIR/serving.holder.pid"
 HOLDER_STOP="$RUNDIR/serving.holder.stop"
 HOLDER_ERR="$RUNDIR/serving.holder.err"
 HOLDER_LOG="$RUNDIR/serving.holder.log"
 HOLDER_ARM="$RUNDIR/serving.holder.arm"
+# The grace marker.  It exists only while a live holder is armed and has not
+# yet seen a container of the project, and it is how `status` and `doctor`
+# tell that window apart from a hold that leaked.  See `_holder_starting`.
+HOLDER_STARTING="$RUNDIR/serving.holder.starting"
+
+# THE STARTUP GRACE, as ONE literal.  How long a freshly armed hold waits for
+# the project's first container before concluding nothing is coming.
+#
+# It is used in three places -- the holder's own deadline, the message it logs
+# when that deadline passes, and the marker it publishes for `status` and
+# `doctor` -- and until now the second one was a retyped `1200s` in the
+# message.  MEASURED (NOM-395 round 2) against a copy with the deadline
+# shortened to 3s: the holder released after 3s and logged "within 1200s", so
+# the one number an operator reads was the one number that was not enforced.
+HOLDER_GRACE=1200
 
 # The serving project's name, DERIVED rather than retyped: it is what the
 # holder and `status` filter containers by, and a second literal copy of it
@@ -150,8 +165,13 @@ survive a crash as state nobody cleans up."
   # holder, the holder would die before it took the lock, and the symptom
   # would be a 20-second wait and "the hold was not established".
   #
-  # NOT the pid file: its existence is a claim that a holder is running, so an
-  # empty one created here would be a lie for `_holder_pid` to disprove.
+  # NOT the pid file, and NOT the grace marker: the existence of either is a
+  # claim -- "a holder is running", "its startup grace is open" -- so an empty
+  # one created here would be a lie for `_holder_pid` or `_holder_starting` to
+  # disprove.  A root-owned one left by a SIGKILLed root holder is harmless
+  # anyway: both are written to a `.$$` temporary and RENAMED into place, and
+  # a rename needs write permission on the directory (which is handed over
+  # just above), not on the file it replaces.
   for f in "$HOLDER_LOG" "$HOLDER_ARM"; do
     [ -e "$f" ] || : > "$f" 2>/dev/null || true
     if [ -e "$f" ] && [ "$(id -u)" = "0" ] && [ -n "$ouid" ] && [ "$ouid" != "0" ]; then
@@ -351,12 +371,35 @@ _hold_run() {
     exit 1
   fi
   _hold_log "holding SHARED for project $PROJECT (pid $$)"
+  # PUBLISH THE STARTUP GRACE, so that `status` and `doctor` can tell this
+  # window apart from a hold that leaked.
+  #
+  # MEASURED (NOM-395 round 2, 2026-10-24): `up` arms BEFORE it starts
+  # anything -- which is the correct order and the thing that closes the
+  # check-then-act race -- so "a holder is armed and zero containers run" is
+  # true of every normal startup as well as of a leak.  Nothing outside the
+  # holder could tell them apart: `serving.holder.arm` is the arm lock's
+  # flock target, not a grace marker.  So `doctor` exited 1 and `status`
+  # advised `bin/aistack down` in the middle of a correct cold install, and
+  # that advice, followed, tears down a stack that is starting.
+  #
+  # The marker carries the pid AND the absolute deadline.  The pid is what
+  # stops a marker left by a dead holder from describing a different live
+  # one; the deadline is what lets the report say when the hold self-releases
+  # instead of only that it might.
+  printf '%s %s\n' "$$" "$(( $(date +%s) + HOLDER_GRACE ))" > "$HOLDER_STARTING.$$" \
+    && mv -f "$HOLDER_STARTING.$$" "$HOLDER_STARTING" || {
+    # NOT FATAL, unlike the pid file.  A missing marker costs a misreported
+    # startup window; refusing to serve over it would cost the stack.
+    rm -f "$HOLDER_STARTING.$$"
+    _hold_log "cannot write $HOLDER_STARTING; the startup grace will be reported as a leak"
+  }
   # SIGTERM is an optimisation, never the contract: a root-shell install
   # leaves a root-owned holder that the operator cannot signal, so the stop
   # FILE is the release channel that always works and the trap only makes it
   # faster.  (The file lives in a directory the operator owns, so the
   # operator can always create it.)
-  trap '_hold_log "signalled; releasing"; rm -f "$HOLDER_PID"; exit 0' TERM INT HUP
+  trap '_hold_log "signalled; releasing"; rm -f "$HOLDER_PID" "$HOLDER_STARTING"; exit 0' TERM INT HUP
   # THE WAIT IS ONE SECOND AND THE DOCKER QUERY IS EVERY FIFTH, which is not
   # a tuning choice.
   #
@@ -374,7 +417,7 @@ _hold_run() {
   # case — an inherited descriptor holds the lock slightly too LONG, which
   # refuses a drill, never admits one — and the remaining unbounded case is a
   # wedged `docker ps`, which is named here rather than left to be found.
-  deadline=$(( SECONDS + 1200 ))
+  deadline=$(( SECONDS + HOLDER_GRACE ))
   local tick=0
   while :; do
     if [ -e "$HOLDER_STOP" ]; then _hold_log "stop requested; releasing"; break; fi
@@ -384,11 +427,19 @@ _hold_run() {
       # its first poll instead of being a value to switch on.
       rc=0; _serving_running || rc=$?
       case "$rc" in
-        0) seen=1 ;;
+        0) # THE GRACE IS OVER THE MOMENT THE FIRST CONTAINER IS SEEN, not
+           # when the deadline passes.  From here on, a holder with zero
+           # containers means the project stopped, and the branch below
+           # releases at once -- so leaving the marker would make the leak
+           # state unreportable instead of only the startup one.
+           if [ "$seen" = 0 ]; then
+             seen=1; rm -f "$HOLDER_STARTING"
+             _hold_log "first container of $PROJECT seen; the startup grace is over"
+           fi ;;
         1) if [ "$seen" = 1 ]; then
              _hold_log "no container of $PROJECT is running; releasing"; break
            elif [ "$SECONDS" -ge "$deadline" ]; then
-             _hold_log "no container of $PROJECT appeared within 1200s; releasing"; break
+             _hold_log "no container of $PROJECT appeared within ${HOLDER_GRACE}s; releasing"; break
            fi ;;
         *) _hold_log "docker did not answer; KEEPING the hold (a lost answer is not an empty stack)" ;;
       esac
@@ -396,8 +447,48 @@ _hold_run() {
     tick=$(( tick + 1 ))
     sleep 1
   done
-  rm -f "$HOLDER_PID"
+  # ONE removal for every loop exit -- the stop file, the project stopping and
+  # the grace lapsing all leave through here -- plus the copy in the TERM trap,
+  # which does not.
+  rm -f "$HOLDER_PID" "$HOLDER_STARTING"
   _hold_log "released"
+}
+
+_holder_starting() {
+  # 0 = the LIVE hold is still inside its startup grace: armed, and no
+  # container of the project has been seen yet.  1 = anything else, including
+  # no holder at all.
+  #
+  # IT PRINTS SOMETHING NON-EMPTY WHENEVER IT RETURNS 0 -- the seconds left,
+  # or `unknown` if the marker's deadline field is unusable -- and nothing at
+  # all when it returns 1.  `cmd_doctor` passes this through an environment
+  # variable, where "open but I cannot say for how long" and "not open" would
+  # otherwise both arrive as the empty string and the window would be
+  # reported as the leak again.
+  #
+  # THE PID MATCH IS THE POINT.  A marker file is tmpfs scratch like the pid
+  # file, but it can still outlive its holder -- a SIGKILLed holder runs
+  # neither its trap nor its exit path -- and a stale marker read as "some
+  # hold is starting" would excuse the next leak.  Requiring the marker to
+  # name the holder `_holder_pid` just validated makes it describe that
+  # holder or nothing.
+  local pid marker mpid until_s left
+  pid="$(_holder_pid)" || return 1
+  [ -f "$HOLDER_STARTING" ] || return 1
+  marker="$(head -1 "$HOLDER_STARTING" 2>/dev/null)"
+  # A HERE-STRING, not a pipe: bash appends the newline, so `read` does not
+  # have to be read through "it failed but filled the variables anyway".  The
+  # trailing `_` swallows anything past the two fields rather than letting it
+  # land in the deadline.
+  read -r mpid until_s _ <<<"$marker" || true
+  [ -n "${mpid:-}" ] && [ "$mpid" = "$pid" ] || return 1
+  case "${until_s:-}" in
+    ''|*[!0-9]*) printf 'unknown\n' ;;
+    *) left=$(( until_s - $(date +%s) ))
+       [ "$left" -ge 0 ] || left=0
+       printf '%s\n' "$left" ;;
+  esac
+  return 0
 }
 
 _with_arm_lock() {
@@ -440,7 +531,7 @@ _holder_arm() {
   while [ "$SECONDS" -lt "$deadline" ]; do
     if [ -s "$HOLDER_ERR" ]; then
       die "the serving lifetime hold could not be taken: $(head -1 "$HOLDER_ERR")
-Nothing was started.  'bin/aistack status' names the mode that is held."
+${ARM_FAIL_STATE:-Nothing was started.}  'bin/aistack status' names the mode that is held."
     fi
     if pid="$(_holder_pid)" && ! flock -n -x "$LIFECYCLE_LOCK" true 2>/dev/null; then
       info "Serving lifetime hold: SHARED, pid $pid (released when the project stops)."
@@ -450,7 +541,7 @@ Nothing was started.  'bin/aistack status' names the mode that is held."
   done
   _holder_let_go
   die "the serving lifetime hold was not established within 20s.
-Nothing was started.  See $HOLDER_LOG."
+${ARM_FAIL_STATE:-Nothing was started.}  See $HOLDER_LOG."
 }
 
 _holder_let_go() {
@@ -540,8 +631,65 @@ cmd_up() {
   # hold, which is what closes the check-then-act race §2.1 names.
   local rc=0
   _up "$@" || rc=$?
-  [ "$rc" = 0 ] || _with_arm_lock _holder_release_if_idle
+  if [ "$rc" = 0 ]; then
+    # SUCCESS IS RE-ASSERTED, NOT ASSUMED.  `up` arming the hold 25 minutes
+    # ago is not the same claim as `up` exiting 0 with the hold held.
+    #
+    # MEASURED (NOM-395 round 2, 2026-10-24, fixture with the grace shortened
+    # to 3s): `compose up` pulls every missing image BEFORE the first
+    # container starts, and ollama, open-webui and docling are multi-GB, so a
+    # cold install can put the first `running` container past the holder's
+    # 1200s startup grace.  The holder then logged "no container appeared
+    # within 1200s; releasing" and exited -- and the containers started, the
+    # health gate passed, `up` printed success and RETURNED 0.  Nine services
+    # serving, lifecycle lock free: this ticket's end state reached with no
+    # reboot, and reported as a success on the way there.
+    #
+    # Re-asserting here also covers a holder that died mid-startup for any
+    # other reason, which is the more general property and the reason this is
+    # not a longer grace.
+    _with_arm_lock _holder_reassert
+  else
+    _with_arm_lock _holder_release_if_idle
+  fi
   return $rc
+}
+
+_holder_reassert() {
+  # Prove the hold is STILL real, and re-arm if it is not.
+  #
+  # The predicate is `_holder_arm`'s own proof, both halves of it: a validated
+  # holder process AND a failing exclusive probe.  The pid file alone is the
+  # weaker claim this whole ticket family exists to stop accepting, and the
+  # probe alone would also fail while a backup held the shared mode with no
+  # serving holder at all.
+  #
+  # `ensure_rundir` has run (`_with_arm_lock` calls it), which the probe needs:
+  # `flock` cannot OPEN a lock file whose directory is gone, and that failure
+  # is indistinguishable from "something holds it" -- a false green for
+  # exactly the post-reboot state.
+  local pid
+  if pid="$(_holder_pid)"; then
+    if ! flock -n -x "$LIFECYCLE_LOCK" true 2>/dev/null; then
+      return 0
+    fi
+    # A live `--serving-hold-run` process that does not hold the lock is not a
+    # hold, and `_holder_arm` would return early on the pid file alone, so it
+    # has to go before the re-arm can do anything.
+    info "The serving lifetime hold (pid $pid) is no longer holding the lock; re-arming."
+    _holder_let_go
+  else
+    info "The serving lifetime hold lapsed while the stack was starting; re-arming."
+  fi
+  # `local` is DYNAMICALLY scoped in bash, so this reaches `_holder_arm`'s
+  # refusal text and nothing else.  `up`'s first arm runs before anything has
+  # started, where "Nothing was started" is true; here the project is already
+  # serving, where it would be a false statement in the one message an
+  # operator reads when the hold could not be taken.
+  local ARM_FAIL_STATE="THE STACK IS RUNNING WITHOUT THE HOLD -- nothing was stopped, but
+the kernel is not enforcing the drill interlock.  'bin/aistack up' retries the
+re-arm without restarting anything; 'bin/aistack down' stops the stack."
+  _holder_arm
 }
 
 _holder_release_if_idle() {
@@ -711,7 +859,7 @@ cmd_status() {
   # Steady-state and helper counts are printed SEPARATELY, and the lifecycle
   # mode currently held is named (final-design §2.1).  One number could not
   # carry all three honestly.
-  local steady helpers mode holder srv
+  local steady helpers mode holder srv left
   # `grep -v | grep -c .`, not `grep -vc`.  MEASURED (NOM-300, 2026-10-24):
   # with the stack down, `compose ps --services --filter status=running`
   # prints a single newline rather than nothing, so `grep -vc` counted that
@@ -735,7 +883,17 @@ cmd_status() {
   # as three facts.
   holder="$(_holder_pid || true)"
   srv=0; _serving_running || srv=$?
-  if [ -n "$holder" ] && [ "$srv" = 1 ]; then
+  # "A HOLDER IS ARMED AND NOTHING RUNS" IS TWO STATES, NOT ONE, and the
+  # startup one is the correct order rather than a defect -- see
+  # `_holder_starting`.  `left` is the seconds until the hold self-releases if
+  # nothing ever starts, or empty when the marker could not say.
+  if [ -n "$holder" ] && [ "$srv" = 1 ] && left="$(_holder_starting)"; then
+    case "$left" in
+      ''|unknown) left="" ;;
+      *) left=" (it releases by itself in ${left}s if none starts)" ;;
+    esac
+    mode="$mode   -- the serving lifetime hold (pid $holder) is ARMED and waiting for the project's first container${left}"
+  elif [ -n "$holder" ] && [ "$srv" = 1 ]; then
     mode="$mode   -- the serving lifetime hold (pid $holder) is held while NOTHING runs; release it with 'bin/aistack down'"
   elif [ -n "$holder" ]; then
     mode="$mode   (serving lifetime hold: pid $holder)"
@@ -888,14 +1046,22 @@ cmd_verify() {
   with_lifecycle_lock sh "$ROOT/scripts/restore.sh" "$@"
 }
 cmd_drill()  { "$ROOT/scripts/drill.sh" "$@"; }
-# The two serving-hold facts are computed HERE and passed in, rather than
+# The serving-hold facts are computed HERE and passed in, rather than
 # re-derived in doctor.sh: one implementation of "is there a live holder"
 # means `status` and `doctor` cannot disagree about it.  doctor.sh already
 # says so when it is run directly instead of through the CLI, because only
 # the CLI knows which lock directory was picked.
+#
+# AISTACK_SERVING_STARTING is the third fact, added in NOM-395 round 2 for the
+# same reason the first two are here: `doctor` has to tell a hold that is
+# waiting for its first container apart from a hold that leaked, and only the
+# CLI can read the marker the holder publishes.  It is the seconds left in the
+# grace, `0`+ when the window is open, or EMPTY when it is not -- so an older
+# doctor.sh that ignores it keeps exactly its old behaviour.
 cmd_doctor() {
   AISTACK_SERVING_HOLDER="$(_holder_pid || true)" \
   AISTACK_SERVING_COUNT="$(_serving_count)" \
+  AISTACK_SERVING_STARTING="$(_holder_starting || true)" \
     "$ROOT/scripts/doctor.sh" "$@"
 }
 cmd_security_check() { "$ROOT/scripts/security-check.sh" "$@"; }

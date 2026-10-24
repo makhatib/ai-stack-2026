@@ -200,6 +200,56 @@ interlock; the drill's own check is doing it instead.
 If this host reboots on a schedule, run `bin/aistack doctor` after a boot —
 or `bin/aistack up`, which repairs it whether or not it was broken.
 
+## `doctor` or `status` says the hold is armed while nothing is running
+
+`bin/aistack up` arms the hold **before** it starts anything — that order is
+what stops a drill slipping in between the check and the start — so for part of
+every startup a hold exists over zero containers. On a cold install that part is
+long: `compose up` pulls every missing image before the first container runs,
+and ollama, open-webui and docling are multi-GB.
+
+That is reported as a startup, not a leak:
+
+```sh
+bin/aistack status
+#   lifecycle lock : shared (serving)   -- the serving lifetime hold (pid N) is
+#   ARMED and waiting for the project's first container (it releases by itself
+#   in 1178s if none starts)
+
+bin/aistack doctor
+#   [warn] serving lifetime hold: ARMED (pid N) and waiting for the project's
+#          first container.
+```
+
+`doctor` stays green for it. A drill and a restore **are** refused while it
+lasts, so if nothing is in fact starting, `bin/aistack down` clears it — and the
+hold releases by itself 1200s after the holder started if no container of the
+project ever appears.
+
+The same quadrant with **`held while NOTHING runs`** and a `[FAIL]` is the other
+state: a hold that outlived whatever armed it, with no startup in progress. That
+one needs `bin/aistack down`.
+
+### The grace can lapse during a very slow first install
+
+The 1200s is measured from the holder's own start, so a cold install whose pulls
+outlast it used to leave the holder gone — and then the containers started, the
+health gate passed, and `up` returned **0** with the lifecycle lock free. That
+is the post-reboot state above, reached with no reboot and reported as a
+success.
+
+`up` now re-asserts the hold before it reports success, and re-arms if it has
+gone:
+
+```
+The serving lifetime hold lapsed while the stack was starting; re-arming.
+```
+
+So `up` exiting 0 means the hold is held now, not that it was held when `up`
+began. If the re-arm itself cannot be done, `up` exits non-zero and says that
+the stack is running without the hold — nothing is stopped, but the kernel is
+not enforcing the drill interlock until you repair it.
+
 ## I cannot reach it in a browser
 
 1. `bin/aistack status` — is Caddy running and healthy?

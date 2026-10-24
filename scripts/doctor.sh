@@ -250,14 +250,16 @@ fi
 # killed, and the state that leaves behind looks healthy from every other
 # angle.  So it is asked about directly.
 #
-# The two facts come from bin/aistack (AISTACK_SERVING_HOLDER, a pid or
-# empty; AISTACK_SERVING_COUNT, a number or `unknown`) so that `status` and
-# `doctor` share one implementation of "is there a live holder".
+# The three facts come from bin/aistack (AISTACK_SERVING_HOLDER, a pid or
+# empty; AISTACK_SERVING_COUNT, a number or `unknown`; AISTACK_SERVING_STARTING,
+# non-empty only while the live hold is still inside its startup grace) so that
+# `status` and `doctor` share one implementation of each of them.
 if [ -z "${AISTACK_RUNDIR:-}" ]; then
   warn "serving lifetime hold: not checked — run 'bin/aistack doctor'."
 else
   HOLD="${AISTACK_SERVING_HOLDER:-}"
   NSERV="${AISTACK_SERVING_COUNT:-unknown}"
+  STARTING="${AISTACK_SERVING_STARTING:-}"
   # BOTH INCONSISTENT QUADRANTS ARE FAILURES, not just the absent one.
   #
   # MEASURED (NOM-300 review, 2026-10-24): a refusal inside `aistack up` could
@@ -267,7 +269,33 @@ else
   # over an empty stack refuses every drill and every restore for up to the
   # 1200s startup grace, so the lock has stopped describing the serving state
   # just as surely as a free lock over nine running services does.
-  if [ -n "$HOLD" ] && [ "$NSERV" = 0 ]; then
+  #
+  # BUT "HELD WITH NOTHING RUNNING" IS TWO STATES, and only one of them is a
+  # defect.  MEASURED (NOM-395 round 2, 2026-10-24): `up` arms the hold BEFORE
+  # it starts anything — the correct order, and the thing that closes the
+  # check-then-act race — so every normal startup passes through this quadrant
+  # between the arm and the first container reaching `running`.  On a cold
+  # install `compose up` pulls multi-GB images first, so that window is
+  # minutes long, and this check exited 1 inside it while advising
+  # `bin/aistack down`: advice which, followed, tears down a stack that is
+  # starting correctly.  The holder keeps the two apart with its own `seen`
+  # flag and publishes the open window; nothing outside it could.
+  if [ -n "$HOLD" ] && [ "$NSERV" = 0 ] && [ -n "$STARTING" ]; then
+    # warn, not bad: the state is correct, and a drill IS refused while it
+    # lasts, so an operator who is not waiting for a startup still gets told
+    # how to clear it.
+    warn "serving lifetime hold: ARMED (pid $HOLD) and waiting for the project's first container."
+    case "$STARTING" in
+      unknown) printf '         It releases by itself if none ever starts.\n' ;;
+      *)       printf '         It releases by itself in %ss if none ever starts.\n' "$STARTING" ;;
+    esac
+    printf '         This is what a startup looks like from here, not a leak: up\n'
+    printf '         arms the hold before it starts anything, and a cold install\n'
+    printf '         pulls every missing image before the first container runs.  A\n'
+    printf '         drill and a restore are refused until it clears.  If nothing\n'
+    printf '         is in fact starting:\n'
+    printf '             bin/aistack down\n'
+  elif [ -n "$HOLD" ] && [ "$NSERV" = 0 ]; then
     bad "THE SERVING LIFETIME HOLD IS HELD (pid $HOLD) WHILE NOTHING IS RUNNING."
     printf '         The shared mode means "the stack is up" (final-design 2.1), and\n'
     printf '         nothing is.  While it is held a restore drill and a restore are\n'

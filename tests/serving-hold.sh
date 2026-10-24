@@ -346,9 +346,163 @@ grep -q 'hold stays: containers are still running' "$WORK/t11b.out"; chk $? "and
 no_drills
 release >/dev/null 2>&1; chk $? "release cleans up after the case"
 
+# --- 12: the arming window is a startup, not a leak (NOM-395 round 2) -------
+# `up` ARMS BEFORE IT STARTS ANYTHING, which is the correct order and the thing
+# that closes the check-then-act race.  So "a holder is armed and zero
+# containers run" is true of every normal startup as well as of the leak case
+# 11 is about, and on a cold install it is true for MINUTES: `compose up` pulls
+# every missing image before the first container starts, and ollama, open-webui
+# and docling are multi-GB.  `doctor` exited 1 inside that window and `status`
+# advised `bin/aistack down` -- advice which, followed, tears down a stack that
+# is starting correctly.
+#
+# The holder now publishes the open window and both reports read it.  What is
+# asserted here is that the two states get DIFFERENT verdicts, because a fix
+# that simply stopped failing on the quadrant would have deleted case 11's
+# property instead of refining it.
+release >/dev/null 2>&1
+say 0
+arm >/dev/null 2>&1; chk $? "arm succeeds with 0 containers, as a normal 'up' does"
+STARTF="$AISTACK_RUNDIR/serving.holder.starting"
+[ -f "$STARTF" ]; chk $? "the holder published its startup grace"
+HPID="$(head -1 "$PIDF" | tr -dc '0-9')"
+[ "$(cut -d' ' -f1 "$STARTF")" = "$HPID" ]; chk $? "and the marker names the holder, so a stale one cannot stand in for it"
+( load; cmd_status ) >"$WORK/t12.st" 2>&1
+grep -q "ARMED and waiting for the project's first container" "$WORK/t12.st"
+chk $? "status calls it an arming window"
+if grep -q 'held while NOTHING runs' "$WORK/t12.st"; then
+  fail "status still advises 'bin/aistack down' during a correct startup"
+else pass "and no longer advises 'bin/aistack down' during a correct startup"; fi
+
+# THE THREE FACTS, AND THE SHIPPED doctor.sh BLOCK THAT READS THEM.  Extracted
+# rather than retyped, so this measures what ships; it refuses if the anchor is
+# gone or matches twice, because an empty extraction measures nothing.
+BLK="$WORK/hold-block.sh"
+DOC="$ROOT/scripts/doctor.sh"
+nanch="$(grep -xcF '  HOLD="${AISTACK_SERVING_HOLDER:-}"' "$DOC" 2>/dev/null || true)"
+nend="$(grep -xcF 'hdr "Exposure"' "$DOC" 2>/dev/null || true)"
+if [ "$nanch" != 1 ] || [ "$nend" != 1 ]; then
+  printf '  [refuse] doctor.sh serving-hold block: %s start anchors, %s end anchors (want 1 and 1).\n' "$nanch" "$nend"
+  printf '           The block moved or was renamed; re-anchor this case rather\n'
+  printf '           than deleting it -- the property is in final-design 2.1.\n'
+  rm -rf "$WORK"; exit 2
+fi
+awk 'index($0,"  HOLD=\"${AISTACK_SERVING_HOLDER:-}\"")==1{p=1}
+     $0=="hdr \"Exposure\""{p=0} p' "$DOC" \
+  | sed -e :a -e '/^$/{$d;N;ba' -e '}' > "$WORK/blk.raw"
+# The extraction ends with the chain's `fi` and then the `fi` of the outer
+# `[ -z "$AISTACK_RUNDIR" ]` test, whose `else` we did not take.  Drop exactly
+# that one, and refuse if the shape is not what we just described.
+if [ "$(tail -1 "$WORK/blk.raw")" != "fi" ] || [ "$(tail -2 "$WORK/blk.raw" | head -1)" != "  fi" ]; then
+  printf '  [refuse] doctor.sh serving-hold block does not end in the expected two `fi`s.\n'
+  rm -rf "$WORK"; exit 2
+fi
+{ printf 'RC=0\n'
+  printf 'ok()   { printf "  [ ok ] %%s\\n" "$*"; }\n'
+  printf 'bad()  { printf "  [FAIL] %%s\\n" "$*"; RC=1; }\n'
+  printf 'warn() { printf "  [warn] %%s\\n" "$*"; }\n'
+  sed '$d' "$WORK/blk.raw"
+  printf 'exit $RC\n'; } > "$BLK"
+bash -n "$BLK" 2>/dev/null; chk $? "the extracted doctor.sh block is syntactically whole"
+doc_block() {   # $1 holder, $2 count, $3 starting
+  AISTACK_RUNDIR="$AISTACK_RUNDIR" AISTACK_SERVING_HOLDER="$1" \
+  AISTACK_SERVING_COUNT="$2" AISTACK_SERVING_STARTING="$3" bash "$BLK" 2>&1
+}
+doc_rc() { doc_block "$@" >/dev/null 2>&1; }
+
+o="$(doc_block 4242 0 1180)"; rc=0; doc_rc 4242 0 1180 || rc=$?
+[ "$rc" = 0 ]; chk $? "doctor is GREEN while a hold waits for the first container (rc=$rc)"
+printf '%s' "$o" | grep -q '^  \[warn\] serving lifetime hold: ARMED'
+chk $? "and says so as a warning, with the window named"
+printf '%s' "$o" | grep -q '1180s'; chk $? "and says when it releases by itself"
+# THE LEAK CASE 11 IS ABOUT, same quadrant, marker absent: still a failure.
+o="$(doc_block 4242 0 "")"; rc=0; doc_rc 4242 0 "" || rc=$?
+[ "$rc" = 1 ]; chk $? "doctor still FAILS on a hold with nothing running and no startup window (rc=$rc)"
+printf '%s' "$o" | grep -q 'HELD (pid 4242) WHILE NOTHING IS RUNNING'
+chk $? "and still names 'bin/aistack down' for it"
+# A WINDOW IT CANNOT PUT A NUMBER ON IS STILL A WINDOW, not a leak: `unknown`
+# has to travel as something non-empty or this quadrant collapses back.
+rc=0; doc_rc 4242 0 unknown || rc=$?
+[ "$rc" = 0 ]; chk $? "an unquantified startup window is still not a failure (rc=$rc)"
+# The two unchanged verdicts, so a refinement cannot quietly widen.
+rc=0; doc_rc 4242 3 "" || rc=$?
+[ "$rc" = 0 ]; chk $? "a hold with 3 containers running is still ok (rc=$rc)"
+rc=0; doc_rc "" 3 "" || rc=$?
+[ "$rc" = 1 ]; chk $? "no hold with 3 containers running still FAILS (rc=$rc)"
+# THE GRACE CLOSES ON THE FIRST CONTAINER, not on the deadline: from then on a
+# holder with zero containers means the project STOPPED, which is case 11's
+# leak again, so the window has to shut or the leak becomes unreportable.
+say 2
+wait_until 20 test ! -f "$STARTF"; chk $? "the grace marker is withdrawn once the first container is seen"
+if ( load; _holder_starting ) >/dev/null 2>&1; then
+  fail "the startup window is still open after a container was seen"
+else pass "and the window is closed, so a later empty stack reads as the leak again"; fi
+release >/dev/null 2>&1
+[ ! -f "$STARTF" ]; chk $? "and releasing leaves no marker behind"
+
+# A MARKER MUST NOT OUTLIVE ITS HOLDER AND EXCUSE THE NEXT LEAK.  A SIGKILLed
+# holder runs neither its trap nor its exit path, so the file can survive one;
+# requiring it to name the holder `_holder_pid` just validated is what makes it
+# describe that holder or nothing.
+say 0
+arm >/dev/null 2>&1; chk $? "arm again, for a fresh marker"
+HPID="$(head -1 "$PIDF" | tr -dc '0-9')"
+if ( load; _holder_starting ) >/dev/null 2>&1; then pass "the window is open for the live holder"
+else fail "the window did not open for a freshly armed holder"; fi
+printf '%s %s\n' "$(( HPID + 1 ))" "$(( $(date +%s) + 900 ))" > "$STARTF"
+if ( load; _holder_starting ) >/dev/null 2>&1; then
+  fail "a marker naming a DIFFERENT pid opened the startup window"
+else pass "a marker naming a different pid does not open the window"; fi
+release >/dev/null 2>&1; chk $? "release cleans up after the case"
+
+# --- 13: a hold that lapsed during startup is re-armed before `up` says ok --
+# MEASURED (NOM-395 round 2, grace shortened to 3s in a copy): the holder's
+# startup grace is measured from its own start, so a cold install whose pulls
+# outlast it leaves the holder gone -- and then the containers start, the
+# health gate passes, `up` prints success and returns 0.  Nine services
+# serving, lifecycle lock free: this ticket's state with no reboot, reported
+# as a success.  `cmd_up` now re-asserts the hold on the way out.
+#
+# The lapse is CONSTRUCTED here by killing the holder rather than by waiting
+# out 1200s, which is also the more general property the fix has: a holder
+# that died mid-startup for any other reason is caught the same way.
+release >/dev/null 2>&1
+say 0
+up_lapsed() { (
+  load
+  _up() {
+    local p; p="$(head -1 "$PIDF" 2>/dev/null | tr -dc '0-9')"
+    [ -n "$p" ] && kill -9 "$p" 2>/dev/null
+    # ...and then the images finish pulling and the containers come up.
+    say 2
+    return 0
+  }
+  cmd_up
+); }
+rc=0; up_lapsed >"$WORK/t13.out" 2>&1 || rc=$?
+[ "$rc" = 0 ]; chk $? "cmd_up succeeds when the hold lapsed mid-startup (rc=$rc)"
+grep -q 're-arming' "$WORK/t13.out"; chk $? "and says it re-armed rather than reporting a bare success"
+holder_alive; chk $? "a validated holder exists again at the end of a successful up"
+if ex_free; then fail "the lock is FREE with containers running -- up returned 0 over the NOM-300 state"
+else pass "and the lock is held, so the drill interlock is back in the kernel"; fi
+[ "$(holder_procs)" = 1 ]; chk $? "exactly one holder, not one per re-arm ($(holder_procs))"
+# THE RE-ASSERTION MUST BE A NO-OP WHEN THE HOLD IS FINE, or every `up` would
+# churn the holder and the pid in `status` would change under the operator.
+# Same driver, with `_up` succeeding and killing nothing.
+up_fine() { ( load; _up() { return 0; }; cmd_up ); }
+HPID="$(head -1 "$PIDF" | tr -dc '0-9')"
+rc=0; up_fine >"$WORK/t13b.out" 2>&1 || rc=$?
+[ "$rc" = 0 ]; chk $? "a second up over a healthy hold still succeeds (rc=$rc)"
+[ "$(head -1 "$PIDF" | tr -dc '0-9')" = "$HPID" ]; chk $? "and keeps the SAME holder (pid $HPID), so the re-assertion is a no-op"
+if grep -q 're-arming' "$WORK/t13b.out"; then
+  fail "it re-armed a hold that was already held"
+else pass "and does not announce a re-arm it did not do"; fi
+[ "$(holder_procs)" = 1 ]; chk $? "still exactly one holder ($(holder_procs))"
+release >/dev/null 2>&1; chk $? "release cleans up after the case"
+
 printf '\n  %s assertions, %s failed\n' "$CHECKED" "$FAILED"
-if [ "$CHECKED" -lt 57 ]; then
-  printf '  [refuse] only %s assertions were evaluated, expected at least 57.\n' "$CHECKED"
+if [ "$CHECKED" -lt 88 ]; then
+  printf '  [refuse] only %s assertions were evaluated, expected at least 88.\n' "$CHECKED"
   printf '           Something stopped early; this is not a pass.\n'
   exit 2
 fi
