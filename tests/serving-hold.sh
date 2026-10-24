@@ -93,7 +93,18 @@ pass() { CHECKED=$((CHECKED+1)); printf '  [ ok ] %s\n' "$*"; }
 fail() { CHECKED=$((CHECKED+1)); FAILED=$((FAILED+1)); printf '  [FAIL] %s\n' "$*"; }
 chk()  { if [ "$1" = 0 ]; then pass "$2"; else fail "$2"; fi; }
 
-ex_free() { flock -n -x "$LOCK" true 2>/dev/null; }   # 0 = nothing holds it
+ex_free() {
+  # 0 = nothing holds it.
+  #
+  # A MISSING LOCK FILE IS NOT A HELD ONE, and the distinction only shows up
+  # after a reboot.  MEASURED while writing case 10: `flock -n -x` cannot OPEN
+  # a file that is not there, so it fails, and the one-line version of this
+  # function read that failure as "something holds the lock" — a false green
+  # for exactly the state the case is about.  Cases 1-9 always run with the
+  # file present, so their verdicts are unchanged.
+  [ -e "$LOCK" ] || return 0
+  flock -n -x "$LOCK" true 2>/dev/null
+}
 holder_alive() {
   local p
   [ -f "$PIDF" ] || return 1
@@ -162,7 +173,7 @@ N="$(holder_procs)"; [ "$N" = 1 ]; chk $? "still exactly one holder process (got
 # --- 3: an unanswered docker is not an empty stack -------------------------
 err_mode
 sleep 12
-holder_alive; chk $? "the hold survives a docker that cannot be reached"
+holder_alive; chk $? "the hold survives a docker that does not answer"
 if ex_free; then fail "THE LOCK WENT FREE while docker was unreachable — a lost answer was read as an empty stack"
 else pass "the lock is still held while docker is unreachable"; fi
 grep -q 'did not answer' "$HLOG"; chk $? "and the holder logged that it could not tell"
@@ -243,9 +254,36 @@ arm >"$WORK/t9.out" 2>&1; chk $? "re-arming after a forced exit works"
 if ex_free; then fail "the re-arm did not take the lock"
 else pass "and the lock is held again"; fi
 
+# --- 10: the state a reboot leaves, and the repair for it (NOM-395) --------
+# A reboot is the one route into the NOM-300 symptom that is not a failure of
+# anything.  The hold lives in a tmpfs, so a boot clears it; every serving
+# service is `restart: unless-stopped`, so the containers come back without it.
+# The stack then serves with the lifecycle lock free.
+#
+# WHAT IS NOT MEASURED HERE, AND WHY THAT IS NOT A GAP IN THE CASE: the reboot
+# itself.  This fixture has no stack and no containers, and the host that does
+# carries other squads' work.  Neither half is in doubt — a restart policy is
+# what restarts containers after a boot, and a process in a user session does
+# not survive one.  What IS measured is the state those two halves produce,
+# constructed exactly: the rundir gone, the containers back, no holder.
+release >/dev/null 2>&1
+rm -rf "$AISTACK_RUNDIR"          # what a tmpfs does to it across a boot
+say 2                             # ...while the containers came back without it
+[ ! -e "$LOCK" ]; chk $? "a reboot leaves no lock file at all (the tmpfs is cleared)"
+if ex_free; then pass "nothing holds the lifecycle lock after a reboot"
+else fail "the lock reads as HELD with no lock file — a missing file is not a hold"; fi
+gone; chk $? "and no holder exists: this is the NOM-395 state, constructed"
+# The repair `docs/troubleshooting.md` and `doctor` both name is `bin/aistack
+# up`, whose arming step is this.  It has to work from an EMPTY rundir, not
+# just from one some earlier command left behind.
+arm >"$WORK/t10.out" 2>&1; chk $? "the documented repair re-arms from an empty rundir"
+holder_alive; chk $? "a validated holder exists again"
+if ex_free; then fail "the repair returned 0 without taking the lock"
+else pass "and the lock is held again — the kernel enforces the interlock once more"; fi
+
 printf '\n  %s assertions, %s failed\n' "$CHECKED" "$FAILED"
-if [ "$CHECKED" -lt 40 ]; then
-  printf '  [refuse] only %s assertions were evaluated, expected at least 40.\n' "$CHECKED"
+if [ "$CHECKED" -lt 46 ]; then
+  printf '  [refuse] only %s assertions were evaluated, expected at least 46.\n' "$CHECKED"
   printf '           Something stopped early; this is not a pass.\n'
   exit 2
 fi

@@ -177,6 +177,29 @@ bin/aistack up            # idempotent; re-arms the hold, starts nothing new
 Until you do, a restore drill is refused only by its own check that no
 `aistack-*` container exists — a real backstop, but not the lock contract.
 
+### After a reboot, that is the expected state
+
+A reboot is the one route into it that is not a failure of anything. The hold
+lives in a tmpfs, so a boot clears it. Every serving service is `restart:
+unless-stopped`, so the containers come back without it. The stack serves, and
+the lifecycle lock is free until somebody runs `doctor` or `up`.
+
+This repository ships no systemd unit, so nothing re-arms the hold at boot by
+itself. Two things already stand in for one:
+
+```sh
+bin/aistack doctor   # FAILs: "N container(s) are running and nothing holds the lifecycle lock"
+bin/aistack up       # re-arms the hold; starts nothing new
+```
+
+and the restore drill refuses, inside its own exclusive hold, whenever any
+`aistack-*` container exists. So there is no window in which a drill can touch
+live volumes. What is absent in the meantime is the kernel enforcing that
+interlock; the drill's own check is doing it instead.
+
+If this host reboots on a schedule, run `bin/aistack doctor` after a boot —
+or `bin/aistack up`, which repairs it whether or not it was broken.
+
 ## I cannot reach it in a browser
 
 1. `bin/aistack status` — is Caddy running and healthy?
