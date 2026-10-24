@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# tests/serving-hold.sh — the serving lifetime hold (NOM-300).
+#
+# WHAT WENT WRONG AND WHY IT NEEDED A TEST.
+#
+# final-design §2.1 requires the lifecycle lock's SHARED mode to be held "for
+# as long as that project is up", so that a restore drill is excluded by the
+# kernel rather than by a check.  `cmd_up` took the shared mode, started the
+# project inside it and then RETURNED, which released it.  With nine services
+# healthy, `aistack status` said `free` and `flock -n -x` on the lock exited 0.
+# Every service was fine, every other check was green, and the one property
+# the drill's safety rests on was absent.  Nothing in the repository measured
+# it, which is the whole reason this file exists.
+#
+# IT NEEDS NO DOCKER, NO ROOT, NO STACK AND NO WINDOW.  It gives bin/aistack
+# its own lock directory, its own project name and a stub `docker` it can tell
+# to report N containers or to fail outright, and it drives the CLI's own
+# arm/release functions.  It never runs `up`, `down` or `compose`, so a live
+# stack is neither needed nor touched.
+#
+# IT REFUSES (exit 2) rather than reporting half a result: if the functions it
+# drives are no longer there, if it cannot make a lock directory, or if fewer
+# assertions than expected were evaluated.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+AISTACK="$ROOT/bin/aistack"
+[ -x "$AISTACK" ] || { echo "  [refuse] no executable $AISTACK"; exit 2; }
+command -v flock >/dev/null || { echo "  [refuse] flock is not installed"; exit 2; }
+
+RTDIR="${XDG_RUNTIME_DIR:-/tmp}"
+[ -w "$RTDIR" ] || RTDIR=/tmp
+WORK="$(mktemp -d "$RTDIR/aistack-hold-test.XXXXXX")" || {
+  echo "  [refuse] cannot create a work directory under $RTDIR"; exit 2; }
+
+export AISTACK_RUNDIR="$WORK/rundir"
+export COMPOSE_PROJECT_NAME=aistackholdtest
+CTL="$WORK/ctl"
+LOCK="$AISTACK_RUNDIR/lifecycle.lock"
+PIDF="$AISTACK_RUNDIR/serving.holder.pid"
+STOPF="$AISTACK_RUNDIR/serving.holder.stop"
+ARMF="$AISTACK_RUNDIR/serving.holder.arm"
+HLOG="$AISTACK_RUNDIR/serving.holder.log"
+
+# --- the stub docker --------------------------------------------------------
+# It answers only the one question the hold asks -- how many containers of the
+# project are running -- and it can refuse to answer, which is the state the
+# hold must not read as "none".
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/docker" <<'STUB'
+#!/bin/sh
+mode="$(head -1 "$STUB_CTL" 2>/dev/null)"
+case "$mode" in
+  err) echo "Cannot connect to the Docker daemon (stub)" >&2; exit 1 ;;
+  n:*) c="${mode#n:}"; i=0
+       while [ "$i" -lt "$c" ]; do echo "stubcid$i"; i=$((i+1)); done
+       exit 0 ;;
+esac
+echo "stub docker: unknown control '$mode'" >&2; exit 1
+STUB
+chmod +x "$WORK/bin/docker"
+export STUB_CTL="$CTL"
+export PATH="$WORK/bin:$PATH"
+
+say()      { printf 'n:%s\n' "$1" > "$CTL"; }
+err_mode() { printf 'err\n' > "$CTL"; }
+
+# `. bin/aistack --help` loads the definitions and leaves the dispatch through
+# `usage`.  Passing an argument is required: with none, the dispatch would see
+# this script's own positional parameters.
+load() { . "$AISTACK" --help >/dev/null 2>&1; }
+arm()     { ( load; _with_arm_lock _holder_arm ); }
+release() { ( load; _with_arm_lock _holder_let_go ); }
+
+# REFUSE if the thing under test is not there any more, instead of passing on
+# a stack of no-ops.
+MISSING=""
+for fn in _hold_run _holder_arm _holder_let_go _with_arm_lock _holder_pid \
+          _serving_count _serving_running; do
+  ( load; declare -F "$fn" >/dev/null ) || MISSING="$MISSING $fn"
+done
+if [ -n "$MISSING" ]; then
+  printf '  [refuse] bin/aistack no longer defines:%s\n' "$MISSING"
+  printf '           The serving lifetime hold was renamed or removed.  If it\n'
+  printf '           was replaced (a systemd serving supervisor, say), this\n'
+  printf '           test has to be rewritten against the replacement -- not\n'
+  printf '           deleted, because the property is in final-design 2.1.\n'
+  rm -rf "$WORK"; exit 2
+fi
+
+CHECKED=0; FAILED=0
+pass() { CHECKED=$((CHECKED+1)); printf '  [ ok ] %s\n' "$*"; }
+fail() { CHECKED=$((CHECKED+1)); FAILED=$((FAILED+1)); printf '  [FAIL] %s\n' "$*"; }
+chk()  { if [ "$1" = 0 ]; then pass "$2"; else fail "$2"; fi; }
+
+ex_free() { flock -n -x "$LOCK" true 2>/dev/null; }   # 0 = nothing holds it
+holder_alive() {
+  local p
+  [ -f "$PIDF" ] || return 1
+  p="$(head -1 "$PIDF" | tr -dc '0-9')"; [ -n "$p" ] || return 1
+  [ -r "/proc/$p/cmdline" ] || return 1
+  tr '\0' ' ' < "/proc/$p/cmdline" | grep -q 'serving.hold.run'
+}
+holder_procs() {
+  # ONLY THIS FIXTURE'S HOLDERS.  MEASURED: `pgrep -c -f` counted the real
+  # stack's hold as well, so the test passed with the stack down and failed
+  # with it up — a test whose verdict depends on the machine's unrelated state
+  # is worse than no test.  A holder is this fixture's when it has a
+  # descriptor on this fixture's lock file, which no other one can have.
+  local n=0 p
+  for p in $(pgrep -f 'serving.hold.run' 2>/dev/null || true); do
+    if ls -l "/proc/$p/fd" 2>/dev/null | grep -q "$LOCK"; then n=$((n+1)); fi
+  done
+  printf '%s\n' "$n"
+}
+gone() { [ ! -f "$PIDF" ]; }
+wait_until() {   # $1 = seconds, rest = predicate
+  local d=$(( SECONDS + $1 )); shift
+  while [ "$SECONDS" -lt "$d" ]; do if "$@"; then return 0; fi; sleep 0.3; done
+  return 1
+}
+cleanup() {
+  if [ -d "$AISTACK_RUNDIR" ]; then
+    : > "$STOPF" 2>/dev/null
+    wait_until 10 gone >/dev/null 2>&1
+    if holder_alive; then kill -9 "$(head -1 "$PIDF" | tr -dc '0-9')" 2>/dev/null; fi
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+printf '  fixture: %s, project %s, stubbed docker\n' "$AISTACK_RUNDIR" "$COMPOSE_PROJECT_NAME"
+
+# --- 1: the hold is taken, and the proof is the contract itself -------------
+say 1
+arm >"$WORK/t1.out" 2>&1; chk $? "arm returns 0 with a container running"
+grep -q 'SHARED, pid' "$WORK/t1.out"; chk $? "it reports taking the SHARED mode"
+holder_alive; chk $? "a validated holder process exists"
+if ex_free; then fail "AN EXCLUSIVE PROBE SUCCEEDED while the hold is held — this is the NOM-300 defect"
+else pass "an exclusive probe FAILS — the hold is real, not just a pid file"; fi
+flock -n -s "$LOCK" true 2>/dev/null; chk $? "a shared probe still succeeds, so a backup can still run"
+
+# FD HYGIENE.  flock lives on the open file DESCRIPTION and fork shares it, so
+# a descriptor the holder inherited keeps that lock alive for the holder's
+# whole life.  MEASURED: the first version of the hold inherited the arm
+# lock's descriptor and the next up/down blocked 120s and then died.
+HP="$(head -1 "$PIDF" | tr -dc '0-9')"
+FDS="$(ls -l "/proc/$HP/fd" 2>/dev/null)"
+[ -n "$FDS" ]; chk $? "the holder's descriptor table is readable"
+if printf '%s\n' "$FDS" | grep -q 'serving.holder.arm'; then
+  fail "the holder keeps the ARM lock's descriptor open — the next up/down will block"
+else pass "the holder holds no descriptor on the arm lock"; fi
+NL="$(printf '%s\n' "$FDS" | grep -c 'lifecycle.lock' || true)"
+[ "$NL" = 1 ]; chk $? "it holds exactly one descriptor on the lifecycle lock (got $NL)"
+flock -n -x "$ARMF" true 2>/dev/null; chk $? "the arm lock is free once arming has returned"
+
+# --- 2: arming twice does not make a second holder -------------------------
+arm >"$WORK/t2.out" 2>&1; chk $? "a second arm returns 0"
+grep -q 'already held' "$WORK/t2.out"; chk $? "and says it was already held"
+N="$(holder_procs)"; [ "$N" = 1 ]; chk $? "still exactly one holder process (got $N)"
+
+# --- 3: an unanswered docker is not an empty stack -------------------------
+err_mode
+sleep 12
+holder_alive; chk $? "the hold survives a docker that cannot be reached"
+if ex_free; then fail "THE LOCK WENT FREE while docker was unreachable — a lost answer was read as an empty stack"
+else pass "the lock is still held while docker is unreachable"; fi
+grep -q 'did not answer' "$HLOG"; chk $? "and the holder logged that it could not tell"
+say 1; sleep 6
+holder_alive; chk $? "the hold is still there once docker answers again"
+
+# --- 4: it releases when the project stops ---------------------------------
+say 0
+if wait_until 20 gone; then pass "the hold releases within 20s of the last container stopping"
+else fail "the hold was still there 20s after the last container stopped"; fi
+if wait_until 5 ex_free; then pass "and the lock is exclusively takeable again, so a drill can run"
+else fail "the lock is still held with nothing running"; fi
+grep -q 'is running; releasing' "$HLOG"; chk $? "and the holder logged why it let go"
+
+# --- 5: the startup window is not read as "stop" ---------------------------
+# `up` arms the hold BEFORE `compose up`, so "no container yet" must not mean
+# "nothing to hold the lock for".
+say 0
+arm >"$WORK/t5.out" 2>&1; chk $? "arm returns 0 with zero containers running"
+sleep 8
+holder_alive; chk $? "the hold is still there 8s later — waiting, not giving up"
+if ex_free; then fail "the lock is free during the startup window, when a drill must not start"
+else pass "the lock is held through the startup window"; fi
+say 2; sleep 6
+holder_alive; chk $? "and once the containers appear"
+say 0
+if wait_until 20 gone; then pass "and it still releases when they go away"
+else fail "it did not release after the containers went away"; fi
+
+# --- 6: release while containers run, which is what `down` does first ------
+say 3
+arm >/dev/null 2>&1
+holder_alive; chk $? "armed with three containers running"
+release >"$WORK/t6.out" 2>&1; chk $? "release returns 0"
+if holder_alive; then fail "the holder is still alive after release, so down would block on it"
+else pass "the holder is gone after release"; fi
+if ex_free; then pass "the lock is exclusively takeable, so down can proceed"
+else fail "the lock is still held after release"; fi
+[ ! -e "$STOPF" ]; chk $? "the stop file is cleaned up, so the next arm is not pre-stopped"
+
+# --- 7: arming is refused while something holds the exclusive mode ---------
+say 1
+flock -x "$LOCK" sleep 25 &
+DRILLPID=$!
+sleep 1
+arm >"$WORK/t7.out" 2>&1
+if [ $? = 0 ]; then fail "arm claimed success while the exclusive mode was held"
+else pass "arm refuses while a drill holds the exclusive mode"; fi
+grep -q 'EXCLUSIVE' "$WORK/t7.out"; chk $? "and names the reason"
+if holder_alive; then fail "the refused arm left a holder behind"
+else pass "the refused arm left no holder behind"; fi
+wait "$DRILLPID" 2>/dev/null
+
+# --- 8: concurrent arms produce one holder ---------------------------------
+say 1
+rm -f "$PIDF" "$STOPF"
+for i in 1 2 3; do arm >"$WORK/t8.$i" 2>&1 & done
+wait
+sleep 1
+N="$(holder_procs)"; [ "$N" = 1 ]; chk $? "three concurrent arms leave exactly one holder (got $N)"
+holder_alive; chk $? "and the pid file names a live one"
+
+# --- 9: a forced holder exit is visible, never silent ----------------------
+P="$(head -1 "$PIDF" | tr -dc '0-9')"
+kill -9 "$P" 2>/dev/null; sleep 1
+if holder_alive; then fail "a SIGKILLed holder still reads as live — the pid file is being believed"
+else pass "a SIGKILLed holder reads as absent"; fi
+[ -f "$PIDF" ]; chk $? "its stale pid file survives, which is the state status and doctor must catch"
+# Not "free immediately": a child the holder had already forked shares the
+# description and holds the lock until it exits.  The longest-lived child is a
+# one-second sleep, and the direction is the safe one -- too long, never too
+# short.
+if wait_until 5 ex_free; then pass "the lock becomes free within 5s of the forced exit"
+else fail "the lock was still held 5s after the holder was killed"; fi
+release >/dev/null 2>&1; chk $? "release over a stale pid file returns 0"
+gone; chk $? "and removes it"
+arm >"$WORK/t9.out" 2>&1; chk $? "re-arming after a forced exit works"
+if ex_free; then fail "the re-arm did not take the lock"
+else pass "and the lock is held again"; fi
+
+printf '\n  %s assertions, %s failed\n' "$CHECKED" "$FAILED"
+if [ "$CHECKED" -lt 40 ]; then
+  printf '  [refuse] only %s assertions were evaluated, expected at least 40.\n' "$CHECKED"
+  printf '           Something stopped early; this is not a pass.\n'
+  exit 2
+fi
+[ "$FAILED" = 0 ] || exit 1

@@ -155,6 +155,28 @@ these images: `authelia health` is not a command in 4.39.28, and the LiteLLM
 image contains neither `curl` nor `wget`. The shipped compose file already
 accounts for both.
 
+## A drill or a restore says the lifecycle lock is held
+
+The stack is up. It holds that lock in shared mode for as long as it is up, so
+that a restore cannot run against live volumes. `bin/aistack down` first.
+
+`bin/aistack status` names which mode is held and which process holds it.
+
+## `status` says the lock is free while the stack is serving
+
+Then the small process `bin/aistack up` leaves behind to hold it is gone —
+killed, or OOM-killed, or lost with the session that started it. `bin/aistack
+doctor` reports this as a FAIL and names the container count.
+
+Nothing is wrong with your services and nothing needs restarting:
+
+```sh
+bin/aistack up            # idempotent; re-arms the hold, starts nothing new
+```
+
+Until you do, a restore drill is refused only by its own check that no
+`aistack-*` container exists — a real backstop, but not the lock contract.
+
 ## I cannot reach it in a browser
 
 1. `bin/aistack status` — is Caddy running and healthy?

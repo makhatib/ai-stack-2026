@@ -178,6 +178,18 @@ convention: the drill holds an exclusive lock for its whole lifetime and the
 running stack holds a shared one, so the kernel refuses to let both exist.
 Not a startup check in each direction — those can race — one lock, two modes.
 
+The stack's half of that is a small process `bin/aistack up` leaves behind,
+because `docker compose up -d` detaches and a lock needs a living holder.
+`bin/aistack status` names it and `bin/aistack down` releases it. Two things
+follow. If that process is killed while the stack is serving, the lock goes
+free and `bin/aistack doctor` reports it as a FAIL — `bin/aistack up` re-arms
+it without restarting anything. And a drill refused for a lock you believe
+is free is still a drill refused by the stack being up: run `bin/aistack
+down` first, which is what the drill's own message says.
+
+`bin/aistack restore` takes the exclusive mode, so on a running stack it now
+waits for `down` instead of proceeding. It prints what it is waiting for.
+
 **What the drill proves:** a good backup restores, and a bad one is refused.
 
 **What it does not prove:** that a restored system cannot reach the network

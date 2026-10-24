@@ -71,10 +71,27 @@ export AISTACK_RUNDIR="$RUNDIR"
 LIFECYCLE_LOCK="$RUNDIR/lifecycle.lock"
 HELPER_LOCK="$RUNDIR/helper.lock"
 
+# The serving lifetime hold's own files.  All four are tmpfs scratch beside the
+# locks, for the same reason: a reboot must clear them.
+HOLDER_PID="$RUNDIR/serving.holder.pid"
+HOLDER_STOP="$RUNDIR/serving.holder.stop"
+HOLDER_ERR="$RUNDIR/serving.holder.err"
+HOLDER_LOG="$RUNDIR/serving.holder.log"
+HOLDER_ARM="$RUNDIR/serving.holder.arm"
+
+# The serving project's name, DERIVED rather than retyped: it is what the
+# holder and `status` filter containers by, and a second literal copy of it
+# here is how a `name:` change in compose.yaml turns into a holder that
+# watches a project with no containers in it and releases the lock at once.
+PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:[[:space:]]*[^[:space:]]/{print $2; exit}' "$ROOT/compose.yaml" 2>/dev/null)}"
+
 die()  { printf 'aistack: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 
 [ -f "$ROOT/compose.yaml" ] || die "no compose.yaml at $ROOT"
+[ -n "$PROJECT" ] || die "compose.yaml at $ROOT declares no 'name:'.
+The serving lifetime hold filters containers by the project name, and
+guessing it would make the hold watch the wrong set."
 
 ensure_rundir() {
   # MEASURED (NOM-258, 2026-10-18).  Two defects, both found by running a real
@@ -119,6 +136,23 @@ survive a crash as state nobody cleans up."
       chmod 0660 "$f" 2>/dev/null || true
     done
   fi
+  # THE HOLDER'S LOG AND ARM FILE ARE HANDED OVER TOO, and for the same reason
+  # the lock files are (NOM-258's defect, one layer further out).  install.sh
+  # runs `bin/aistack up` and a root-shell install would otherwise leave a
+  # root-owned 0644 serving.holder.log in an operator-owned directory; the
+  # operator's next `up` would fail on the `>>` redirect that starts the
+  # holder, the holder would die before it took the lock, and the symptom
+  # would be a 20-second wait and "the hold was not established".
+  #
+  # NOT the pid file: its existence is a claim that a holder is running, so an
+  # empty one created here would be a lie for `_holder_pid` to disprove.
+  for f in "$HOLDER_LOG" "$HOLDER_ARM"; do
+    [ -e "$f" ] || : > "$f" 2>/dev/null || true
+    if [ -e "$f" ] && [ "$(id -u)" = "0" ] && [ -n "$ouid" ] && [ "$ouid" != "0" ]; then
+      chown "$ouid:$ogid" "$f" 2>/dev/null || true
+      chmod 0660 "$f" 2>/dev/null || true
+    fi
+  done
   # Assert the outcome rather than assuming the chown worked.  A lock we
   # cannot write is not a lock, and failing here beats failing later with a
   # bare "Permission denied" from a redirect.
@@ -151,7 +185,17 @@ with_lifecycle_lock() {
   ensure_rundir
   exec {fd}>>"$LIFECYCLE_LOCK"
   local flag=-s; [ "$mode" = ex ] && flag=-x
-  flock "$flag" "$fd" || die "could not take the lifecycle lock"
+  # SAY WHY WE ARE WAITING BEFORE WAITING.  Since the serving lifetime hold
+  # exists (NOM-300) the shared mode is held for as long as the stack is up,
+  # so `aistack restore` on a running stack now blocks where it used to
+  # proceed — correctly, because restoring over live volumes is what the
+  # exclusive mode is for.  A correct refusal that looks like a hang is still
+  # a support ticket, so the non-blocking attempt comes first and a failure
+  # names the holder and the command that releases it.
+  if ! flock -n "$flag" "$fd"; then
+    info "Waiting for the lifecycle lock: $(_lock_wait_hint "$mode")"
+    flock "$flag" "$fd" || die "could not take the lifecycle lock"
+  fi
   AISTACK_LOCK_FD_LIFECYCLE="$fd" "$@"
   local rc=$?
   exec {fd}>&-
@@ -171,6 +215,268 @@ with_helper_lock() {
   local rc=$?
   exec {fd}>&-
   return $rc
+}
+
+# --- the serving lifetime hold ----------------------------------------------
+# WHY A PROCESS EXISTS WHOSE ONLY JOB IS TO HOLD A LOCK.
+#
+# MEASURED (NOM-300, 2026-10-18).  With nine services healthy, `aistack
+# status` said the lifecycle lock was `free` and `flock -n -x` on it exited 0.
+# Nothing was wrong with any service and no check said a word: `cmd_up` took
+# the shared lock, ran the opposing-project check, `compose up -d` and the
+# health gate inside it, and then RETURNED — which released it.  `compose up
+# -d` detaches by design, so once `up` exited there was no process left whose
+# lifetime was the serving lifetime, and the mutual exclusion the drill rests
+# on existed only during startup.  final-design §2.1 requires the shared mode
+# to be held "for as long as that project is up".
+#
+# The design names `aistack-serving.service` for this.  This repository ships
+# no systemd unit, and `aistack up` is deliberately unprivileged (see the
+# RUNDIR comment at the top — a lock that needs sudo would make starting the
+# stack a privileged operation and would break rootless Docker), so the
+# equivalent lifetime holder is a detached process of our own.
+#
+# IT TAKES ITS OWN LOCK ON ITS OWN DESCRIPTOR.  Inheriting `up`'s fd would
+# have been enough to keep the lock open, but then the lock's lifetime would
+# be "until every inheritor exits", which includes anything else `up` ever
+# spawns.  Shared locks are compatible, so the holder can take its hold while
+# `up` still holds its own, and `up` returning no longer frees anything.
+#
+# WHAT IT IS NOT: a supervisor.  It starts nothing, restarts nothing and
+# watches no health — compose's `restart: unless-stopped` does that.  It holds
+# a lock and it answers one question: is this project still up.
+
+_hold_log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+_serving_count() {
+  # The number of RUNNING containers in the serving project, or the word
+  # `unknown` when docker did not answer.
+  #
+  # `unknown` IS NOT 0, and keeping the two apart is the whole point of this
+  # function.  During a daemon restart `docker ps` fails; reading that as "no
+  # containers" would make the holder release a lock the stack still needs,
+  # which is the same defect as the one above with a shorter window.
+  local out
+  if ! out="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null)"; then
+    printf 'unknown\n'; return 0
+  fi
+  [ -n "$out" ] || { printf '0\n'; return 0; }
+  printf '%s\n' "$(printf '%s\n' "$out" | wc -l)"
+}
+
+_serving_running() {
+  # 0 = at least one container running, 1 = none, 2 = cannot tell.
+  local n; n="$(_serving_count)"
+  case "$n" in
+    unknown) return 2 ;;
+    0)       return 1 ;;
+    *)       return 0 ;;
+  esac
+}
+
+_holder_pid() {
+  # Prints the live holder's pid and returns 0; returns 1 when there is none.
+  #
+  # IT VALIDATES THE PROCESS, not just the file.  A pid file outlives a
+  # SIGKILL and pids are recycled, so `kill -0` alone would let an unrelated
+  # process stand in for a holder that is gone — a false "the lock is held"
+  # is exactly the answer this ticket exists to stop producing.
+  local pid
+  [ -f "$HOLDER_PID" ] || return 1
+  pid="$(head -1 "$HOLDER_PID" 2>/dev/null | tr -dc '0-9')"
+  [ -n "$pid" ] || return 1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -e '--serving-hold-run' || return 1
+  printf '%s\n' "$pid"
+}
+
+_lock_wait_hint() {
+  local pid
+  if pid="$(_holder_pid)"; then
+    printf 'the stack is serving and holds it SHARED (hold pid %s).  Release it with `bin/aistack down`; this command continues by itself when it does.' "$pid"
+    return 0
+  fi
+  if [ "${1:-}" = ex ]; then
+    printf 'another lifecycle command holds it (a drill, a restore, a down or a backup).'
+  else
+    printf 'a drill or a restore holds it EXCLUSIVE.  `bin/aistack status` names the mode.'
+  fi
+}
+
+_hold_run() {
+  # THE HOLDER.  Runs detached; everything it says goes to $HOLDER_LOG.
+  local fd rc seen=0 deadline v n
+  # CLOSE WHAT WE INHERITED BEFORE TAKING ANYTHING OF OUR OWN.
+  #
+  # MEASURED (NOM-300, fixture drill, 2026-10-24).  The holder is spawned
+  # while the arm lock is held, so it inherited that descriptor — and `flock`
+  # is held for as long as ANY descriptor on the file stays open, not as long
+  # as the process that took it lives.  The detached holder therefore kept the
+  # arm lock for its entire life, the next `up` sat in `flock -w 120` and then
+  # died with "another up or down is arming", and three separate assertions
+  # failed from that one cause.
+  #
+  # The rule this obeys, stated generally: the holder's lifetime IS the
+  # project's lifetime, so it must not keep a descriptor it did not open, or
+  # it silently extends some other lock's lifetime to match its own.
+  for v in AISTACK_ARM_FD AISTACK_LOCK_FD_LIFECYCLE AISTACK_LOCK_FD_HELPER; do
+    n="${!v:-}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    eval "exec ${n}>&-" 2>/dev/null || true
+    unset "$v"
+  done
+  ensure_rundir
+  exec {fd}>>"$LIFECYCLE_LOCK"
+  # Bounded, not blocking: if a drill or a restore holds the exclusive mode,
+  # serving must not start at all, and `up` needs an answer rather than a
+  # terminal that never comes back.
+  if ! flock -w 10 -s "$fd"; then
+    printf 'a drill or a restore holds the lifecycle lock EXCLUSIVE.\n' > "$HOLDER_ERR"
+    _hold_log "could not take the shared mode in 10s; exiting"
+    exit 1
+  fi
+  # Written whole and then renamed, so that `_holder_pid` can never read a
+  # half-written number and conclude there is no holder while one holds the
+  # lock.  A failure here is fatal: a hold nothing can find is worse than no
+  # hold, because `down` would not release it.
+  if ! { printf '%s\n' "$$" > "$HOLDER_PID.$$" && mv -f "$HOLDER_PID.$$" "$HOLDER_PID"; }; then
+    printf 'cannot write the hold pid file at %s\n' "$HOLDER_PID" > "$HOLDER_ERR" 2>/dev/null || true
+    _hold_log "cannot write $HOLDER_PID; releasing"
+    exit 1
+  fi
+  _hold_log "holding SHARED for project $PROJECT (pid $$)"
+  # SIGTERM is an optimisation, never the contract: a root-shell install
+  # leaves a root-owned holder that the operator cannot signal, so the stop
+  # FILE is the release channel that always works and the trap only makes it
+  # faster.  (The file lives in a directory the operator owns, so the
+  # operator can always create it.)
+  trap '_hold_log "signalled; releasing"; rm -f "$HOLDER_PID"; exit 0' TERM INT HUP
+  # THE WAIT IS ONE SECOND AND THE DOCKER QUERY IS EVERY FIFTH, which is not
+  # a tuning choice.
+  #
+  # MEASURED (NOM-300, fixture drill, 2026-10-24): `flock` lives on the open
+  # file DESCRIPTION, and `fork` shares it — so every child the holder spawns
+  # holds the lock too, for as long as that child lives.  Kill the holder
+  # mid-`sleep 5` and its orphaned `sleep` kept the lock for the rest of the
+  # five seconds, with no holder process for `status` or `doctor` to find.
+  # `sleep 5 {fd}>&-` does NOT fix it (measured: the child's descriptor table
+  # still carries the lock file), because closing one descriptor on a shared
+  # description releases nothing while the other one is open.
+  #
+  # So the window is made small instead of pretended away: the longest-lived
+  # child is now a one-second `sleep`.  The direction is the safe one in any
+  # case — an inherited descriptor holds the lock slightly too LONG, which
+  # refuses a drill, never admits one — and the remaining unbounded case is a
+  # wedged `docker ps`, which is named here rather than left to be found.
+  deadline=$(( SECONDS + 1200 ))
+  local tick=0
+  while :; do
+    if [ -e "$HOLDER_STOP" ]; then _hold_log "stop requested; releasing"; break; fi
+    if [ "$(( tick % 5 ))" = 0 ]; then
+      # `|| rc=$?`, not `; rc=$?`: this script runs under `set -e`, and a bare
+      # call that returns 1 ("nothing is running") would kill the holder on
+      # its first poll instead of being a value to switch on.
+      rc=0; _serving_running || rc=$?
+      case "$rc" in
+        0) seen=1 ;;
+        1) if [ "$seen" = 1 ]; then
+             _hold_log "no container of $PROJECT is running; releasing"; break
+           elif [ "$SECONDS" -ge "$deadline" ]; then
+             _hold_log "no container of $PROJECT appeared within 1200s; releasing"; break
+           fi ;;
+        *) _hold_log "docker did not answer; KEEPING the hold (a lost answer is not an empty stack)" ;;
+      esac
+    fi
+    tick=$(( tick + 1 ))
+    sleep 1
+  done
+  rm -f "$HOLDER_PID"
+  _hold_log "released"
+}
+
+_with_arm_lock() {
+  # Arming and releasing are serialised against each other.  MEASURED while
+  # writing this: two concurrent `aistack up` runs each saw no holder, each
+  # spawned one, both took the shared mode (shared locks are compatible), and
+  # the second pid file overwrote the first — leaving a holder nobody could
+  # find, holding the lock after `down`, so the next drill was refused for
+  # ever.  This lock is taken BEFORE the lifecycle lock and nothing that
+  # holds the lifecycle lock waits for it, so it adds no cycle.
+  local afd rc=0
+  ensure_rundir
+  exec {afd}>>"$HOLDER_ARM"
+  flock -w 120 -x "$afd" || die "another 'aistack up' or 'aistack down' is arming or releasing the serving lifetime hold"
+  # The fd number travels to the holder so the holder can CLOSE it: see
+  # _hold_run.  Same convention as AISTACK_LOCK_FD_*, opposite purpose —
+  # those say "it is held for you", this one says "let go of it".
+  AISTACK_ARM_FD="$afd" "$@" || rc=$?
+  exec {afd}>&-
+  return $rc
+}
+
+_holder_arm() {
+  # Spawn the holder and PROVE it took the lock before returning.
+  #
+  # The proof is the contract itself: while the holder holds `flock -s`, an
+  # exclusive probe MUST fail.  Checking only that the pid file appeared would
+  # prove that a process started, which is the weaker claim that let this
+  # defect exist in the first place.  Both halves are required — the probe
+  # alone would also fail if some OTHER shared holder (a backup) were running
+  # and the holder had died.
+  local pid deadline
+  if pid="$(_holder_pid)"; then
+    info "Serving lifetime hold: already held (pid $pid)."
+    return 0
+  fi
+  rm -f "$HOLDER_PID" "$HOLDER_STOP" "$HOLDER_ERR"
+  setsid "$ROOT/bin/aistack" --serving-hold-run </dev/null >>"$HOLDER_LOG" 2>&1 &
+  deadline=$(( SECONDS + 20 ))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -s "$HOLDER_ERR" ]; then
+      die "the serving lifetime hold could not be taken: $(head -1 "$HOLDER_ERR")
+Nothing was started.  'bin/aistack status' names the mode that is held."
+    fi
+    if pid="$(_holder_pid)" && ! flock -n -x "$LIFECYCLE_LOCK" true 2>/dev/null; then
+      info "Serving lifetime hold: SHARED, pid $pid (released when the project stops)."
+      return 0
+    fi
+    sleep 0.2
+  done
+  _holder_let_go
+  die "the serving lifetime hold was not established within 20s.
+Nothing was started.  See $HOLDER_LOG."
+}
+
+_holder_let_go() {
+  # Release the hold and WAIT until it is actually gone.  The predicate is
+  # "no live holder", not "the lock is exclusively takeable": a concurrent
+  # backup holds the shared mode too, and waiting for a free lock would make
+  # `down` die during a backup it is entitled to queue behind.
+  local pid deadline
+  if ! pid="$(_holder_pid)"; then
+    rm -f "$HOLDER_PID" "$HOLDER_STOP"
+    return 0
+  fi
+  info "Releasing the serving lifetime hold (pid $pid)..."
+  : > "$HOLDER_STOP"
+  kill -TERM "$pid" 2>/dev/null || true
+  deadline=$(( SECONDS + 30 ))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    _holder_pid >/dev/null || break
+    sleep 1
+  done
+  if pid="$(_holder_pid)"; then
+    kill -KILL "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+  rm -f "$HOLDER_STOP" "$HOLDER_PID"
+  if pid="$(_holder_pid)"; then
+    die "the serving lifetime hold (pid $pid) will not release.
+It is probably owned by root because a root-shell install started it:
+  sudo kill $pid
+Nothing was stopped."
+  fi
+  return 0
 }
 
 # --- pins -------------------------------------------------------------------
@@ -212,7 +518,41 @@ PY
 # --- commands ---------------------------------------------------------------
 
 cmd_up() {
-  with_lifecycle_lock sh _up "$@"
+  # THE HOLD IS TAKEN BEFORE ANYTHING STARTS AND IT OUTLIVES THIS PROCESS.
+  # That is the whole fix (NOM-300): `with_lifecycle_lock sh _up` took the
+  # shared mode for the duration of startup and released it on return.
+  #
+  # The hold is NOT expressed through AISTACK_LOCK_FD_LIFECYCLE and `_up` does
+  # not inherit it.  That variable means "an ancestor holds the lifecycle lock
+  # on this process's behalf"; the holder is not an ancestor, it is a sibling
+  # that will outlive us, and a nested command that skipped acquisition on
+  # that basis would be skipping it on the strength of a descriptor it does
+  # not have.  Nothing `_up` runs takes the lifecycle lock, so there is
+  # nothing to pass down.
+  _with_arm_lock _holder_arm
+  # The opposing-project check and `compose up` therefore run INSIDE the
+  # hold, which is what closes the check-then-act race §2.1 names.
+  local rc=0
+  _up "$@" || rc=$?
+  [ "$rc" = 0 ] || _with_arm_lock _holder_release_if_idle
+  return $rc
+}
+
+_holder_release_if_idle() {
+  # `up` failed.  If nothing came up there is nothing for the lock to protect,
+  # so holding it would only block the next drill for ever.  If something DID
+  # come up — a partial start — the hold stays, because a drill alongside half
+  # a stack is precisely what it exists to prevent.
+  local rc=0
+  _serving_running || rc=$?
+  case "$rc" in
+    0) info "The serving lifetime hold stays: containers are still running."
+       info "'bin/aistack down' stops them and releases it." ;;
+    1) _holder_let_go ;;
+    *) info "The serving lifetime hold stays: docker did not answer, so whether"
+       info "anything is running is unknown, and keeping it is the safe answer." ;;
+  esac
+  return 0
 }
 _up() {
   # The drill must be excluded BY THE LOCK MODE, not by a count of holders.
@@ -332,7 +672,21 @@ _health_gate() {
   return 1
 }
 
-cmd_down()    { with_lifecycle_lock ex dc down --remove-orphans; }
+cmd_down() {
+  # RELEASE FIRST, THEN TAKE THE EXCLUSIVE MODE.  The holder's shared hold
+  # would otherwise block the exclusive acquisition below for ever, and a
+  # `down` that hangs is a worse bug than the one this fixed.
+  #
+  # THE WINDOW THIS LEAVES, STATED: between the holder letting go and `down`
+  # acquiring, serving containers are still running with nothing holding the
+  # lock, so a drill started in that instant takes the exclusive mode.  It is
+  # closed by the drill's OTHER guard — inside its own hold the drill refuses
+  # when any `aistack-*` container exists — which is why NOM-300 keeps both
+  # guards rather than replacing one with the other.  The lock establishes
+  # non-concurrency; the container check covers the handover.
+  _with_arm_lock _holder_let_go
+  with_lifecycle_lock ex dc down --remove-orphans
+}
 cmd_restart() { cmd_down; cmd_up; }
 cmd_logs()    { dc logs "${@:---tail=200}" | "$ROOT/scripts/redact.sh"; }
 cmd_config()  { dc config "$@"; }
@@ -342,13 +696,37 @@ cmd_status() {
   # Steady-state and helper counts are printed SEPARATELY, and the lifecycle
   # mode currently held is named (final-design §2.1).  One number could not
   # carry all three honestly.
-  local steady helpers mode
-  steady="$(dc ps --services --filter status=running 2>/dev/null | grep -vc -E '^(model-puller|backup-helper|agentgateway-verify)$' || true)"
+  local steady helpers mode holder srv
+  # `grep -v | grep -c .`, not `grep -vc`.  MEASURED (NOM-300, 2026-10-24):
+  # with the stack down, `compose ps --services --filter status=running`
+  # prints a single newline rather than nothing, so `grep -vc` counted that
+  # empty line as a service and `status` said "steady-state services running:
+  # 1" with zero containers on the host.  Counting only non-empty lines is
+  # the fix; it has been wrong since the MVP commit.
+  steady="$(dc ps --services --filter status=running 2>/dev/null \
+            | grep -v -E '^(model-puller|backup-helper|agentgateway-verify)$' \
+            | grep -c . || true)"
   helpers="$(docker ps --format '{{.Names}}' | grep -cE '^aistack-(model-puller|backup-helper|agentgateway-verify)' || true)"
   if   [ -e "$LIFECYCLE_LOCK" ] && flock -n -x "$LIFECYCLE_LOCK" true 2>/dev/null; then mode="free"
   elif [ -e "$LIFECYCLE_LOCK" ] && flock -n -s "$LIFECYCLE_LOCK" true 2>/dev/null; then mode="shared (serving)"
   elif [ -e "$LIFECYCLE_LOCK" ]; then mode="exclusive (a drill holds it)"
   else mode="free (no lock file)"; fi
+
+  # THE MODE ALONE CANNOT ANSWER "IS THE SERVING LIFETIME HOLD THERE".
+  # `aistack backup` holds the shared mode too, so `shared` does not imply the
+  # hold; and a hold that was killed leaves the lock FREE while nine
+  # containers keep serving — which is the state NOM-300 was filed about and
+  # therefore the one `status` has to be able to name.  Three facts, printed
+  # as three facts.
+  holder="$(_holder_pid || true)"
+  srv=0; _serving_running || srv=$?
+  if [ -n "$holder" ]; then
+    mode="$mode   (serving lifetime hold: pid $holder)"
+  elif [ "$srv" = 0 ]; then
+    mode="$mode   -- NO SERVING LIFETIME HOLD while $(_serving_count) container(s) run; re-arm with 'bin/aistack up'"
+  elif [ "$srv" = 2 ]; then
+    mode="$mode   (no serving lifetime hold; docker did not answer, so what is running is unknown)"
+  fi
 
   printf '\nAI Stack 2026\n'
   printf '  steady-state services running : %s\n' "${steady:-0}"
@@ -493,7 +871,16 @@ cmd_verify() {
   with_lifecycle_lock sh "$ROOT/scripts/restore.sh" "$@"
 }
 cmd_drill()  { "$ROOT/scripts/drill.sh" "$@"; }
-cmd_doctor() { "$ROOT/scripts/doctor.sh" "$@"; }
+# The two serving-hold facts are computed HERE and passed in, rather than
+# re-derived in doctor.sh: one implementation of "is there a live holder"
+# means `status` and `doctor` cannot disagree about it.  doctor.sh already
+# says so when it is run directly instead of through the CLI, because only
+# the CLI knows which lock directory was picked.
+cmd_doctor() {
+  AISTACK_SERVING_HOLDER="$(_holder_pid || true)" \
+  AISTACK_SERVING_COUNT="$(_serving_count)" \
+    "$ROOT/scripts/doctor.sh" "$@"
+}
 cmd_security_check() { "$ROOT/scripts/security-check.sh" "$@"; }
 # No lock: the suite reads the repo and drives throwaway fixtures. The one
 # test that re-runs the installer (the root tier) takes install.sh's own locks.
@@ -597,6 +984,11 @@ EOF
 }
 
 case "${1:-}" in
+  # Not in `usage`, and spelled as a flag rather than a word so that it cannot
+  # be mistaken for something an operator is meant to type: this is the
+  # detached serving lifetime hold, started by `up` and released by `down`.
+  # `_holder_pid` identifies the process by this exact string in its cmdline.
+  --serving-hold-run) shift; _hold_run ;;
   up) shift; cmd_up "$@" ;;
   down) shift; cmd_down "$@" ;;
   restart) shift; cmd_restart "$@" ;;

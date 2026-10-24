@@ -240,6 +240,42 @@ else
   fi
 fi
 
+# A FREE LIFECYCLE LOCK IS NOT GOOD NEWS WHILE THE STACK IS SERVING.
+#
+# MEASURED (NOM-300, 2026-10-18): nine services healthy, the lifecycle lock
+# `free`, `flock -n -x` on it exit 0 — so nothing stopped a restore drill from
+# starting against live volumes.  Every service was fine and `doctor` said
+# nothing, because the only lock question it asked was whether a second lock
+# directory existed.  The serving lifetime hold is a process, a process can be
+# killed, and the state that leaves behind looks healthy from every other
+# angle.  So it is asked about directly.
+#
+# The two facts come from bin/aistack (AISTACK_SERVING_HOLDER, a pid or
+# empty; AISTACK_SERVING_COUNT, a number or `unknown`) so that `status` and
+# `doctor` share one implementation of "is there a live holder".
+if [ -z "${AISTACK_RUNDIR:-}" ]; then
+  warn "serving lifetime hold: not checked — run 'bin/aistack doctor'."
+else
+  HOLD="${AISTACK_SERVING_HOLDER:-}"
+  NSERV="${AISTACK_SERVING_COUNT:-unknown}"
+  if [ -n "$HOLD" ]; then
+    ok "serving lifetime hold: held (pid $HOLD), $NSERV container(s) running"
+  elif [ "$NSERV" = unknown ]; then
+    warn "serving lifetime hold: absent, and docker did not say what is running."
+    printf '         Whether that is correct cannot be decided from here.\n'
+  elif [ "$NSERV" = 0 ]; then
+    ok "serving lifetime hold: absent, and nothing is running — consistent"
+  else
+    bad "$NSERV CONTAINER(S) ARE RUNNING AND NOTHING HOLDS THE LIFECYCLE LOCK."
+    printf '         The shared mode must be held for as long as the stack is up\n'
+    printf '         (final-design 2.1).  Without it the kernel is not stopping a\n'
+    printf '         restore drill from starting against your live volumes; only\n'
+    printf "         the drill's own container check is, and that is the backstop,\n"
+    printf '         not the contract.  Re-arm it without restarting anything:\n'
+    printf '             bin/aistack up\n'
+  fi
+fi
+
 hdr "Exposure"
 sed -n '/AISTACK-LOCAL-MODE:BEGIN/,/AISTACK-LOCAL-MODE:END/p' .env 2>/dev/null \
   | grep -v 'AISTACK-LOCAL-MODE' | sed 's/^# \?/  /'
