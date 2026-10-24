@@ -610,6 +610,12 @@ ensure_env_line "$SECRETS/open-webui.env" TOOL_SERVER_CONNECTIONS \
 # until `aistack mcp n8n-token` stores it here, LiteLLM serves the n8n server
 # with a token that n8n refuses, which is the safe failure.
 ensure_env_line "$SECRETS/litellm.env" N8N_MCP_TOKEN "__SET_ME__"
+# LiteLLM -> Langfuse (profile `tracing`).  The project keys are the ones
+# Langfuse creates headlessly from LANGFUSE_INIT_*; message bodies stay out of
+# the trace because the config sets turn_off_message_logging.
+ensure_env_line "$SECRETS/litellm.env" LANGFUSE_PUBLIC_KEY "$(sed -n s/^LANGFUSE_INIT_PROJECT_PUBLIC_KEY=//p "$LF")"
+ensure_env_line "$SECRETS/litellm.env" LANGFUSE_SECRET_KEY "$(sed -n s/^LANGFUSE_INIT_PROJECT_SECRET_KEY=//p "$LF")"
+ensure_env_line "$SECRETS/litellm.env" LANGFUSE_HOST "http://langfuse-web:3000"
 apply_env_file_mode "$SECRETS/open-webui.env"
 apply_env_file_mode "$SECRETS/litellm.env"
 

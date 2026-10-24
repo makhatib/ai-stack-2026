@@ -417,7 +417,14 @@ services:
     # NO `egress`.  Adding a cloud provider adds that bridge and MAKES TIER B
     # MANDATORY — the installer preflight enforces it, this file does not
     # quietly allow it.
-    networks: [gateway, inference, data, mcp-web, tracing]
+    networks:
+      gateway: {}
+      inference: {}
+      data: {}
+      mcp-web: {}
+      tracing: {}
+      llm:
+        ipv4_address: 172.31.254.2
     volumes:
       - ./config/litellm/config.yaml:/app/config.yaml:ro
     tmpfs:
@@ -573,15 +580,22 @@ services:
     # lines and no gateway; FOWNER is not needed and is not granted.
     cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
     networks:
-      gateway: {}
-      agent: {}
+      agent:
+        ipv4_address: 172.31.252.3
+      llm:
+        ipv4_address: 172.31.254.3
       tg-relay:
         ipv4_address: 172.31.253.3
     # Telegram is reached ONLY through the gate (172.31.253.2).  The name is
     # pinned here so Hermes needs no proxy setting and its TLS verification
     # still ends at Telegram's real certificate.
+    # gVisor has its own network stack and cannot use Docker's embedded DNS
+    # (127.0.0.11 refuses connections: measured, NOM-413), so every peer Hermes
+    # calls is pinned to a fixed address on a two-member bridge.
     extra_hosts:
       - "api.telegram.org:172.31.253.2"
+      - "litellm:172.31.254.2"
+      - "mem0:172.31.252.2"
     volumes:
       - hermes-data:/opt/data
       # Behavioural config; the bot token and keys come from the secrets file
@@ -631,7 +645,11 @@ services:
     image: aistack-local/mem0:${AISTACK_BUILD_TAG:-v2}
     pull_policy: never
     container_name: aistack-mem0
-    networks: [agent, gateway, data]
+    networks:
+      agent:
+        ipv4_address: 172.31.252.2
+      gateway: {}
+      data: {}
     volumes:
       - mem0-data:/data
     tmpfs:
@@ -877,6 +895,8 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
       - /var/log/clickhouse-server:rw,noexec,nosuid,size=128m,uid=101,gid=101
+      # The entrypoint writes the langfuse user here when CLICKHOUSE_USER is set.
+      - /etc/clickhouse-server/users.d:rw,noexec,nosuid,size=1m,uid=101,gid=101
     env_file:
       - ./secrets/clickhouse.env
     environment:
@@ -906,6 +926,10 @@ services:
       - /tmp:rw,noexec,nosuid,size=64m
     env_file:
       - ./secrets/minio.env
+    # The image's wrapper treats argv[1] as the data dir, so its default CMD
+    # ("minio server /data") fails its own check ("Data directory minio does not
+    # exist"); minio is started directly.  It still refuses to start without credentials.
+    entrypoint: ["minio"]
     command: ["server", "/data", "--address", ":9000", "--console-address", "127.0.0.1:9001"]
     mem_limit: 256m
     cpus: "0.50"
@@ -989,6 +1013,13 @@ networks:
     ipam:
       config:
         - subnet: 172.31.252.0/29
+  llm:
+    name: aistack-llm
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.254.0/29
   mcp-web:
     name: aistack-mcp-web
     internal: true          # zone_policy: contained

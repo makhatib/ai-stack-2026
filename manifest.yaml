@@ -179,7 +179,7 @@ bridges:
     class: gateway
     zone_policy: contained
     internal: true
-    members: [open-webui, n8n, litellm, hermes, mem0, whisper-cpp, kokoro]
+    members: [open-webui, n8n, litellm, mem0, whisper-cpp, kokoro]
     pairwise: false
     ipv6: false
     scope: mvp
@@ -207,6 +207,15 @@ bridges:
     members: [hermes, mem0]
     pairwise: true           # Hermes is mem0's only caller
     subnet: 172.31.252.0/29
+    ipv6: false
+    scope: v2
+  llm:
+    class: agent
+    zone_policy: contained
+    internal: true
+    members: [hermes, litellm]
+    pairwise: true           # Hermes is the only caller of LiteLLM on this bridge; fixed addresses because gVisor cannot use Docker DNS
+    subnet: 172.31.254.0/29
     ipv6: false
     scope: v2
   mcp-web:
