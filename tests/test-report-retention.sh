@@ -104,8 +104,18 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   out="$(bash "$PRUNE" --root "$R" --retain 3 --apply 2>&1)"
   have "$R" "$victim" && fail "root-owned dir survived: retention still cannot bound disk" \
                       || pass "pruned the ROOT-OWNED dir via the container fallback"
-  printf '%s\n' "$out" | grep -q 'removed via container' \
-    && pass "says which path removed it" || fail "container fallback was not reported: $out"
+  # The fallback exists for an operator who cannot delete a root-owned dir.
+  # Root can, so `rm` succeeds first and the container is never needed:
+  # asserting the container phrase there tests the wrong thing (NOM-400).
+  # Each identity must report the path it really took.
+  if [ "$(id -u)" -eq 0 ]; then
+    printf '%s\n' "$out" | grep -q "retention: pruned $victim\$" \
+      && pass "root removes it directly and says it pruned it" \
+      || fail "root prune was not reported plainly: $out"
+  else
+    printf '%s\n' "$out" | grep -q 'removed via container' \
+      && pass "says which path removed it" || fail "container fallback was not reported: $out"
+  fi
   rm -rf "$R" 2>/dev/null
 else
   printf '  [SKIP] root-owned case needs a working docker; not exercised here\n'

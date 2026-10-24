@@ -72,7 +72,11 @@ step() { printf '\n== %s\n' "$*"; }
 
 dc() { ( cd "$ROOT" && docker compose "$@" ); }
 
-cleanup_rundir() { rm -rf "$RUNDIR"; }
+CRED_TMP=""
+cleanup_rundir() {
+  rm -rf "$RUNDIR"
+  [ -z "$CRED_TMP" ] || dc exec -T n8n rm -f "$CRED_TMP" >/dev/null 2>&1 || true
+}
 
 # ---------------------------------------------------------------------------
 # preconditions
@@ -299,9 +303,16 @@ SH
 
   local dbpw; dbpw="$(read_secret samples_demo_db_password)"
 
-  # Written 0600 into samples/.run/, imported, then removed on trap EXIT.
-  ( umask 077
-    python3 - "$CRED_PG" "$DEMO_DB" "$DEMO_ROLE" "$dbpw" "$CRED_LLM" "$vkey" "$CRED_W4" "$w4tok" <<'PY' > "$RUNDIR/credentials.json"
+  # Streamed over stdin into the n8n container's own tmpfs, imported there and
+  # removed there.  NEVER a host file: a root-run install wrote it root:root
+  # 0600 under the bind mount and the container's `node` (uid 1000) got
+  # EACCES (NOM-400), and a host chown to 1000 would hand the secret to
+  # whichever host account owns that uid.  umask 077 keeps it 0600 owned by
+  # node; the EXIT trap removes it even when the import fails.
+  local ctmp=/home/node/.cache/aistack-credentials.json
+  CRED_TMP="$ctmp"
+  emit_credentials() {
+    python3 - "$CRED_PG" "$DEMO_DB" "$DEMO_ROLE" "$dbpw" "$CRED_LLM" "$vkey" "$CRED_W4" "$w4tok" <<'PY'
 import json, sys
 pg_id, db, user, pw, llm_id, vkey, w4_id, w4tok = sys.argv[1:9]
 print(json.dumps([
@@ -316,12 +327,12 @@ print(json.dumps([
      "data": {"name": "X-Aistack-Token", "value": w4tok}},
 ], indent=2))
 PY
-  )
-  chmod 0600 "$RUNDIR/credentials.json"
-
-  dc exec -T n8n n8n import:credentials --input=/opt/aistack/samples/.run/credentials.json >/dev/null 2>&1 \
+  }
+  emit_credentials | dc exec -T n8n sh -c 'umask 077; cat > "$1"' _ "$ctmp" >/dev/null 2>&1 \
+    || die "staging the demo credentials failed"
+  dc exec -T n8n n8n import:credentials --input="$ctmp" >/dev/null 2>&1 \
     || die "importing the demo credentials failed"
-  shred -u "$RUNDIR/credentials.json" 2>/dev/null || rm -f "$RUNDIR/credentials.json"
+  dc exec -T n8n rm -f "$ctmp" >/dev/null 2>&1 || true
 
   # The drill's ballast pair, bound to nothing.  Imported here too so
   # `aistack drill run` still has ciphertext to decrypt: scripts/drill.sh
