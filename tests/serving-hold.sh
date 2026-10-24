@@ -19,8 +19,16 @@
 # stack is neither needed nor touched.
 #
 # IT REFUSES (exit 2) rather than reporting half a result: if the functions it
-# drives are no longer there, if it cannot make a lock directory, or if fewer
-# assertions than expected were evaluated.
+# drives are no longer there, if it cannot make a lock directory, if the
+# fixture copy of the CLI is not the shipped file, or if fewer assertions than
+# expected were evaluated.
+#
+# CASES 14 AND 15 ARE NOM-396: two ways the same defect can come back.  14 is
+# a project name compose resolves from `.env` while the CLI derived its own
+# from compose.yaml -- the count then reads 0 over a serving stack, which is
+# NOM-300's symptom with the detector blinded as well.  15 is the holder
+# keeping a descriptor it did not open, which gives some other caller's lock
+# the project's lifetime.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -59,11 +67,35 @@ fi
 # files so that a case can leave a drill container behind without changing how
 # many project containers are running -- which is exactly the combination case
 # 11 needs.  Cases 1-9 never pass -a, so their answers are unchanged.
-for a in "$@"; do
-  [ "$a" = "-a" ] || continue
-  if [ -n "${STUB_DRILLS:-}" ] && [ -s "$STUB_DRILLS" ]; then cat "$STUB_DRILLS"; fi
-  exit 0
-done
+if [ "${1:-}" != compose ]; then
+  for a in "$@"; do
+    [ "$a" = "-a" ] || continue
+    if [ -n "${STUB_DRILLS:-}" ] && [ -s "$STUB_DRILLS" ]; then cat "$STUB_DRILLS"; fi
+    exit 0
+  done
+fi
+# THE PROJECT THE CONTAINERS ARE ACTUALLY IN, resolved the way compose
+# resolves it: COMPOSE_PROJECT_NAME, then `.env`, then compose.yaml's `name:`.
+# MEASURED against the real compose v5.0.2 (NOM-396, 2026-10-24): with `.env`
+# saying `fixtureenv` and compose.yaml saying `fixtureyaml`, the containers
+# came up as `fixtureenv-*` and `docker ps --filter
+# label=com.docker.compose.project=fixtureyaml` matched none of them.  This is
+# what lets case 14 stage that disagreement with no daemon and no containers.
+sroot="${STUB_PROJECT_ROOT:-.}"
+proj="${COMPOSE_PROJECT_NAME:-}"
+[ -n "$proj" ] || proj="$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$sroot/.env" 2>/dev/null | head -1)"
+[ -n "$proj" ] || proj="$(awk '/^name:[[:space:]]*[^[:space:]]/{print $2; exit}' "$sroot/compose.yaml" 2>/dev/null)"
+# A `docker ps` FILTERED ON A PROJECT LABEL answers for that one name, so a
+# name that is not the containers' own matches nothing.  `docker compose ps`
+# needs no such test: by construction it asks about its own project.
+if [ "${1:-}" != compose ]; then
+  for a in "$@"; do
+    case "$a" in
+      label=com.docker.compose.project=*)
+        [ "${a#label=com.docker.compose.project=}" = "$proj" ] || exit 0 ;;
+    esac
+  done
+fi
 case "$mode" in
   n:*) c="${mode#n:}"; i=0
        while [ "$i" -lt "$c" ]; do echo "stubcid$i"; i=$((i+1)); done
@@ -500,9 +532,133 @@ else pass "and does not announce a re-arm it did not do"; fi
 [ "$(holder_procs)" = 1 ]; chk $? "still exactly one holder ($(holder_procs))"
 release >/dev/null 2>&1; chk $? "release cleans up after the case"
 
+# --- 14: the project is COMPOSE'S, not one this script derived (NOM-396) ----
+# WHAT WENT WRONG.  `bin/aistack` derived the project name itself --
+# `${COMPOSE_PROJECT_NAME:-<awk over compose.yaml's name:>}` -- and
+# `_serving_count` filtered `docker ps` on it, going around `dc`.  Compose
+# resolves that name from one more place: `.env`.  MEASURED against the real
+# compose v5.0.2 (NOM-396, 2026-10-24): with `.env` naming `fixtureenv` and
+# compose.yaml naming `fixtureyaml`, the containers are `fixtureenv-*` and a
+# filter on `fixtureyaml` matches none of them.  The holder then counts 0,
+# never sets `seen`, and releases after the 1200s startup grace while the
+# stack serves -- and `status` and `doctor`, which shared the derivation, both
+# report nothing running and stay green.  That is NOM-300 with the detector
+# blinded too, which is why it is measured rather than reasoned about.
+#
+# IT DRIVES A COPY OF THE SHIPPED CLI, byte-compared, never a rewrite: the
+# disagreement is between two files in a project root and `ROOT` comes from
+# the script's own path, so staging it needs a second root.  The repo's own
+# `.env` is the live stack's and is not touched.
+release >/dev/null 2>&1
+FX="$WORK/fixture"
+mkdir -p "$FX/bin"
+cp "$AISTACK" "$FX/bin/aistack"
+if ! cmp -s "$AISTACK" "$FX/bin/aistack"; then
+  printf '  [refuse] the fixture copy of bin/aistack is not the shipped file.\n'
+  printf '           This case measures the shipped derivation or nothing.\n'
+  exit 2
+fi
+printf 'name: fixtureyaml\nservices: {}\n' > "$FX/compose.yaml"
+printf 'COMPOSE_PROJECT_NAME=fixtureenv\n' > "$FX/.env"
+# Run a function out of the FIXTURE copy, with COMPOSE_PROJECT_NAME unset so
+# that `.env` is what decides -- which is the whole point of the case.  The
+# command is passed as text rather than as positional parameters, because the
+# source itself consumes `--help`.
+fx() { ( env -u COMPOSE_PROJECT_NAME STUB_PROJECT_ROOT="$FX" FXCLI="$FX/bin/aistack" \
+           bash -c '. "$FXCLI" --help >/dev/null 2>&1; '"$*" ); }
+old_count() {
+  # THE RETIRED DERIVATION, REBUILT, so that this case is evidence and not
+  # decoration: it must report 0 against the same fixture the shipped function
+  # reports 2 for.  If it ever stops reporting 0, the case has lost its teeth
+  # and the assertion below says so.
+  local p out
+  p="${COMPOSE_PROJECT_NAME:-$(awk '/^name:[[:space:]]*[^[:space:]]/{print $2; exit}' "$FX/compose.yaml" 2>/dev/null)}"
+  out="$(docker ps -q --filter "label=com.docker.compose.project=$p" 2>/dev/null)" \
+    || { printf 'unknown\n'; return 0; }
+  [ -n "$out" ] || { printf '0\n'; return 0; }
+  printf '%s\n' "$(printf '%s\n' "$out" | wc -l)"
+}
+say 2
+FXENV="$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$FX/.env" | head -1)"
+FXYAML="$(awk '/^name:[[:space:]]*[^[:space:]]/{print $2; exit}' "$FX/compose.yaml")"
+[ -n "$FXENV" ] && [ -n "$FXYAML" ] && [ "$FXENV" != "$FXYAML" ]
+chk $? "the fixture really does disagree with itself (.env $FXENV vs name: $FXYAML)"
+OLDC="$( (unset COMPOSE_PROJECT_NAME; export STUB_PROJECT_ROOT="$FX"; old_count) )"
+[ "$OLDC" = 0 ]
+chk $? "the retired derivation sees 0 containers where compose has 2 (got $OLDC)"
+C="$(fx _serving_count)"
+[ "$C" = 2 ]
+chk $? "the shipped count follows compose's project, not compose.yaml's name: (got $C)"
+rc=0; fx _serving_running || rc=$?
+[ "$rc" = 0 ]; chk $? "_serving_running says the project is up (rc=$rc)"
+fx _with_arm_lock _holder_arm >"$WORK/t14.out" 2>&1
+chk $? "arm returns 0 in the fixture project"
+holder_alive; chk $? "and a validated holder exists"
+# `up`'s own failure path is the fastest observable consequence: with the
+# count blind it releases the hold over a serving project, which is the
+# NOM-300 state.  The 1200s startup grace is the other route to it and cannot
+# be staged in a test.
+fx _with_arm_lock _holder_release_if_idle >"$WORK/t14b.out" 2>&1
+if holder_alive; then pass "the hold SURVIVES up's release path, because two containers run"
+else fail "THE HOLD WAS RELEASED over a serving project — the count was blind to .env"; fi
+grep -q 'hold stays: containers are still running' "$WORK/t14b.out"
+chk $? "and it names the reason it kept the hold"
+if ex_free; then fail "the lock went free while the fixture project serves"
+else pass "the lock is still held, so no drill can start against those containers"; fi
+say 0
+fx _with_arm_lock _holder_let_go >/dev/null 2>&1
+wait_until 20 gone; chk $? "the fixture hold releases once its containers stop"
+
+# --- 15: the holder keeps no descriptor it did not open (NOM-396) -----------
+# `_hold_run` states the rule generally -- the holder's lifetime IS the
+# project's, so it must not keep a descriptor it did not open -- and then
+# closed three descriptors NAMED by environment variable.  Anything else a
+# caller holds open across `up` is inherited and kept for the project's whole
+# life.  Case 1 covers the arm lock, which is one of the three; this case
+# covers the rule.
+release >/dev/null 2>&1
+rm -f "$PIDF" "$STOPF"
+say 1
+UNREL="$WORK/unrelated.lock"; : > "$UNREL"
+( exec {u}>>"$UNREL"; flock -n -x "$u" || exit 9; arm >"$WORK/t15.out" 2>&1 )
+rc=$?
+[ "$rc" = 0 ]; chk $? "arm returns 0 from a caller holding an unrelated lock (rc=$rc)"
+holder_alive; chk $? "and a validated holder exists"
+# The caller's own descriptor died with the subshell, so whatever still holds
+# this lock is the holder.
+if flock -n -x "$UNREL" true 2>/dev/null; then
+  pass "the unrelated lock is free while the holder lives"
+else
+  fail "THE HOLDER KEPT THE CALLER'S UNRELATED LOCK — its lifetime is now the project's"
+fi
+HP="$(head -1 "$PIDF" | tr -dc '0-9')"
+# THREE SNAPSHOTS, AND ONLY A TARGET PRESENT IN ALL THREE COUNTS.  A leaked
+# descriptor is permanent; the holder's own `compose ps` subshell is not, so a
+# single snapshot can show a pipe that is nobody's leak.
+: > "$WORK/fd15.all"
+SNAPS=0
+for s in 1 2 3; do
+  SNAP="$(ls -l "/proc/$HP/fd" 2>/dev/null | sed -n 's/.* -> //p')"
+  [ -n "$SNAP" ] && SNAPS=$((SNAPS+1))
+  printf '%s\n' "$SNAP" | grep -v -e '^/dev/null$' -e 'serving\.holder\.log$' \
+                                   -e 'lifecycle\.lock$' -e 'bin/aistack$' \
+    | grep . | sort -u >> "$WORK/fd15.all"
+  sleep 0.4
+done
+[ "$SNAPS" = 3 ]; chk $? "the holder's descriptor table was readable all three times (got $SNAPS)"
+if grep -q 'unrelated.lock' "$WORK/fd15.all"; then
+  fail "the holder's fd table names the caller's unrelated lock"
+else pass "no descriptor on the caller's unrelated lock"; fi
+EXTRA="$(sort "$WORK/fd15.all" | uniq -c | awk '$1 == 3 {print $2}')"
+EN="$(printf '%s' "$EXTRA" | grep -c . || true)"
+[ "${EN:-0}" = 0 ]
+chk $? "nothing in its table but /dev/null, its log, the lifecycle lock and the script (extras: ${EN:-0})"
+[ "${EN:-0}" = 0 ] || printf '%s\n' "$EXTRA" | sed 's/^/           extra fd target: /'
+release >/dev/null 2>&1; chk $? "release cleans up after the case"
+
 printf '\n  %s assertions, %s failed\n' "$CHECKED" "$FAILED"
-if [ "$CHECKED" -lt 88 ]; then
-  printf '  [refuse] only %s assertions were evaluated, expected at least 88.\n' "$CHECKED"
+if [ "$CHECKED" -lt 105 ]; then
+  printf '  [refuse] only %s assertions were evaluated, expected at least 105.\n' "$CHECKED"
   printf '           Something stopped early; this is not a pass.\n'
   exit 2
 fi

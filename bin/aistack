@@ -94,11 +94,25 @@ HOLDER_STARTING="$RUNDIR/serving.holder.starting"
 # the one number an operator reads was the one number that was not enforced.
 HOLDER_GRACE=1200
 
-# The serving project's name, DERIVED rather than retyped: it is what the
-# holder and `status` filter containers by, and a second literal copy of it
-# here is how a `name:` change in compose.yaml turns into a holder that
-# watches a project with no containers in it and releases the lock at once.
-PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:[[:space:]]*[^[:space:]]/{print $2; exit}' "$ROOT/compose.yaml" 2>/dev/null)}"
+# THIS SCRIPT DOES NOT DERIVE THE PROJECT NAME.  It used to -- it read
+# `${COMPOSE_PROJECT_NAME:-<awk over compose.yaml's name:>}` into `PROJECT`
+# and `_serving_count` filtered `docker ps` on it, going around `dc`.  That
+# was a second, independent definition of "the project", and compose resolves
+# the name from one more place than the awk ever looked at: `.env`.
+#
+# MEASURED (NOM-396, 2026-10-24, compose v5.0.2).  In a project whose `.env`
+# says `COMPOSE_PROJECT_NAME=fixtureenv` and whose compose.yaml says
+# `name: fixtureyaml`, compose starts `fixtureenv-*` containers -- the env var
+# wins, then `.env`, then `name:` -- and `docker ps --filter
+# label=com.docker.compose.project=fixtureyaml` matched none of them.  Through
+# the holder that is NOM-300's defect with the detector blinded as well: the
+# count reads 0, `seen` never becomes 1, the hold releases after the startup
+# grace WHILE THE STACK SERVES, and `status` and `doctor` -- which shared the
+# same derivation -- both report nothing running and stay green.
+#
+# So the count goes through `dc` now (`compose ps -q`): there is exactly one
+# definition of the project and it is compose's own.  tests/serving-hold.sh
+# case 14 stages the disagreement and fails without this.
 
 # `err` prints and RETURNS 1; `die` prints and EXITS 1.  The distinction is
 # load-bearing inside anything `cmd_up` runs after it has armed the serving
@@ -110,9 +124,10 @@ die()  { err "$*" || :; exit 1; }
 info() { printf '%s\n' "$*"; }
 
 [ -f "$ROOT/compose.yaml" ] || die "no compose.yaml at $ROOT"
-[ -n "$PROJECT" ] || die "compose.yaml at $ROOT declares no 'name:'.
-The serving lifetime hold filters containers by the project name, and
-guessing it would make the hold watch the wrong set."
+# No check for a missing `name:` here any more: nothing in this script needs
+# the project's name, and compose's own fallback -- the directory name -- is a
+# project `compose ps` reports on correctly.  The check existed because a
+# guessed name would have made the hold watch the wrong set.
 
 ensure_rundir() {
   # MEASURED (NOM-258, 2026-10-18).  Two defects, both found by running a real
@@ -195,7 +210,11 @@ A root-shell install created it before this fix.  Remove it and try again:
 
 dc() {
   # One place that knows the compose invocation.  Every caller goes through it,
-  # so there is exactly one definition of "the project".
+  # so there is exactly one definition of "the project" -- and it is compose's
+  # own, resolved from COMPOSE_PROJECT_NAME, then `.env`, then compose.yaml's
+  # `name:`.  Nothing in this script re-derives it: `_serving_count` asking
+  # `docker ps` for a label it had computed itself is the defect NOM-396 is
+  # about.
   ( cd "$ROOT" && docker compose "$@" )
 }
 
@@ -279,15 +298,40 @@ _serving_count() {
   # `unknown` when docker did not answer.
   #
   # `unknown` IS NOT 0, and keeping the two apart is the whole point of this
-  # function.  During a daemon restart `docker ps` fails; reading that as "no
+  # function.  During a daemon restart the query fails; reading that as "no
   # containers" would make the holder release a lock the stack still needs,
   # which is the same defect as the one above with a shorter window.
-  local out
-  if ! out="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null)"; then
+  # IT ASKS COMPOSE, THROUGH `dc`, instead of filtering `docker ps` on a
+  # project name of its own -- see where that derivation used to live, above
+  # (NOM-396).  `compose ps -q` is the same question with the project resolved
+  # by the thing that created the containers.
+  #
+  # `ps -q`, NOT `ps -q --status=running`.  MEASURED (NOM-396, 2026-10-24): a
+  # crash-looping service -- and every serving service can become one, they
+  # are all `restart: unless-stopped` -- sits in state `restarting`, where
+  # `--status=running` reports 0 while both `docker ps` and a bare `ps -q`
+  # report it.  Narrowing to `running` would release the hold over a stack
+  # compose is still restarting.  A bare `ps -q` already excludes `exited`
+  # containers (measured: 1, against 2 for `-a`), which is what this function
+  # means by running.
+  #
+  # IT NOW DEPENDS ON THE COMPOSE CONFIGURATION RENDERING, not only on the
+  # daemon: a missing `.env` makes `compose ps` fail where `docker ps` would
+  # have answered (measured: `required variable OLLAMA_IMAGE is missing a
+  # value`).  That is `unknown`, not 0, so the direction is the safe one --
+  # the hold stays and a drill is refused, rather than being admitted
+  # alongside a serving stack -- and it is why the messages below name the
+  # configuration as well as the daemon.
+  local out n
+  if ! out="$(dc ps -q 2>/dev/null)"; then
     printf 'unknown\n'; return 0
   fi
-  [ -n "$out" ] || { printf '0\n'; return 0; }
-  printf '%s\n' "$(printf '%s\n' "$out" | wc -l)"
+  # NON-EMPTY LINES ONLY.  `compose ps` has been seen to print a bare newline
+  # with nothing running (NOM-300: `grep -vc` counted that newline and
+  # `status` claimed a service was up with zero containers on the host), so
+  # counting lines rather than content is how a stopped stack reads as 1.
+  n="$(printf '%s\n' "$out" | grep -c . || true)"
+  printf '%s\n' "${n:-0}"
 }
 
 _serving_running() {
@@ -345,12 +389,42 @@ _hold_run() {
   # The rule this obeys, stated generally: the holder's lifetime IS the
   # project's lifetime, so it must not keep a descriptor it did not open, or
   # it silently extends some other lock's lifetime to match its own.
-  for v in AISTACK_ARM_FD AISTACK_LOCK_FD_LIFECYCLE AISTACK_LOCK_FD_HELPER; do
-    n="${!v:-}"
+  #
+  # SO IT CLOSES EVERY DESCRIPTOR ABOVE 2, not the three it knows by name
+  # (NOM-396).  The named list implemented "no descriptor named by one of
+  # these three variables", which is not the rule stated above: a caller that
+  # holds anything else open across `up` -- its own flock, a log, a pipe --
+  # hands the holder a descriptor whose lifetime becomes the project's.
+  # MEASURED (NOM-396, 2026-10-24): a caller holding `flock -x` on an
+  # unrelated file across the arm left that file locked for as long as the
+  # holder lived, with nothing in the holder's fd table named by any AISTACK_*
+  # variable.
+  #
+  # ONE DESCRIPTOR ABOVE 2 IS KEPT, and it is not one the holder could leak:
+  # the one bash reads THIS SCRIPT from (fd 255, measured).  Closing it kills
+  # the interpreter mid-parse.  It is recognised by its target, with the fd
+  # number as a second test for the case where the file has been replaced
+  # under us and the target no longer compares equal.
+  local self tgt fdlist=""
+  self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  for v in /proc/$$/fd/*; do
+    n="${v##*/}"
     case "$n" in ''|*[!0-9]*) continue ;; esac
-    eval "exec ${n}>&-" 2>/dev/null || true
-    unset "$v"
+    [ "$n" -gt 2 ] || continue
+    if [ "$n" = 255 ]; then continue; fi
+    tgt="$(readlink "$v" 2>/dev/null || true)"
+    tgt="${tgt% (deleted)}"
+    if [ -n "$self" ] && [ "$tgt" = "$self" ]; then continue; fi
+    fdlist="$fdlist $n"
   done
+  # Collected first, closed second: the glob and the readlinks above open
+  # descriptors of their own, so closing as we walk would be closing a
+  # directory stream we are still reading.
+  for n in $fdlist; do eval "exec ${n}>&-" 2>/dev/null || true; done
+  # Unset as well as closed.  Those variables say "fd N is held for you"; once
+  # the descriptor is gone that is false, and anything the holder ever spawns
+  # would act on it.
+  unset AISTACK_ARM_FD AISTACK_LOCK_FD_LIFECYCLE AISTACK_LOCK_FD_HELPER
   ensure_rundir
   exec {fd}>>"$LIFECYCLE_LOCK"
   # Bounded, not blocking: if a drill or a restore holds the exclusive mode,
@@ -370,7 +444,7 @@ _hold_run() {
     _hold_log "cannot write $HOLDER_PID; releasing"
     exit 1
   fi
-  _hold_log "holding SHARED for project $PROJECT (pid $$)"
+  _hold_log "holding SHARED for the compose project at $ROOT (pid $$)"
   # PUBLISH THE STARTUP GRACE, so that `status` and `doctor` can tell this
   # window apart from a hold that leaked.
   #
@@ -434,14 +508,14 @@ _hold_run() {
            # state unreportable instead of only the startup one.
            if [ "$seen" = 0 ]; then
              seen=1; rm -f "$HOLDER_STARTING"
-             _hold_log "first container of $PROJECT seen; the startup grace is over"
+             _hold_log "first container of the project seen; the startup grace is over"
            fi ;;
         1) if [ "$seen" = 1 ]; then
-             _hold_log "no container of $PROJECT is running; releasing"; break
+             _hold_log "no container of the project is running; releasing"; break
            elif [ "$SECONDS" -ge "$deadline" ]; then
-             _hold_log "no container of $PROJECT appeared within ${HOLDER_GRACE}s; releasing"; break
+             _hold_log "no container of the project appeared within ${HOLDER_GRACE:-1200}s; releasing"; break
            fi ;;
-        *) _hold_log "docker did not answer; KEEPING the hold (a lost answer is not an empty stack)" ;;
+        *) _hold_log "docker or the compose configuration did not answer; KEEPING the hold (a lost answer is not an empty stack)" ;;
       esac
     fi
     tick=$(( tick + 1 ))
@@ -703,8 +777,9 @@ _holder_release_if_idle() {
     0) info "The serving lifetime hold stays: containers are still running."
        info "'bin/aistack down' stops them and releases it." ;;
     1) _holder_let_go ;;
-    *) info "The serving lifetime hold stays: docker did not answer, so whether"
-       info "anything is running is unknown, and keeping it is the safe answer." ;;
+    *) info "The serving lifetime hold stays: docker or the compose configuration"
+       info "did not answer, so whether anything is running is unknown, and"
+       info "keeping it is the safe answer." ;;
   esac
   return 0
 }
@@ -900,7 +975,7 @@ cmd_status() {
   elif [ "$srv" = 0 ]; then
     mode="$mode   -- NO SERVING LIFETIME HOLD while $(_serving_count) container(s) run; re-arm with 'bin/aistack up'"
   elif [ "$srv" = 2 ]; then
-    mode="$mode   (no serving lifetime hold; docker did not answer, so what is running is unknown)"
+    mode="$mode   (no serving lifetime hold; docker or the compose configuration did not answer, so what is running is unknown)"
   fi
 
   printf '\nAI Stack 2026\n'

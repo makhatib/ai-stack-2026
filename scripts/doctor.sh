@@ -304,8 +304,12 @@ else
   elif [ -n "$HOLD" ]; then
     ok "serving lifetime hold: held (pid $HOLD), $NSERV container(s) running"
   elif [ "$NSERV" = unknown ]; then
-    warn "serving lifetime hold: absent, and docker did not say what is running."
-    printf '         Whether that is correct cannot be decided from here.\n'
+    # NOM-396: `unknown` is "the count could not be taken", which since the
+    # count goes through `compose ps` includes a configuration that does not
+    # render (a missing .env), not only a daemon that did not answer.
+    warn "serving lifetime hold: absent, and what is running could not be counted."
+    printf '         Neither docker nor the compose configuration answered, so\n'
+    printf '         whether that is correct cannot be decided from here.\n'
   elif [ "$NSERV" = 0 ]; then
     ok "serving lifetime hold: absent, and nothing is running — consistent"
   else
