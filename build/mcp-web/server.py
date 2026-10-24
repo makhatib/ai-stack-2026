@@ -30,6 +30,21 @@ from mcp.server.transport_security import TransportSecuritySettings
 SEARXNG = os.environ.get("SEARXNG_URL", "http://searxng:8080")
 CRAWL4AI = os.environ.get("CRAWL4AI_URL", "http://crawl4ai:11235")
 MAX_CHARS = int(os.environ.get("MAX_PAGE_CHARS", "20000"))
+def _token(var: str) -> str:
+    """Crawl4AI 0.9.5 binds loopback-only unless it has an API token, so the token is not optional."""
+    path = os.environ.get(var, "")
+    if not path:
+        raise SystemExit(f"{var} is not set; refusing to start without the Crawl4AI token")
+    try:
+        value = open(path).read().strip()
+    except OSError as e:
+        raise SystemExit(f"cannot read {path}: {e}")
+    if not value:
+        raise SystemExit(f"{path} is empty; refusing to start")
+    return value
+
+
+CRAWL4AI_AUTH = {"Authorization": "Bearer " + _token("CRAWL4AI_TOKEN_FILE")}
 HOSTS = [h for h in os.environ.get("MCP_ALLOWED_HOSTS", "mcp-web:8900,mcp-web").split(",") if h]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -81,7 +96,8 @@ async def fetch_page(url: str) -> dict:
     """Fetch one public web page and return it as markdown (Crawl4AI). Private addresses are refused."""
     _refuse_private(url)
     async with httpx.AsyncClient(timeout=90) as c:
-        r = await c.post(f"{CRAWL4AI}/md", json={"url": url, "f": "fit", "q": None, "c": "0"})
+        r = await c.post(f"{CRAWL4AI}/md", json={"url": url, "f": "fit", "q": None, "c": "0"},
+                         headers=CRAWL4AI_AUTH)
         r.raise_for_status()
     body = r.json()
     md = body.get("markdown") or ""

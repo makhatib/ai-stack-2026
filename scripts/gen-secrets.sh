@@ -496,6 +496,14 @@ fi
 unset MEM0_PW
 apply_mode "$SECRETS/mem0_db_password" mem0
 gen valkey_password     valkey  hex32
+# Crawl4AI's API token, and mcp-web's copy of the SAME value (mcp-web is its only
+# caller; each file has its own consumer's mode).
+gen crawl4ai_api_token crawl4ai hex32
+if [ ! -s "$SECRETS/mcp_crawl4ai_token" ] || [ "$(cat "$SECRETS/mcp_crawl4ai_token")" != "$(cat "$SECRETS/crawl4ai_api_token")" ]; then
+  cp "$SECRETS/crawl4ai_api_token" "$SECRETS/mcp_crawl4ai_token"
+  log "  sync    $SECRETS/mcp_crawl4ai_token (from crawl4ai_api_token)"
+fi
+apply_mode "$SECRETS/mcp_crawl4ai_token" mcp-web
 
 # The per-app LiteLLM keys.  They are CHOSEN here and REGISTERED with LiteLLM
 # (budget, models, MCP servers) by scripts/litellm-keys.sh after LiteLLM is up;

@@ -224,7 +224,7 @@ bridges:
     internal: true
     members: [hermes, telegram-gate]
     pairwise: true
-    subnet: 172.31.250.0/29
+    subnet: 172.31.253.0/29
     ipv6: false
     scope: v2
   egress-tg:
@@ -655,6 +655,7 @@ services:
     confined: true
 
   crawl4ai:
+    runtime_ids: "999:999"   # image Config.User appuser, measured
     group: core
     scope: v2
     image_var: CRAWL4AI

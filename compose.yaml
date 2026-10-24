@@ -396,6 +396,11 @@ services:
       # Default is 3; one is correct on a CPU-only box.
       OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_HOST: "0.0.0.0:11434"
+      # Hermes needs 64k and talks to Ollama over the OpenAI-style /v1 API,
+      # which IGNORES num_ctx: without this Ollama silently serves 4096 while
+      # Hermes believes it has 65536 (NOM-412 §5).  This costs RAM for every
+      # model — Tier 1 may lower it, and then Hermes should not be enabled.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-65536}
     mem_limit: 8g
     cpus: "4.0"
     healthcheck:
@@ -571,19 +576,23 @@ services:
       gateway: {}
       agent: {}
       tg-relay:
-        ipv4_address: 172.31.250.3
-    # Telegram is reached ONLY through the gate (172.31.250.2).  The name is
+        ipv4_address: 172.31.253.3
+    # Telegram is reached ONLY through the gate (172.31.253.2).  The name is
     # pinned here so Hermes needs no proxy setting and its TLS verification
     # still ends at Telegram's real certificate.
     extra_hosts:
-      - "api.telegram.org:172.31.250.2"
+      - "api.telegram.org:172.31.253.2"
     volumes:
       - hermes-data:/opt/data
       # Behavioural config; the bot token and keys come from the secrets file
       # below, never from here.
-      - ./config/hermes/config.yaml:/opt/aistack/config.yaml:ro
-      - ./config/hermes/mem0.json:/opt/aistack/mem0.json:ro
-      - ./secrets/hermes.env:/opt/aistack/hermes.env:ro
+      - ./config/hermes/config.yaml:/opt/data/config.yaml:ro
+      - ./config/hermes/mem0.json:/opt/data/mem0.json:ro
+      - ./secrets/hermes.env:/opt/data/.env:ro
+      # The Mem0 memory plugin, vendored unmodified at a pinned commit
+      # (third_party/hermes-plugin-mem0/SOURCE).  Hermes cannot fetch plugins
+      # from GitHub: it has no route to it.
+      - ./third_party/hermes-plugin-mem0:/opt/data/plugins/mem0:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
       # s6-overlay execs its own helpers from /run.
@@ -594,6 +603,7 @@ services:
       MEM0_TELEMETRY: "False"
       # Hermes checks for updates and phones the Nous Portal by default.
       HERMES_DISABLE_UPDATE_CHECK: "1"
+      HERMES_TELEGRAM_DISABLE_FALLBACK_IPS: "true"
     depends_on:
       litellm:
         condition: service_healthy
@@ -665,7 +675,10 @@ services:
     networks: [mcp-web, untrusted-search, untrusted-crawl]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
+    secrets:
+      - source: mcp_crawl4ai_token
     environment:
+      CRAWL4AI_TOKEN_FILE: /run/secrets/mcp_crawl4ai_token
       SEARXNG_URL: http://searxng:8080
       CRAWL4AI_URL: http://crawl4ai:11235
       MCP_ALLOWED_HOSTS: "mcp-web:8900,mcp-web"
@@ -716,13 +729,21 @@ services:
     runtime: runsc
     networks: [untrusted-crawl]
     shm_size: 1g
+    # Crawl4AI 0.9.5 serves only on loopback unless it has an API token; the
+    # token is a mounted secret (its entrypoint reads /run/secrets/api_token),
+    # so it never enters the environment, and mcp-web holds the same value.
+    secrets:
+      - source: crawl4ai_api_token
+        target: api_token
     tmpfs:
       - /tmp:rw,nosuid,size=512m
+      - /home/appuser/.crawl4ai:rw,noexec,nosuid,size=128m,uid=999,gid=999
+      - /var/lib/redis:rw,noexec,nosuid,size=64m,uid=999,gid=999
     mem_limit: 2g
     cpus: "2.0"
     pids_limit: 1024
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11235/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11235/health || exit 1"]  # /health is unauthenticated
       interval: 30s
       timeout: 10s
       retries: 3
@@ -734,7 +755,7 @@ services:
     container_name: aistack-telegram-gate
     networks:
       tg-relay:
-        ipv4_address: 172.31.250.2
+        ipv4_address: 172.31.253.2
       egress-tg: {}
     # Non-root from the start: no CHOWN/SETUID is needed, and the privileged
     # port is opened by a namespaced sysctl rather than by a capability.
@@ -981,7 +1002,7 @@ networks:
     enable_ipv6: false
     ipam:
       config:
-        - subnet: 172.31.250.0/29
+        - subnet: 172.31.253.0/29
   # The two bridges below are the ONLY non-internal ones the v2 core adds, and
   # each has exactly the members its manifest entry names.  See E3 and the
   # trust_bridges register.
@@ -1072,3 +1093,7 @@ secrets:
     file: ./secrets/mem0_db_password
   valkey_password:
     file: ./secrets/valkey_password
+  crawl4ai_api_token:
+    file: ./secrets/crawl4ai_api_token
+  mcp_crawl4ai_token:
+    file: ./secrets/mcp_crawl4ai_token
