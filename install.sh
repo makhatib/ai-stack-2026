@@ -228,7 +228,23 @@ ask AISTACK_BIND_ADDR   "Address to bind to"       "127.0.0.1"         valid_bin
 ask AISTACK_ADMIN_EMAIL "Admin email (no mail is ever sent)" "admin@localhost"
 ask AISTACK_TZ          "Timezone"                 "UTC"
 
-if [ -z "${ANS[COMPOSE_PROFILES]:-}" ]; then
+# AN EXPLICIT EMPTY ANSWER IS AN ANSWER, AND STARTER *IS* THE EMPTY ONE.
+#
+# MEASURED (NOM-398, 2026-10-24).  On the isolated QA target an answer file
+# containing `COMPOSE_PROFILES=` together with --non-interactive installed
+# `knowledge` and 9 services.  `-z "${ANS[KEY]:-}"` cannot tell "the operator
+# chose Starter" from "the operator said nothing", and Starter is the one
+# selection in this installer whose correct value is the empty string.  So
+# under that test the Starter fixture was not installable at all through an
+# answer file, while interactive option 1 selected it fine -- and the
+# noninteractive Starter -> AI Automation check could not be run.
+#
+# The test is therefore key PRESENCE, not emptiness.  A truly omitted key
+# still gets the `knowledge` default; `COMPOSE_PROFILES=` now means Starter,
+# exactly as option 1 does.  tests/profile-selection.sh extracts this block
+# and drives both paths, including a reconstruction of the `:-` form that
+# must still reproduce the bug.
+if [ -z "${ANS[COMPOSE_PROFILES]+set}" ]; then
   if [ "$NON_INTERACTIVE" -eq 1 ]; then
     ANS[COMPOSE_PROFILES]="knowledge"
   else
@@ -248,6 +264,10 @@ if [ -z "${ANS[COMPOSE_PROFILES]:-}" ]; then
     esac
   fi
 fi
+# SAY WHICH GROUP WAS SELECTED.  Starter is the empty profile list, so without
+# this line a Starter install reports nothing at all about its own selection,
+# which is how NOM-398 reached QA as "exit 0, wrong 9 services".
+say "  Profiles: ${ANS[COMPOSE_PROFILES]:-(none selected -- this is Starter)}"
 
 head2 "[9/15] Port availability"
 # A PORT CONFLICT IS PER ADDRESS, NOT PER PORT.
