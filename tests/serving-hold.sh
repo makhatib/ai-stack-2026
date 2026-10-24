@@ -50,8 +50,21 @@ mkdir -p "$WORK/bin"
 cat > "$WORK/bin/docker" <<'STUB'
 #!/bin/sh
 mode="$(head -1 "$STUB_CTL" 2>/dev/null)"
+if [ "$mode" = err ]; then
+  echo "Cannot connect to the Docker daemon (stub)" >&2; exit 1
+fi
+# `docker ps -a` is a DIFFERENT QUESTION from the one the hold asks.  The hold
+# asks how many containers of the project are RUNNING; `_up` asks whether any
+# restore-drill container exists at all.  They answer from separate control
+# files so that a case can leave a drill container behind without changing how
+# many project containers are running -- which is exactly the combination case
+# 11 needs.  Cases 1-9 never pass -a, so their answers are unchanged.
+for a in "$@"; do
+  [ "$a" = "-a" ] || continue
+  if [ -n "${STUB_DRILLS:-}" ] && [ -s "$STUB_DRILLS" ]; then cat "$STUB_DRILLS"; fi
+  exit 0
+done
 case "$mode" in
-  err) echo "Cannot connect to the Docker daemon (stub)" >&2; exit 1 ;;
   n:*) c="${mode#n:}"; i=0
        while [ "$i" -lt "$c" ]; do echo "stubcid$i"; i=$((i+1)); done
        exit 0 ;;
@@ -59,11 +72,16 @@ esac
 echo "stub docker: unknown control '$mode'" >&2; exit 1
 STUB
 chmod +x "$WORK/bin/docker"
+DRILLCTL="$WORK/ctl-drills"
+: > "$DRILLCTL"
 export STUB_CTL="$CTL"
+export STUB_DRILLS="$DRILLCTL"
 export PATH="$WORK/bin:$PATH"
 
-say()      { printf 'n:%s\n' "$1" > "$CTL"; }
-err_mode() { printf 'err\n' > "$CTL"; }
+say()        { printf 'n:%s\n' "$1" > "$CTL"; }
+err_mode()   { printf 'err\n' > "$CTL"; }
+drills()     { printf '%s\n' "$@" > "$DRILLCTL"; }   # what `ps -a` reports
+no_drills()  { : > "$DRILLCTL"; }
 
 # `. bin/aistack --help` loads the definitions and leaves the dispatch through
 # `usage`.  Passing an argument is required: with none, the dispatch would see
@@ -71,12 +89,18 @@ err_mode() { printf 'err\n' > "$CTL"; }
 load() { . "$AISTACK" --help >/dev/null 2>&1; }
 arm()     { ( load; _with_arm_lock _holder_arm ); }
 release() { ( load; _with_arm_lock _holder_let_go ); }
+# CASE 11 DRIVES THE REAL `cmd_up`, not its pieces.  It can, without a stack,
+# because the refusal it is about happens in `_up`'s FIRST check -- before
+# `compose up` and before the health gate -- so nothing compose-shaped runs.
+# What is under test is the wiring between the two: whether a failure that
+# early still reaches `cmd_up`'s release step.
+up_cmd()  { ( load; cmd_up ); }
 
 # REFUSE if the thing under test is not there any more, instead of passing on
 # a stack of no-ops.
 MISSING=""
 for fn in _hold_run _holder_arm _holder_let_go _with_arm_lock _holder_pid \
-          _serving_count _serving_running; do
+          _serving_count _serving_running cmd_up _up _holder_release_if_idle; do
   ( load; declare -F "$fn" >/dev/null ) || MISSING="$MISSING $fn"
 done
 if [ -n "$MISSING" ]; then
@@ -281,9 +305,50 @@ holder_alive; chk $? "a validated holder exists again"
 if ex_free; then fail "the repair returned 0 without taking the lock"
 else pass "and the lock is held again — the kernel enforces the interlock once more"; fi
 
+# --- 11: a refusal inside `up` must not leave the hold armed ---------------
+# THE MIRROR IMAGE OF THIS TICKET'S DEFECT, and it was shipped by the fix for
+# it.  MEASURED (NOM-300 review, 2026-10-24): `cmd_up` arms the hold, then runs
+# `_up "$@" || rc=$?` so that a failure routes to `_holder_release_if_idle` --
+# but `_up`'s first check called `die`, and `die` is `exit 1`.  The process left
+# before `|| rc=$?` could run, so the release never happened: nothing serving,
+# zero containers, and the lock held for up to the 1200s startup grace.  The
+# lock had stopped describing the serving state again, in the other direction.
+#
+# Cases 1-10 drive `_holder_arm`/`_holder_let_go` directly and all stayed green
+# through that, which is why this case exists: the defect was in `cmd_up`'s
+# failure path, and nothing drove `cmd_up`.
+release >/dev/null 2>&1
+say 0
+drills restore-drill-20260101000000-postgres
+rc=0; up_cmd >"$WORK/t11.out" 2>&1 || rc=$?
+[ "$rc" != 0 ]; chk $? "cmd_up fails when a drill container was left behind (rc=$rc)"
+grep -q 'restore-drill-20260101000000-postgres' "$WORK/t11.out"; chk $? "and names the container it refused over"
+if grep -q 'Starting (profiles' "$WORK/t11.out"; then
+  fail "it reached the start step; the refusal has to come before anything starts"
+else pass "it refused before starting anything"; fi
+if holder_alive; then
+  fail "THE HOLD IS STILL ARMED after a refusal with nothing serving -- an exit skipped the release"
+else pass "the refusal released the hold it had armed"; fi
+if ex_free; then pass "and the lock is free, so the next drill or restore is not refused for 1200s"
+else fail "the lock is still held with nothing serving"; fi
+flock -n -x "$ARMF" true 2>/dev/null; chk $? "and the arm lock is free, so the next up or down does not block"
+
+# THE OTHER BRANCH IS DELIBERATE and must not regress into "always release":
+# when containers ARE running, the same refusal keeps the hold, because a drill
+# alongside half a started stack is precisely what it exists to prevent.
+say 2
+rc=0; up_cmd >"$WORK/t11b.out" 2>&1 || rc=$?
+[ "$rc" != 0 ]; chk $? "cmd_up still fails over the same leftover drill with containers up (rc=$rc)"
+holder_alive; chk $? "and this time the hold STAYS, because something is running"
+if ex_free; then fail "the lock went free with containers running -- that is the NOM-300 defect"
+else pass "the lock is still held, so no drill can start against them"; fi
+grep -q 'hold stays: containers are still running' "$WORK/t11b.out"; chk $? "and it says which of the two keep-reasons applied"
+no_drills
+release >/dev/null 2>&1; chk $? "release cleans up after the case"
+
 printf '\n  %s assertions, %s failed\n' "$CHECKED" "$FAILED"
-if [ "$CHECKED" -lt 46 ]; then
-  printf '  [refuse] only %s assertions were evaluated, expected at least 46.\n' "$CHECKED"
+if [ "$CHECKED" -lt 57 ]; then
+  printf '  [refuse] only %s assertions were evaluated, expected at least 57.\n' "$CHECKED"
   printf '           Something stopped early; this is not a pass.\n'
   exit 2
 fi

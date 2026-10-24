@@ -258,7 +258,22 @@ if [ -z "${AISTACK_RUNDIR:-}" ]; then
 else
   HOLD="${AISTACK_SERVING_HOLDER:-}"
   NSERV="${AISTACK_SERVING_COUNT:-unknown}"
-  if [ -n "$HOLD" ]; then
+  # BOTH INCONSISTENT QUADRANTS ARE FAILURES, not just the absent one.
+  #
+  # MEASURED (NOM-300 review, 2026-10-24): a refusal inside `aistack up` could
+  # leave the hold armed with nothing serving, and this check called that `ok`
+  # — it reported "held (pid N), 0 container(s) running" as a pass, because the
+  # only question it asked about a held hold was whether it existed.  A hold
+  # over an empty stack refuses every drill and every restore for up to the
+  # 1200s startup grace, so the lock has stopped describing the serving state
+  # just as surely as a free lock over nine running services does.
+  if [ -n "$HOLD" ] && [ "$NSERV" = 0 ]; then
+    bad "THE SERVING LIFETIME HOLD IS HELD (pid $HOLD) WHILE NOTHING IS RUNNING."
+    printf '         The shared mode means "the stack is up" (final-design 2.1), and\n'
+    printf '         nothing is.  While it is held a restore drill and a restore are\n'
+    printf '         both refused, so this is safe but wrong.  Release it:\n'
+    printf '             bin/aistack down\n'
+  elif [ -n "$HOLD" ]; then
     ok "serving lifetime hold: held (pid $HOLD), $NSERV container(s) running"
   elif [ "$NSERV" = unknown ]; then
     warn "serving lifetime hold: absent, and docker did not say what is running."

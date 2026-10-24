@@ -85,7 +85,13 @@ HOLDER_ARM="$RUNDIR/serving.holder.arm"
 # watches a project with no containers in it and releases the lock at once.
 PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:[[:space:]]*[^[:space:]]/{print $2; exit}' "$ROOT/compose.yaml" 2>/dev/null)}"
 
-die()  { printf 'aistack: %s\n' "$*" >&2; exit 1; }
+# `err` prints and RETURNS 1; `die` prints and EXITS 1.  The distinction is
+# load-bearing inside anything `cmd_up` runs after it has armed the serving
+# lifetime hold: `exit` from a function leaves the process immediately, so the
+# caller's `|| rc=$?` never gets control and the release step is skipped.  A
+# refusal inside `_up` must therefore be an `err` + `return`, never a `die`.
+err()  { printf 'aistack: %s\n' "$*" >&2; return 1; }
+die()  { err "$*" || :; exit 1; }
 info() { printf '%s\n' "$*"; }
 
 [ -f "$ROOT/compose.yaml" ] || die "no compose.yaml at $ROOT"
@@ -559,9 +565,18 @@ _up() {
   # We hold shared; the drill holds exclusive; the kernel serialises them.
   # The opposing-project check runs INSIDE the hold, which is what closes the
   # check-then-act race.
+  # `err ... || return 1`, NOT `die`.  MEASURED (NOM-300 review, 2026-10-24):
+  # `die` is `exit 1`, so this refusal left the process before `cmd_up`'s
+  # `|| rc=$?` could run `_holder_release_if_idle` — and the hold stayed armed
+  # for up to the 1200s startup grace with nothing serving and no container
+  # ever started.  That is the mirror image of this ticket's own defect: the
+  # lock stops tracking the serving state, here by being held while nothing
+  # serves.  The `|| return 1` form is correct whether or not `set -e` is
+  # suppressed at the call site, which `_up`'s single `|| rc=$?` caller does
+  # today and a future caller might not.
   if docker ps -a --format '{{.Names}}' | grep -q '^restore-drill-'; then
-    die "a restore drill is running or was left behind: $(docker ps -a --format '{{.Names}}' | grep '^restore-drill-' | tr '\n' ' ')
-Serving will not start while drill containers exist.  Run 'aistack drill clean'."
+    err "a restore drill is running or was left behind: $(docker ps -a --format '{{.Names}}' | grep '^restore-drill-' | tr '\n' ' ')
+Serving will not start while drill containers exist.  Run 'aistack drill clean'." || return 1
   fi
   info "Starting (profiles: ${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' "$ROOT/.env" 2>/dev/null | cut -d= -f2-)})"
   # `compose up` CAN FAIL BEFORE THE HEALTH GATE EVER RUNS, and when it does
@@ -720,7 +735,9 @@ cmd_status() {
   # as three facts.
   holder="$(_holder_pid || true)"
   srv=0; _serving_running || srv=$?
-  if [ -n "$holder" ]; then
+  if [ -n "$holder" ] && [ "$srv" = 1 ]; then
+    mode="$mode   -- the serving lifetime hold (pid $holder) is held while NOTHING runs; release it with 'bin/aistack down'"
+  elif [ -n "$holder" ]; then
     mode="$mode   (serving lifetime hold: pid $holder)"
   elif [ "$srv" = 0 ]; then
     mode="$mode   -- NO SERVING LIFETIME HOLD while $(_serving_count) container(s) run; re-arm with 'bin/aistack up'"
