@@ -904,9 +904,16 @@ body = src[loop:]
 # Anchored on the COMMANDS, not on the words: the loop's own comments mention
 # pg_restore several lines above the call, and matching prose would compare the
 # wrong positions and fail a correct loop.
+#
+# The load is a CALL, not the pg_restore line itself: NOM-405 moved that
+# invocation into load_dump_or_die() above the loop, so that a failed load
+# could be refused instead of echoed and so that a stub could drive the
+# decision without a maintenance window.  What this assertion measures is
+# unchanged -- create, then refuse if absent, then load, in that order.
+# tests/restore-live-stack.sh is what drives the function's own branches.
 WANT = ('create_database_sql "$db"',
         'require_database_present "$db"',
-        'dc exec -T postgres pg_restore')
+        'load_dump_or_die "$db"')
 at = [body.find(s) for s in WANT]
 if -1 in at:
     print("        missing from the restore loop: %s" % ", ".join(

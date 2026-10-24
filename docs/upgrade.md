@@ -25,13 +25,44 @@ update. Automatic recovery that corrupts data is worse than stopping.
 | What | Reversible? | How |
 |---|---|---|
 | image, no migration ran | yes | `bin/aistack rollback` |
-| image, **migration ran** (n8n, Authelia, Open WebUI) | **no** | `bin/aistack restore <id>` then `bin/aistack rollback` |
+| image, **migration ran** (n8n, Authelia, Open WebUI) | **no** | `bin/aistack down`, then `bin/aistack restore <id>`, then `bin/aistack rollback` |
 | config | yes | timestamped `.bak`; `bin/aistack config restore <ts>` |
 | secret rotation | partly | see below |
 
 **A major-version rollback means restoring a backup.** Those are the words,
 and they are the words because the alternative phrasing — "rollback is
 supported" — is how people lose a database.
+
+## Stop the stack before you restore
+
+```sh
+bin/aistack down
+bin/aistack restore <backup.tar.gz.enc>
+bin/aistack up          # or `bin/aistack rollback`, which ups for you
+```
+
+**`bin/aistack down` is the first line and it is not optional.** A restore
+overwrites the databases and the data volumes while the apps still hold them
+open: `pg_restore --clean` drops n8n's tables under a running n8n, and the
+volume restore empties `aistack-n8n-data` under it. **The restore refuses to
+start while any stack container except `aistack-postgres` is up**, names the
+ones that are, and changes nothing — so a forgotten `down` costs you a second
+command, not a database.
+
+The two neighbouring commands, because they are not the same:
+
+- **`bin/aistack verify <backup>` reads only** and never writes, so it does
+  not care whether the stack is up. Run it *before* the `down`: that way you
+  learn whether the archive is good while you still have a serving stack.
+  Measured — it exits 0 against nine running containers.
+- A restore **drill** restores into a throwaway project and never attaches to
+  a live volume, so the refusal above does not apply to it. `bin/aistack
+  drill` nevertheless needs the stack stopped, for a different reason: it
+  takes the lifecycle lock exclusively, and the serving stack holds that lock
+  shared for as long as it is up. It says so and names `bin/aistack down`.
+
+If a database fails to load, the restore stops and prints what `pg_restore`
+said. It is idempotent: fix what it names and run it again.
 
 ## Rotating secrets
 

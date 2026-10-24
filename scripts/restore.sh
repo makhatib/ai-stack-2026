@@ -4,6 +4,10 @@
 # ORDER MATTERS AND IS THE WHOLE POINT: verify completely, THEN overwrite.
 # Every refusal below happens before a single byte of live data is touched.
 #
+# THE LIVE PATH NEEDS THE STACK STOPPED.  `bin/aistack down` first: a restore
+# into a running stack is REFUSED, not warned about, because step 4 overwrites
+# the databases and volumes the running apps still hold open (NOM-405).
+#
 # `--into-drill-project <name>` restores into a FRESH THROWAWAY PROJECT instead
 # of over the live one.  That is B4, the Tier-A positive restore, and it is how
 # the drill proves a GOOD backup restores without any chance of touching live
@@ -187,6 +191,87 @@ fi
 
 echo "4/4  restoring"
 
+# >>> live-stack guard: tests/restore-live-stack.sh extracts and runs these lines >>>
+# A LIVE RESTORE INTO A RUNNING STACK IS REFUSED (NOM-405).
+#
+# Step 4 below overwrites the databases and the volumes the running apps hold
+# open, and nothing stopped it.  The live branch brought `postgres` up and
+# nothing else, so n8n, Authelia, LiteLLM and Open WebUI stayed attached while
+# `pg_restore --clean` dropped their tables under them and `rm -rf /dst/*`
+# emptied aistack-n8n-data under a running n8n.  The only hint was the closing
+# "Bring the stack up with: aistack up" — printed after the damage.
+#
+# A line in a document is not enough, so the script asserts it AND the docs say
+# it: scripts/rollback.sh's printed instruction and docs/upgrade.md both name
+# `bin/aistack down` first.
+#
+# WHY A REFUSAL AND NOT A `down` ON THE OPERATOR'S BEHALF.  Stopping someone's
+# serving stack is not a side effect a restore gets to have — the stack may be
+# up because somebody else is using it, and the drill path exists precisely so
+# that a restore can be rehearsed without stopping anything.
+#
+# THE DRILL PATH IS UNAFFECTED: this is called only from the live branch below.
+# A drill restores into `restore-drill-<ts>` with compose.drill.yaml, whose
+# containers and volumes are project-prefixed, so a running live stack is none
+# of its business.
+#
+# WHAT COUNTS AS RUNNING.  Plain `docker ps`, NOT `--filter status=running`: a
+# restarting or a paused container still holds its connections and
+# `status=running` lists neither.  A container counts if its name carries the
+# live project's prefix OR if it carries the live project's compose label —
+# the first catches one started by hand or left behind by an older compose
+# file, the second catches one whose `container_name` was changed.  The one
+# container this script starts itself is the only exception.
+blocking_live_containers() {
+  # $1 = the live compose project, $2 = the container restore.sh starts itself.
+  # Prints one blocking container name per line.  Returns 2 if docker could not
+  # be asked, which is NOT the same answer as "nothing is running".
+  local project="$1" keep="$2" ps name proj
+  ps="$(docker ps --format '{{.Names}} {{.Label "com.docker.compose.project"}}')" \
+    || return 2
+  # Fed in through a heredoc rather than a pipe, so `read` still sees a final
+  # newline when docker's last line has none -- that case fills the variable
+  # and returns 1, which a pipe would read as the end of the list.
+  while read -r name proj; do
+    [ -n "$name" ] || continue
+    [ "$name" = "$keep" ] && continue
+    case "$name" in
+      "$project"-*) printf '%s\n' "$name"; continue ;;
+    esac
+    [ "$proj" = "$project" ] && printf '%s\n' "$name"
+  done <<EOF
+$ps
+EOF
+  # Explicit, because the loop's exit status is its last command's: a final
+  # line that does not block would otherwise return 1 and look like a failure.
+  return 0
+}
+
+require_stack_down() {
+  local project="$1" keep="$2" blocking rc
+  blocking="$(blocking_live_containers "$project" "$keep")" && rc=0 || rc=$?
+  if [ "$rc" = "2" ]; then
+    die "docker did not answer which containers are running, so whether this
+restore would overwrite data the stack still holds open is UNKNOWN.  Nothing
+was changed.  An unanswerable question is refused rather than assumed empty,
+because the assumption costs data.  Fix the docker daemon and re-run."
+  fi
+  [ -n "$blocking" ] || return 0
+  die "the stack is still running.  These containers hold the databases and
+volumes this restore overwrites:
+
+$(printf '%s\n' "$blocking" | sed 's/^/      /')
+
+Nothing has been changed.  Stop the stack, then restore:
+
+      bin/aistack down
+      bin/aistack restore ${ARCHIVE:-<archive>}
+
+To rehearse a restore WITHOUT touching the live stack, leave it up and use
+--into-drill-project instead; that path never attaches to a live volume."
+}
+# <<< live-stack guard <<<
+
 if [ -n "$DRILL_PROJECT" ]; then
   echo "    into throwaway project '$DRILL_PROJECT' — live volumes are not touched"
   PROJECT="$DRILL_PROJECT"
@@ -201,10 +286,25 @@ if [ -n "$DRILL_PROJECT" ]; then
   # every volume and container with the project.
   COMPOSE_FILE_ARGS=(-f compose.drill.yaml)
 else
+  PROJECT="aistack"
+  VOL_PREFIX="aistack"
+  COMPOSE_FILE_ARGS=(-f compose.yaml)
+  # BEFORE the confirmation prompt, and NOT behind --yes.
+  #
+  # Before, because nobody should have to type RESTORE to find out this cannot
+  # proceed.  Not behind --yes, because --yes answers "yes, overwrite live
+  # data", which is a question the operator is entitled to answer — it is not
+  # an assertion that the stack is stopped, which is a fact about the machine.
+  #
+  # And after step 3's verification, so that "stop the stack and re-run" is
+  # advice backed by an archive already known to be good: stopping a serving
+  # stack for an archive that then turns out to be corrupt is the worse
+  # outcome of the two.
+  require_stack_down "$PROJECT" "$PROJECT-postgres"
   if [ "$ASSUME_YES" -ne 1 ]; then
     cat <<EOF
 
-    THIS OVERWRITES LIVE DATA in the running stack.
+    THIS OVERWRITES THE LIVE DATA of project 'aistack'.
 
     If an image migration has run since this backup was taken, restoring is
     the ONLY reverse path — and a major-version rollback means restoring a
@@ -215,9 +315,6 @@ EOF
     read -r reply
     [ "$reply" = "RESTORE" ] || die "aborted; nothing was changed"
   fi
-  PROJECT="aistack"
-  VOL_PREFIX="aistack"
-  COMPOSE_FILE_ARGS=(-f compose.yaml)
 fi
 
 dc() { ( cd "$ROOT" && docker compose -p "$PROJECT" "${COMPOSE_FILE_ARGS[@]}" "$@" ); }
@@ -422,10 +519,15 @@ SQL
 }
 
 # A DUMP THAT CANNOT BE LOADED AT ALL IS NOT A WARNING.  If the create above
-# failed for any reason, pg_restore's own failure is reduced to a one-line
-# "(pg_restore reported warnings)" and a database that IS in the archive does
-# not come back -- this ticket's defect, moved into the restore path.  Refusing
-# here stops with the reason named while the operator is still watching.
+# failed for any reason, pg_restore cannot load this dump and a database that
+# IS in the archive does not come back -- this ticket's defect, moved into the
+# restore path.  Refusing here stops with the reason named while the operator
+# is still watching.
+#
+# This is the earlier and narrower half of a pair: it answers "the database is
+# not there", before a byte is loaded.  load_dump_or_die() below answers "the
+# load itself failed", which until NOM-405 was the swallowed one-line
+# "(pg_restore reported warnings)" this comment was written against.
 require_database_present() {
   local db="$1"
   if db_exists "$db"; then return 0; fi
@@ -435,6 +537,61 @@ place; nothing after it has been touched.  Check the cluster for a missing
 owner role, then re-run the restore -- it is idempotent."
 }
 # <<< restored-db classification <<<
+
+# >>> dump load decision: tests/restore-live-stack.sh extracts and runs these lines >>>
+# A pg_restore THAT FAILED IS A REFUSAL, NOT A WARNING (NOM-405).
+#
+# This used to be
+#
+#     ... >/dev/null 2>&1 || echo "      (pg_restore reported warnings for $db)"
+#
+# so every way it can fail -- a DROP the --clean pass cannot perform, a corrupt
+# member, a cluster that went away mid-load -- printed one reassuring line
+# about "warnings" over a database that is now PART of the archive and part of
+# what was there before.  And stderr went to /dev/null, so the reason was gone
+# too.  require_database_present() above already took the opposite position
+# for the case where the database is missing outright; the --clean case was
+# left swallowed.
+#
+# MEASURED, pg_restore 17.11 out of the pinned image, so that this refuses
+# failures and not noise:
+#
+#   into a fresh empty database            exit 0, stderr empty
+#   again, over the populated one          exit 0, stderr empty
+#   a DROP blocked by a dependent view     exit 1, stderr names it, and the
+#                                          database is left holding 3 rows
+#                                          where the dump holds 2
+#   a truncated archive member             exit 1, the table never arrives
+#
+# So the healthy path -- live and drill -- is silent and exit 0, and non-zero
+# means something in THIS database did not load.  WARNINGS STAY
+# DISTINGUISHABLE: exit 0 with anything on stderr keeps the old line and now
+# prints what it actually said instead of discarding it.
+#
+# A function, not an `if` in the loop, for the reason the block above it gives:
+# the loop body runs pg_restore against a live cluster, so inline these
+# decisions could only be tested by performing a restore.  Out here
+# tests/restore-live-stack.sh extracts these lines and drives them.
+load_dump_or_die() {
+  # $1 = database, $2 = the .dump to load, $3 = a writable path for stderr.
+  local db="$1" dump="$2" err="$3"
+  if dc exec -T postgres pg_restore --clean --if-exists -U aistack_admin -d "$db" \
+       < "$dump" >/dev/null 2>"$err"; then
+    [ -s "$err" ] || return 0
+    echo "      (pg_restore reported warnings for $db, and they were:)"
+    sed 's/^/        /' "$err"
+    return 0
+  fi
+  die "pg_restore FAILED loading '$db', which is in this archive.  That
+database now holds part of the backup over part of what was there before, so
+it is not what either one was.  pg_restore said:
+
+$(tail -n 20 "$err" | sed 's/^/      /')
+
+Databases restored before this one are already in place; nothing after it has
+been touched.  Fix what it names and re-run the restore -- it is idempotent."
+}
+# <<< dump load decision <<<
 for dump in "$WORK"/payload/*.dump; do
   [ -f "$dump" ] || continue
   db="$(basename "$dump" .dump)"
@@ -463,8 +620,7 @@ for dump in "$WORK"/payload/*.dump; do
   # still right — the database usually already exists — but "it is not there
   # afterwards" is a refusal, not a warning.
   require_database_present "$db"
-  dc exec -T postgres pg_restore --clean --if-exists -U aistack_admin -d "$db" \
-    < "$WORK/payload/$db.dump" >/dev/null 2>&1 || echo "      (pg_restore reported warnings for $db)"
+  load_dump_or_die "$db" "$WORK/payload/$db.dump" "$WORK/pg_restore.$db.err"
 done
 
 echo "    volumes"
