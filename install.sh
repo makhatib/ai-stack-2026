@@ -395,6 +395,20 @@ chmod 0600 .env
 # ===========================================================================
 # 12  OWNER BOOTSTRAP, PHASE 1 (S05)
 # ===========================================================================
+#
+# PHASE 2 IS `aistack user reset owner`, AND IT IS NOT A SECOND-BEST OPTION.
+# The web reset flow this message used to point at is DISABLED in
+# config/authelia/configuration.yml -- `password_reset` needs SMTP and there is
+# none in the MVP, and a self-service reset that cannot send mail is a dead end
+# that looks like a feature.  The message below therefore names the command
+# that exists, and `bin/aistack user` is that command.  [NOM-402]
+#
+# The block between the two markers is EXTRACTED AND RUN by
+# tests/owner-bootstrap.sh, which drives the real phase 1 into a fixture root
+# and then completes phase 2 against it.  Keep it self-contained: it may use
+# `die`, `say`, `head2` and the repository root as its working directory, and
+# nothing else from this file.
+# AISTACK-OWNER-PHASE1:BEGIN
 head2 "[12/15] Owner account (phase 1 of 2)"
 if [ -f config/authelia/users.yml ]; then
   say "  users.yml already exists — left alone (an existing account is never reset)."
@@ -414,13 +428,22 @@ PY
   say "  Owner account created with a random password, stored as an argon2id hash."
   say ""
   say "  THE PASSWORD WAS NOT PRINTED AND IS NOT RECOVERABLE — that is the point."
-  say "  Phase 2 is your first login: open the stack, use the reset flow, set"
-  say "  your own password and enrol a second factor. Until you do, no"
-  say "  protected route resolves."
+  say "  Phase 2 is one command, and you run it before your first login:"
+  say ""
+  say "      bin/aistack user reset owner"
+  say ""
+  say "  It asks for a password at a prompt, does not echo it, and stores it"
+  say "  nowhere but as a hash in config/authelia/users.yml.  Then log in and"
+  say "  enrol a second factor: Authelia asks for a one-time code, and"
+  say "  'bin/aistack user code' is where that code appears, because there is"
+  say "  no mail server here to send it to you."
+  say ""
+  say "  Until both halves are done, no protected route resolves."
   say ""
   say "  There is therefore no window in which an account exists that can"
-  say "  reach a service with a password this installer printed."
+  say "  open a service with a password this installer printed."
 fi
+# AISTACK-OWNER-PHASE1:END
 bash scripts/gen-secrets.sh < /dev/null >/dev/null   # apply modes to users.yml
 
 # ===========================================================================
@@ -449,8 +472,12 @@ cat <<EOF
  uses an internal certificate authority, because a publicly trusted
  certificate would need a DNS record anyone can look up.
 
- FIRST LOGIN IS PHASE 2 OF THE BOOTSTRAP. Use the reset flow, set your own
- password, enrol a second factor.
+ PHASE 2 OF THE BOOTSTRAP IS STILL TO DO, and nobody can log in until it is:
+
+   bin/aistack user reset owner      # set your own password, at a prompt
+   bin/aistack user code             # the one-time code enrolment asks for
+
+ Run the first, log in, enrol a second factor, run the second when it asks.
 
  Then:
    bin/aistack models pull llama3.2:3b     # ~2 GB, through the egress helper

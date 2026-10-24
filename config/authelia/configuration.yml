@@ -1,12 +1,20 @@
 # AI Stack 2026 — Authelia.  The one locked door.
 #
 # FILE BACKEND = NO SELF-REGISTRATION SURFACE, which is what makes the
-# two-phase owner bootstrap possible (S05): phase 1 writes a user with a
-# temporary password and NO second factor; phase 2 is the owner's first login,
-# which forces both a password change and TOTP enrolment before any protected
-# route resolves.  There is no window in which an account exists that can reach
-# a service with a password the installer printed — because the installer never
-# prints one.
+# two-phase owner bootstrap possible (S05): phase 1 writes a user with a random
+# password nobody has seen and NO second factor; phase 2 is the owner setting
+# their own password with `aistack user reset owner` and then enrolling a
+# second factor at their first login.  There is no window in which an account
+# exists that can open a service with a password the installer printed —
+# because the installer never prints one.
+#
+# PHASE 2 IS NOT SOMETHING AUTHELIA FORCES, and this comment used to say it
+# was.  MEASURED (NOM-402): the file backend has no must-change-password flag,
+# so nothing here compels a password change — the installer's password is
+# simply unusable because nobody knows it, and `aistack user reset` is the
+# whole of how a usable one comes to exist.  The second factor IS compelled:
+# every route below is `two_factor`, so an account with none enrolled gets a
+# redirect and no protected content, which was measured end to end.
 #
 # Forward-auth is PRIMARY.  Authelia's OIDC provider is open beta with no
 # single-logout [V-252]; OIDC is configured for the apps that speak it, but no
@@ -31,6 +39,15 @@ log:
   # driver's 10m/3 rotation is the only retention knob.
 
 totp:
+  # ENROLLING A FACTOR NEEDS A ONE-TIME CODE, AND THE NOTIFIER BELOW IS WHERE
+  # IT GOES.  MEASURED (NOM-402): `PUT /api/secondfactor/totp/register`
+  # answers {"elevation":true} until the session is elevated, and elevation
+  # consumes a code Authelia hands to the notifier.  The pinned binary's keys
+  # are identity_validation.elevated_session.{characters,code_lifespan,
+  # elevation_lifespan,skip_second_factor,require_second_factor} and none of
+  # them waives the code.  With no SMTP that code is only ever in
+  # /data/notification.txt inside this container, so `aistack user code` reads
+  # it out -- without that command the enrolment has no way to complete.
   issuer: aistack
   algorithm: sha1
   digits: 6
@@ -38,10 +55,28 @@ totp:
   skew: 1
 
 authentication_backend:
-  # No self-registration surface.  `aistack user add` writes this file.
+  # No self-registration surface.  `aistack user add` and `aistack user reset`
+  # are the only things that write this file; see scripts/user.sh.
   file:
     path: /config/users.yml
-    watch: true
+    # `watch: false`, AND THAT IS A MEASUREMENT, NOT A PREFERENCE.
+    #
+    # This was `watch: true` and the watcher never fired.  compose bind-mounts
+    # users.yml as a SINGLE FILE, so Authelia watches a path whose directory is
+    # inside the container and never sees a host-side write to it.  MEASURED
+    # (NOM-402, 2026-10-24) both ways a writer could plausibly behave: an
+    # in-place truncate-write, and an atomic rename into place.  Two minutes
+    # after each, a login as the newly added user still failed with `user not
+    # found`; a container restart picked the change up at once.  `docker kill
+    # -s HUP` is not a reload either -- it kills the process (exit 129).
+    #
+    # So the reload is the restart `aistack user` performs, and `true` here
+    # described a mechanism that did not exist.  Before setting it back,
+    # measure it: if a future version watches the file's directory, this can
+    # become `true` again AND `aistack user` can stop restarting -- but a
+    # watcher that reloads on every write also means a half-written users.yml
+    # gets loaded, which is why the writer renames rather than truncates.
+    watch: false
     password:
       algorithm: argon2
       argon2:
@@ -53,7 +88,11 @@ authentication_backend:
         salt_length: 16
   password_reset:
     # No SMTP in the MVP, so a self-service reset would be a dead end that
-    # looks like a feature.  `aistack user reset` is the supported path.
+    # looks like a feature.  `aistack user reset <name>` is the supported path
+    # and it is implemented in scripts/user.sh -- for a whole release this
+    # comment named a command that did not exist (NOM-402), which is why
+    # tests/owner-bootstrap.sh now checks that every `aistack user` command
+    # named in this file, in install.sh and in docs/install.md dispatches.
     disable: true
 
 access_control:

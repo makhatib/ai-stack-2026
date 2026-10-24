@@ -1071,6 +1071,18 @@ _model_pull() {
 # (that is a different failure, and silently rotating a live role's password is
 # how an "idempotent" tool locks you out of your own data).
 cmd_db_init() { with_lifecycle_lock sh _db_init "$@"; }
+
+# ACCOUNTS.  Owner bootstrap phase 2 and everything after it; see
+# scripts/user.sh for why this exists and what was measured.
+#
+# BOTH LOCKS, IN THE ONE ORDER (final-design 2.1, I14).  The lifecycle lock is
+# taken SHARED: this does not start or stop the project, so it must not exclude
+# a concurrent `up`, but it must be excluded BY a restore, which takes it
+# exclusively -- restoring the authelia database underneath a password change
+# would leave users.yml and the enrolled factors describing different accounts.
+# The helper lock is taken because every subcommand here runs a throwaway
+# container, which is what that lock bounds to one at a time.
+cmd_user() { with_lifecycle_lock sh with_helper_lock "$ROOT/scripts/user.sh" "$@"; }
 _db_init() {
   local c=aistack-postgres
   docker ps --format '{{.Names}}' | grep -q "^${c}$" \
@@ -1205,6 +1217,14 @@ aistack — AI Stack 2026
   db-init             re-apply the first-boot database init (idempotent
                       repair for a first boot that was interrupted)
 
+  user list           who exists, their groups, and who has a second factor
+  user reset <name>   set that account's password -- owner bootstrap phase 2
+  user add <name>     create an account and set its password
+  user remove <name>  delete an account
+  user reset-2fa <n>  forget an enrolled second factor so it is enrolled again
+  user code           the one-time code Authelia issued for an enrolment
+                      (there is no SMTP, so this is how it reaches you)
+
   pin                 re-render versions.env into .env
   update              backup, pull by digest, up, bounded health gate
   rollback            return to the previous pins
@@ -1257,6 +1277,7 @@ case "${1:-}" in
   models) shift; cmd_models "$@" ;;
   pin) shift; cmd_pin "$@" ;;
   db-init) shift; cmd_db_init "$@" ;;
+  user) shift; cmd_user "$@" ;;
   update) shift; cmd_update "$@" ;;
   rollback) shift; cmd_rollback "$@" ;;
   backup) shift; cmd_backup "$@" ;;
