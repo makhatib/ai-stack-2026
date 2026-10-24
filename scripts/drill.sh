@@ -282,8 +282,13 @@ else
   # turns out to hold.
   #
   # THE NAME IS READ LINE-WISE, NOT FIELD-WISE (NOM-393).  restore.sh writes
-  # `<kind> <name>` with one space, so the name is EVERYTHING after the first
-  # space, spaces included.  The first cut of this took awk's `$2` and looped
+  # `<kind> <name>` with one space, so WITHIN A LINE the name is EVERYTHING
+  # after the first space -- spaces and tabs included.  Within a line is all
+  # this can promise: the channel is newline-delimited, so a name holding a
+  # NEWLINE is not recoverable here at all -- it arrives as two entries that
+  # both look legitimate.  That one is refused at the writer instead, by
+  # record_restored_db() in restore.sh (NOM-394), which is the only place it
+  # still exists whole.  The first cut of this took awk's `$2` and looped
   # with `for db in $CLUSTER_DBS`, and both halves truncate on whitespace: a
   # kinds line `cluster my db` arrived here as `my`, the [A-Za-z0-9_] refusal
   # below never saw a space to refuse, and the drill printed

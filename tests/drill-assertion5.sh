@@ -193,7 +193,7 @@ shipped "13 cluster + legacy together: the cluster wins, no note" \
   $'cluster aistack\nlegacy n8n\n' 0 'ok \] cluster-kind database .aistack.' \
   '\[note\]'
 
-printf -- '\n-- NOM-393: a name that is not one whitespace-free word --\n'
+printf -- '\n-- NOM-393: a name holding a SPACE or a TAB (a newline cannot get here: restore.sh refuses it at the writer, NOM-394) --\n'
 
 # THE TICKET'S CASE.  `cluster my db` must reach the bare-identifier refusal
 # with the WHOLE name, and must not produce a green line about `my`.

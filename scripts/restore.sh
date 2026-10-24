@@ -332,8 +332,43 @@ restored_db_kind() {
   if is_app_db "$db"; then printf 'app\n'; else printf 'cluster\n'; fi
 }
 
+# A NAME THE CHANNEL CANNOT CARRY IS REFUSED, NOT ENCODED (NOM-394).
+#
+# Both files below hold ONE DATABASE PER LINE, and `db` comes from
+# `basename "$dump" .dump` -- a filename inside the ARCHIVE, which is input,
+# not something this checkout chose.  A name holding a newline therefore does
+# not reach the drill corrupted, which would be survivable; it reaches the
+# drill as TWO entries that both look legitimate.  A dump for a database whose
+# name is `X<newline>cluster Y` writes
+#
+#     cluster X
+#     cluster Y
+#
+# and the reader recovers `X` and `Y`: two bare identifiers, NEITHER of them
+# the database that was in the archive.  That is NOM-393's failure one layer
+# up, and no amount of reader-side parsing can undo it -- by the time drill.sh
+# opens the file the name is already gone.
+#
+# So the filter is HERE, at the writer, before either append, and it is the
+# whole bare-identifier rule rather than just newline and carriage return: the
+# same rule scripts/backup.sh applies to a name it is about to dump and
+# drill.sh applies to a name it reads back (S06).  backup.sh refusing it first
+# means no archive this project PRODUCES can reach this die; an archive that
+# does came from somewhere else, and that is exactly when the control reading
+# this channel must not be quietly handed the wrong database.  Refusing stops
+# the restore with the reason named while the operator is still watching.
+# tests/backup-db-set.sh drives the shipped block with such a name, and
+# reproduces the two-entry misreport against a copy with this guard removed.
 record_restored_db() {
   local db="$1"
+  case "$db" in
+    *[!A-Za-z0-9_]*)
+      die "this archive holds a dump for a database that is not a bare identifier:
+'$db'
+The expectation handed to the drill records one database per line, so this name
+cannot be recorded without misreporting what was restored.  Databases restored
+before this one are already in place; nothing after it has been touched." ;;
+  esac
   if [ -n "${RESTORED_DB_KINDS_FILE:-}" ]; then
     printf '%s %s\n' "$(restored_db_kind "$db")" "$db" >> "$RESTORED_DB_KINDS_FILE"
   fi

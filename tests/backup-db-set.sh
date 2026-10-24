@@ -630,6 +630,120 @@ else
   bad "with the kinds file unset the app expectation became '$UNSET_OUT', expected 'app_a app_b '"
 fi
 
+# --- 12b. A NAME THE CHANNEL CANNOT CARRY IS REFUSED, NOT ENCODED (NOM-394) -
+#
+# Both files 12a measures hold ONE DATABASE PER LINE, and the name comes from a
+# filename inside the ARCHIVE.  A name holding a newline is not written
+# corrupted -- it is written as TWO entries that both look legitimate and
+# neither of which is the database that was in the archive.  That is the
+# NOM-393 failure one layer up, and a reader cannot undo it: by the time
+# drill.sh opens the file the name is gone.  So the refusal has to be at the
+# writer, which is in the block extracted above, which is why it is measured
+# here and not in tests/drill-assertion5.sh.
+#
+# AND IT IS MEASURED AGAINST A CONTROL.  The last two cases strip the guard out
+# of the shipped block and require the SAME name to produce the misreport
+# there.  A guard whose absence changes nothing is not evidence that the guard
+# is what stops this.
+printf '\n  -- a name the expectation channel cannot carry (NOM-394) --\n'
+
+# $1 = block to source, $2 = database name.  Sets W_RC, W_OUT, W_KINDS, W_APPS.
+write_one() {
+  local kout="$WORK/k394.txt" aout="$WORK/a394.txt"
+  : > "$kout"; : > "$aout"
+  W_OUT="$(
+    RESTORE_DB_RECORDED=1 RESTORE_APP_DBS="app_a app_b" \
+    RESTORED_DB_KINDS_FILE="$kout" RESTORED_DBS_FILE="$aout" \
+    NAME="$2" bash -c '
+      set -euo pipefail
+      die() { printf "DIE: %s\n" "$*"; exit 9; }
+      # shellcheck source=/dev/null
+      . "$1"
+      record_restored_db "$NAME"
+      echo RETURNED-0
+    ' _ "$1" 2>&1
+  )"
+  W_RC=$?
+  W_KINDS="$(tr '\n' ';' < "$kout")"
+  W_APPS="$(tr '\n' ';' < "$aout")"
+}
+
+# THE TICKET'S NAME.  Chosen so that BOTH lines it would produce are themselves
+# well-formed `cluster <bare identifier>` entries -- the case the reader cannot
+# tell from two real databases.
+EVIL="$(printf 'aistack\ncluster evil')"
+
+write_one "$RBLOCK" "$EVIL"
+if [ "$W_RC" -ne 0 ] && printf '%s\n' "$W_OUT" | grep -q 'not a bare identifier'; then
+  ok "a database name holding a NEWLINE is refused at the writer, with the reason named"
+else
+  bad "the newline name was not refused: exit=$W_RC"; note "$W_OUT"
+fi
+if [ -z "$W_KINDS" ] && [ -z "$W_APPS" ]; then
+  ok "...and NOTHING was appended to either channel, so no entry of it survives to be read"
+else
+  bad "the refusal still appended: kinds='$W_KINDS' apps='$W_APPS'"
+fi
+
+# THE SAME RULE AS THE READER, not a narrower newline-only one: a space and a
+# tab are what NOM-393 fixed downstream, and a hyphen is the ordinary name
+# that scripts/backup.sh already refuses to dump.  All three must stop here too
+# or the two ends of the channel disagree about what a name may be.
+SURVIVED=""
+for n in 'my db' "$(printf 'ai\tstack')" 'my-db'; do
+  write_one "$RBLOCK" "$n"
+  [ "$W_RC" -ne 0 ] || SURVIVED="$SURVIVED '$n'"
+  [ -z "$W_KINDS$W_APPS" ] || SURVIVED="$SURVIVED '$n'(wrote)"
+done
+[ -z "$SURVIVED" ] \
+  && ok "a space, a tab and a hyphen are refused by the same rule, so both ends of the channel agree" \
+  || bad "these names were not refused at the writer:$SURVIVED"
+
+# A normal name is untouched by the guard -- asserted here and not left to
+# 12a's cases, because a guard that refuses everything would pass every
+# assertion above about refusals and break every restore.
+write_one "$RBLOCK" aistack
+if [ "$W_RC" -eq 0 ] && [ "$W_KINDS" = "cluster aistack;" ]; then
+  ok "and a bare-identifier name is recorded exactly as before: $W_KINDS"
+else
+  bad "the guard changed a normal name's handling: exit=$W_RC kinds='$W_KINDS'"; note "$W_OUT"
+fi
+
+# --- 12c. teeth: the control, with the guard removed -----------------------
+PRE394="$WORK/classify-pre394.sh"
+python3 - "$RBLOCK" "$PRE394" <<'PY' || refuse "the NOM-394 bare-identifier guard could not be
+  removed from the extracted block (expected exactly one case/esac carrying
+  [!A-Za-z0-9_]), so the CONTROL for it was not built and its teeth were NOT
+  measured. Update this test to match the guard's new shape."
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+new, n = re.subn(r'\n[ \t]*case "\$db" in\n[ \t]*\*\[!A-Za-z0-9_\]\*\)(?:.*?\n)*?[ \t]*esac\n',
+                 "\n", src)
+if n != 1:
+    sys.exit(1)
+open(sys.argv[2], "w", encoding="utf-8").write(new)
+PY
+grep -q '^record_restored_db()' "$PRE394" \
+  || refuse "stripping the guard also removed record_restored_db() from the control,
+  so the control measures nothing. Update this test."
+
+write_one "$PRE394" "$EVIL"
+if [ "$W_RC" -eq 0 ] && [ "$W_KINDS" = "cluster aistack;cluster evil;" ]; then
+  ok "teeth: with the guard removed the SAME name writes TWO entries: $W_KINDS"
+else
+  bad "the pre-NOM-394 control did not reproduce the misreport: exit=$W_RC kinds='$W_KINDS'"
+  note "$W_OUT"
+fi
+# AND READ BACK THE WAY drill.sh READS IT, which is the whole reason the writer
+# is the only place this can be fixed: the reader is handed two bare
+# identifiers and has nothing left to refuse.
+RECOVERED="$(printf '%s' "$W_KINDS" | tr ';' '\n' | sed -n 's/^cluster //p' | tr '\n' ',')"
+if [ "$RECOVERED" = "aistack,evil," ]; then
+  ok "...which drill.sh's own reader recovers as 'aistack' and 'evil' -- both bare, neither the database in the archive"
+else
+  bad "reading the control's channel back gave '$RECOVERED', expected 'aistack,evil,'"
+fi
+
 # restored_db_kind() and is_app_db() DISAGREE ON PURPOSE for a legacy archive,
 # and that disagreement is the whole mechanism: is_app_db() must say "app"
 # (the OWNER clause depends on it) while restored_db_kind() must say "we were
