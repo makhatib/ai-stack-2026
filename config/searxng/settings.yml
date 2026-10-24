@@ -1,0 +1,26 @@
+# AI Stack 2026 — SearXNG, internal only (NOM-413).
+# The committed file carries a PLACEHOLDER; scripts/gen-secrets.sh renders the
+# real file to secrets/searxng-settings.yml, and that is what compose mounts.
+use_default_settings: true
+general:
+  instance_name: "aistack-search"
+  enable_metrics: false
+server:
+  secret_key: "__SEARXNG_SECRET__"
+  # Only the mcp-web container can reach this, over a pairwise /29.  The
+  # limiter needs Valkey and protects a public instance; this is not one.
+  limiter: false
+  public_instance: false
+  bind_address: "0.0.0.0"
+  port: 8080
+  image_proxy: false
+search:
+  formats: [html, json]
+  safe_search: 1
+  autocomplete: ""
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 20
+ui:
+  static_use_hash: true

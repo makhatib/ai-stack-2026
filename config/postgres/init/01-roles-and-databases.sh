@@ -90,7 +90,8 @@ create_app() {
   # pgvector lives in the one database that holds embeddings.  CREATE EXTENSION
   # is superuser-only, so it happens here, now — not at app startup under a
   # role that would need to be a superuser to run it.
-  if [ "$app" = "openwebui" ]; then
+  # openwebui (RAG) and mem0 (the agent's memory) both hold embeddings.
+  if [ "$app" = "openwebui" ] || [ "$app" = "mem0" ]; then
     psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$app" \
       -c 'CREATE EXTENSION IF NOT EXISTS vector;'
     psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$app" \

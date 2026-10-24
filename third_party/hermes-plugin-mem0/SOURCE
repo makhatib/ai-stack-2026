@@ -1,0 +1,5 @@
+Vendored UNMODIFIED from https://github.com/mem0ai/mem0
+commit 43849c6e9d4d773b83a8144b6373aedc67241a5d
+subdir integrations/hermes-plugin-mem0 (version 1.3.0, Apache-2.0 AND MIT)
+Fetched 2026-10-24 (NOM-413).  Pinned in Hermes plugin-catalog/mem0.yaml of hermes-agent v0.22.5.
+Self-hosted mode uses only httpx; the platform/OSS modes import mem0ai and are not used.

@@ -1,4 +1,5 @@
-# AI Stack 2026 — LiteLLM.  THE ONE AUTHORISED INFERENCE FRONT DOOR (M2).
+# AI Stack 2026 — LiteLLM.  THE ONE AUTHORISED INFERENCE FRONT DOOR (M2) AND,
+# FROM v2, THE ONE MCP GATEWAY.
 #
 # Everything that calls a model calls this, with a per-app VIRTUAL KEY that
 # carries its own budget and token accounting.  Nothing talks to Ollama
@@ -11,13 +12,28 @@
 model_list:
   # Local only.  Weights arrive through the model-puller helper, never through
   # Ollama's own egress — `inference` is internal and has no route off the host.
+  #
+  # TIER CHOICE IS A ONE-LINE EDIT: `agent` is what Hermes and Mem0 call.  It is
+  # qwen3.5:9b (Tier 2, 16 GB CPU).  On Tier 1 (8 GB) NOM-412 measured that no
+  # local model is usable for Hermes (2b invents answers, 4b does not fit next
+  # to the stack); the open founder question R1 decides whether `agent` points
+  # at a hosted model there.  Nothing else in the stack changes either way.
+  - model_name: agent
+    litellm_params:
+      model: ollama_chat/qwen3.5:9b
+      api_base: http://ollama:11434
   - model_name: local-chat
     litellm_params:
-      model: ollama_chat/llama3.2:3b
+      model: ollama_chat/qwen3.5:2b
       api_base: http://ollama:11434
-  - model_name: local-chat-8b
+  - model_name: local-chat-large
     litellm_params:
-      model: ollama_chat/qwen3:8b
+      model: ollama_chat/qwen3.5:9b
+      api_base: http://ollama:11434
+  # bge-m3 (MIT, 1024 dims) is the Arabic-capable embedder NOM-412 picked.
+  - model_name: embed
+    litellm_params:
+      model: ollama/bge-m3
       api_base: http://ollama:11434
   - model_name: local-embed
     litellm_params:
@@ -28,15 +44,43 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL
   store_model_in_db: true
-  # MCP features OFF.  agentgateway was the stack's MCP policy point and its
-  # gate failed; turning LiteLLM's own MCP on would reintroduce an unguarded
-  # tool surface through the back door.
-  enable_mcp: false
-  # limits.yaml v1 — an independent SECOND ceiling, not the bound.  The bound
-  # is `aistack_slot`: 4 + 20 finite rows in Postgres taken under
-  # FOR UPDATE SKIP LOCKED.  A parallel-request cap in one process is not a
-  # queue and cannot be one.
+  # MCP IS ON, AND THIS FILE IS THE ONE ALLOWLIST (NOM-412 §4, Tech Lead
+  # decision on NOM-412).  Hermes, n8n and Open WebUI reach tools only through
+  # this proxy's /mcp, each with its own virtual key; a key sees only the
+  # servers in its `object_permission`.  NO stdio server may be declared here
+  # and ci/invariants.py I17 fails the build if one is.
+  enable_mcp: true
   max_parallel_requests: 8
+
+# THE ALLOWLIST.  Two layers, both required:
+#   allowed_tools   — the tool NAMES a client may call
+#   allowed_params  — the argument KEYS per tool.  This is what makes the three
+#                     G-AGENTS tests pass; `allowed_tools` alone FAILED test (b).
+# A tool with no `allowed_params` entry gets NO argument check (NOM-412 limit 2),
+# so ci/invariants.py I17 fails the build when one is missing.
+# Limits that remain true: it is a KEY allowlist, not JSON-Schema validation, and
+# `tools/list` shows the backend's live schema.  scripts/mcp-verify.py compares
+# that live schema to config/mcp/tools.lock.json.
+mcp_servers:
+  web:
+    url: http://mcp-web:8900/mcp
+    transport: http
+    description: "Web search (SearXNG) and one-page fetch (Crawl4AI)"
+    allowed_tools: [web_search, fetch_page]
+    allowed_params:
+      web_search: [query, limit]
+      fetch_page: [url]
+  n8n:
+    url: http://n8n:5678/mcp-server/http
+    transport: http
+    description: "n8n workflows that the owner marked available to MCP"
+    auth_type: bearer_token
+    authentication_token: os.environ/N8N_MCP_TOKEN
+    allowed_tools: [search_workflows, get_workflow_details, execute_workflow]
+    allowed_params:
+      search_workflows: [query, limit]
+      get_workflow_details: [workflowId]
+      execute_workflow: [workflowId, inputs]
 
 litellm_settings:
   drop_params: true

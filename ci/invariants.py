@@ -31,6 +31,8 @@ except ImportError:
 FAILURES = []
 RESULTS = []
 
+SHIPPED_SCOPES = ("mvp", "v2")
+
 
 def check(ident, title):
     def deco(fn):
@@ -70,8 +72,14 @@ class Ctx:
         self.networks = self.compose.get("networks") or {}
 
     def mvp_services(self):
+        """Every SHIPPED service: the MVP's and v2's.
+
+        The name is historical — the checks below were written for `scope: mvp`
+        and v2 (NOM-413) adds `scope: v2` to the same set rather than forking
+        every predicate.  `later` and `1.0` stay out, exactly as before.
+        """
         return {k: v for k, v in (self.manifest.get("services") or {}).items()
-                if v.get("scope") == "mvp"}
+                if v.get("scope") in SHIPPED_SCOPES}
 
     def bridge(self, name):
         return (self.manifest.get("bridges") or {}).get(name) or {}
@@ -184,28 +192,55 @@ def i2(ctx):
 @check("I3", "service count per profile matches the manifest; no helper restarts")
 def i3(ctx):
     bad = []
-    declared = (ctx.manifest.get("counts") or {}).get("steady_state", {}).get("mvp")
+    declared = (ctx.manifest.get("counts") or {}).get("steady_state", {}).get("v2")
     actual = len(ctx.mvp_services())
     if declared != actual:
-        bad.append(f"manifest declares steady_state.mvp={declared} but lists {actual} mvp services")
+        bad.append(f"manifest declares steady_state.v2={declared} but lists {actual} shipped services")
 
-    # Rendered compose: core has no profile key, knowledge is profiled.
+    # Rendered compose: core has no profile key; every other group is a profile.
+    # Each manifest profile is checked against ITS OWN groups, so a service in
+    # the wrong group — or a group whose profile key is not what compose
+    # declares — fails here rather than at somebody's install.
     core = [n for n, s in ctx.services.items() if not s.get("profiles")]
-    profiled = {n: s.get("profiles") for n, s in ctx.services.items() if s.get("profiles")}
-    starter = (ctx.manifest.get("profiles") or {}).get("starter", {}).get("containers")
-    if len(core) != starter:
-        bad.append(f"profile 'starter' declares {starter} containers; compose has {len(core)} unprofiled services")
-    total = len(core) + len(profiled)
-    automation = (ctx.manifest.get("profiles") or {}).get("automation", {}).get("containers")
-    if total != automation:
-        bad.append(f"profile 'automation' declares {automation}; compose renders {total}")
+    by_profile = {}
+    for n, s in ctx.services.items():
+        for p in s.get("profiles") or []:
+            by_profile.setdefault(p, set()).add(n)
+    groups = ctx.manifest.get("groups") or {}
+    for pname, prof in (ctx.manifest.get("profiles") or {}).items():
+        if prof.get("scope") == "1.0":
+            continue
+        want = len(core)
+        for g in prof.get("groups") or []:
+            key = (groups.get(g) or {}).get("profile_key", g)
+            if key is None:
+                continue
+            want += len(by_profile.get(key, ()))
+        if prof.get("containers") != want:
+            bad.append(f"profile {pname!r} declares {prof.get('containers')} containers; "
+                       f"compose renders {want} for groups {prof.get('groups')}")
+    # And the manifest's group membership must be what compose says.
+    for g, grp in groups.items():
+        if grp.get("scope") not in SHIPPED_SCOPES:
+            continue
+        key = grp.get("profile_key", g)
+        for svc in grp.get("services") or []:
+            cs = ctx.services.get(svc)
+            if cs is None:
+                bad.append(f"group {g} lists {svc}, which compose does not define")
+                continue
+            have = cs.get("profiles") or []
+            if key is None and have:
+                bad.append(f"{svc} is in core but compose gives it profiles {have}")
+            if key is not None and key not in have:
+                bad.append(f"{svc} is in group {g} (profile {key}) but compose gives it profiles {have}")
 
     for h in (ctx.manifest.get("helpers") or {}):
         svc = ctx.services.get(h)
         if svc and svc.get("restart") == "unless-stopped":
             bad.append(f"helper {h} declares restart: unless-stopped, which would let it be counted as steady state")
 
-    peak = (ctx.manifest.get("counts") or {}).get("peak", {}).get("mvp")
+    peak = (ctx.manifest.get("counts") or {}).get("peak", {}).get("v2")
     if peak != actual + 1:
         bad.append(f"peak ({peak}) must equal steady_state ({actual}) + the helper lock's ceiling of 1")
     return bad
@@ -267,6 +302,33 @@ def i4(ctx):
         return out
 
     for name, svc in ctx.services.items():
+        # A service this repository BUILDS (mem0, mcp-web) has no registry
+        # digest of its own: its identity is a function of its build context.
+        # What must be pinned is everything the build starts from, so the
+        # assertion moves there: the BASE arg is tag AND digest, guarded, and
+        # resolves to a sha256; the Python deps carry a hash for every wheel.
+        if svc.get("build"):
+            b = svc["build"]
+            base = ((b.get("args") or {}) if isinstance(b, dict) else {}).get("BASE") or ""
+            if "@" not in base or ":?" not in base or "DIGEST" not in base:
+                bad.append(f"{name}: build BASE is not a guarded tag@digest reference: {base!r}")
+            else:
+                rb = resolve(name, base)
+                if not re.search(r"@sha256:[0-9a-f]{64}$", rb):
+                    bad.append(f"{name}: build BASE does not resolve to a sha256: {rb}")
+            ctxdir = b.get("context") if isinstance(b, dict) else b
+            lock = os.path.join(ctx.root, ctxdir or "", "requirements.lock")
+            if not os.path.isfile(lock):
+                bad.append(f"{name}: {ctxdir}/requirements.lock is missing")
+            else:
+                text = open(lock).read()
+                n_req = len(re.findall(r"(?m)^[A-Za-z0-9_.\-\[\]]+==", text))
+                n_hash = len(re.findall(r"--hash=sha256:[0-9a-f]{64}", text))
+                if n_req == 0 or n_hash < n_req:
+                    bad.append(f"{name}: requirements.lock has {n_req} pins but {n_hash} hashes")
+            if (svc.get("pull_policy") or "") != "never":
+                bad.append(f"{name}: a locally built image must say pull_policy: never, or compose may pull a same-named image from a registry")
+            continue
         img = svc.get("image") or ""
         if "@" not in img:
             bad.append(f"{name}: image reference has no digest component: {img}")
@@ -359,6 +421,14 @@ def i6(ctx):
     return bad
 
 
+def _exceptions_exist(ctx, ids):
+    path = os.path.join(ctx.root, "security-exceptions.yaml")
+    if not os.path.exists(path):
+        return False
+    have = {e.get("id") for e in (yaml.safe_load(open(path)) or {}).get("exceptions") or []}
+    return all(i in have for i in ids)
+
+
 @check("I7", "no untrusted_input service on egress, or on ANY bridge with internal: false")
 def i7(ctx):
     bad = []
@@ -385,7 +455,24 @@ def i7(ctx):
             if b.get("class") == "egress":
                 bad.append(f"{name} has untrusted_input and attaches to egress-class bridge {n}")
             if b.get("internal") is False:
-                bad.append(f"{name} has untrusted_input and attaches to {n}, which is internal: false")
+                # THE ONE SANCTIONED SHAPE (v2, NOM-413): a web fetcher must reach
+                # the internet to do its job, so it sits on an untrusted-fetch
+                # bridge that is PAIRWISE with its single caller.  Allowed only
+                # when ALL of: the bridge class is untrusted-fetch; it has exactly
+                # two members; it has a fixed subnet and no IPv6; the service is
+                # in that bridge's member list; and the service cites an exception
+                # id that exists in security-exceptions.yaml.  Anything else on a
+                # NAT'd bridge still fails.
+                ok = (b.get("class") == "untrusted-fetch"
+                      and b.get("pairwise") is True
+                      and len(b.get("members") or []) == 2
+                      and name in (b.get("members") or [])
+                      and b.get("subnet") and b.get("ipv6") is False
+                      and bool(svc.get("exception_ids"))
+                      and _exceptions_exist(ctx, svc.get("exception_ids")))
+                if not ok:
+                    bad.append(f"{name} has untrusted_input and attaches to {n}, which is internal: false "
+                               f"(and is not a pairwise untrusted-fetch bridge backed by a registered exception)")
     return bad
 
 
@@ -698,7 +785,7 @@ def i13(ctx):
 
     # SET EQUALITY: a new ingress on a service outside the list fails the PR.
     declared_ingress = {n for n, s in (ctx.manifest.get("services") or {}).items()
-                        if s.get("scope") == "mvp" and s.get("untrusted_input") in (True, "yes")}
+                        if s.get("scope") in SHIPPED_SCOPES and s.get("untrusted_input") in (True, "yes")}
     missing = declared_ingress - ingress
     for m in sorted(missing):
         bad.append(f"{m} accepts untrusted bytes but is not in limits.yaml ingress_services")
@@ -922,8 +1009,89 @@ def i16(ctx):
     return bad
 
 
+@check("I17", "one MCP allowlist: no stdio, an argument allowlist for every tool, the agent runtimes are gVisor")
+def i17(ctx):
+    """The three properties NOM-412 §4 says the build must enforce itself.
+
+    1. No stdio MCP server anywhere: not in LiteLLM's mcp_servers, and not in
+       the config Hermes ships.
+    2. EVERY allowed tool has an `allowed_params` entry (`[]` for a tool with no
+       arguments).  LiteLLM applies the argument check only to tools that HAVE
+       an entry (NOM-412 limit 2), so a missing entry is a tool whose arguments
+       are not checked at all — fail-open by omission.
+    3. Hermes, n8n and Open WebUI reach tools through that one allowlist and no
+       other: neither Hermes' nor Open WebUI's shipped config may name an MCP
+       server that is not LiteLLM's /mcp.  Hermes and Crawl4AI run under runsc.
+    """
+    bad = []
+    cfg = yaml.safe_load(open(os.path.join(ctx.root, "config", "litellm", "config.yaml"))) or {}
+    if (cfg.get("general_settings") or {}).get("enable_mcp") is not True:
+        bad.append("config/litellm/config.yaml: general_settings.enable_mcp must be true (it is the one MCP gateway)")
+    servers = cfg.get("mcp_servers") or {}
+    if not servers:
+        bad.append("config/litellm/config.yaml declares no mcp_servers")
+    for name, srv in servers.items():
+        if srv.get("command") or srv.get("args") or str(srv.get("transport", "http")).lower() == "stdio":
+            bad.append(f"mcp_servers.{name} is a stdio server; stdio MCP is not allowed")
+        if not str(srv.get("url", "")).startswith("http://"):
+            bad.append(f"mcp_servers.{name} has no http:// url (internal bridges only)")
+        tools = srv.get("allowed_tools")
+        params = srv.get("allowed_params")
+        if not tools:
+            bad.append(f"mcp_servers.{name} has no allowed_tools: an unlisted server would expose every tool")
+            continue
+        if not isinstance(params, dict):
+            bad.append(f"mcp_servers.{name} has no allowed_params")
+            continue
+        for t in tools:
+            if t not in params or not isinstance(params[t], list):
+                bad.append(f"mcp_servers.{name}: tool {t!r} is allowed but has no allowed_params entry "
+                           f"(use [] for no arguments), so its arguments would not be checked")
+        for t in params:
+            if t not in tools:
+                bad.append(f"mcp_servers.{name}: allowed_params names {t!r}, which is not in allowed_tools")
+
+    # The committed lock must name exactly the allowed tools and keys.
+    lockp = os.path.join(ctx.root, "config", "mcp", "tools.lock.json")
+    if not os.path.isfile(lockp):
+        bad.append("config/mcp/tools.lock.json is missing")
+    else:
+        lock = json.load(open(lockp)).get("tools") or {}
+        want = {f"{n}-{t}": sorted(srv.get("allowed_params", {}).get(t, []))
+                for n, srv in servers.items() for t in (srv.get("allowed_tools") or [])}
+        got = {k: sorted(v.get("arguments", [])) for k, v in lock.items()}
+        for k in sorted(set(want) | set(got)):
+            if k not in got:
+                bad.append(f"tools.lock.json is missing {k}")
+            elif k not in want:
+                bad.append(f"tools.lock.json lists {k}, which the allowlist does not")
+            elif got[k] != want[k]:
+                bad.append(f"tools.lock.json {k} arguments {got[k]} != allowlist {want[k]}")
+
+    # Hermes config: stdio is refused; the only MCP server is the gateway.
+    hp = os.path.join(ctx.root, "config", "hermes", "config.yaml")
+    if os.path.isfile(hp):
+        hcfg = yaml.safe_load(open(hp)) or {}
+        for name, srv in (hcfg.get("mcp_servers") or {}).items():
+            if srv.get("command") or srv.get("args"):
+                bad.append(f"config/hermes/config.yaml mcp_servers.{name} is stdio")
+            if "litellm:4000/mcp" not in str(srv.get("url", "")):
+                bad.append(f"config/hermes/config.yaml mcp_servers.{name} bypasses the gateway: {srv.get('url')!r}")
+    else:
+        bad.append("config/hermes/config.yaml is missing")
+    # Open WebUI's one tool connection is the gateway too.
+    ow = (ctx.services.get("open-webui") or {}).get("environment") or {}
+    if "TOOL_SERVER_CONNECTIONS" in ow:
+        bad.append("open-webui declares TOOL_SERVER_CONNECTIONS in compose; it is generated into secrets/open-webui.env with the app's own key")
+
+    for name in ("hermes", "crawl4ai"):
+        if (ctx.services.get(name) or {}).get("runtime") != "runsc":
+            bad.append(f"{name} must declare runtime: runsc (gVisor); a missing runtime falls back to runc silently")
+    return bad
+
+
 ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14,
-       i15, i16]
+       i15, i16, i17]
 
 
 def main():

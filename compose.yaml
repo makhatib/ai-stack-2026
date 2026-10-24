@@ -4,7 +4,8 @@
 # `aistack manifest render` and the CI invariants in ci/.  A service, bridge or
 # count that exists here and not there fails the PR (I1, I1b, I3, I11).
 #
-# SCOPE: 9 containers.  core 8 + knowledge 1.  The `agents` group is NOT here:
+# SCOPE (v2, NOM-413): core 14 + knowledge 1 + tracing 5 = 20 containers.
+# The MVP was core 8 + knowledge 1 = 9.  The `agents` group is NOT here:
 # gate G-AGENTS failed on 2026-10-18 against the pinned agentgateway digest
 # (see gate/G-AGENTS-result.json), so per final-design §0.1/§2.1/F4 it leaves
 # both the MVP and 1.0.
@@ -411,7 +412,7 @@ services:
     # NO `egress`.  Adding a cloud provider adds that bridge and MAKES TIER B
     # MANDATORY — the installer preflight enforces it, this file does not
     # quietly allow it.
-    networks: [gateway, inference, data]
+    networks: [gateway, inference, data, mcp-web, tracing]
     volumes:
       - ./config/litellm/config.yaml:/app/config.yaml:ro
     tmpfs:
@@ -474,9 +475,12 @@ services:
       N8N_PROTOCOL: https
       WEBHOOK_URL: https://${AISTACK_HOSTNAME:?hostname missing}/n8n/
       N8N_PROXY_HOPS: "1"
-      # The MCP Server Trigger is off.  n8n is the only place a mutating action
-      # can run, and it runs it behind the approval envelope.
-      N8N_MCP_SERVER_ENABLED: "false"
+      # v2: n8n's built-in MCP server is ON so Hermes can trigger workflows.  It
+      # is reachable from `gateway` only, and LiteLLM's one allowlist
+      # (search_workflows / get_workflow_details / execute_workflow) is the only
+      # caller we configure.  Mutating workflows still run behind the approval
+      # envelope, which is a property of the WORKFLOW, not of the transport.
+      N8N_MCP_SERVER_ENABLED: "true"
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
       N8N_TEMPLATES_ENABLED: "false"
@@ -541,6 +545,382 @@ services:
       retries: 3
       start_period: 60s
 
+  # ===========================================================================
+  # v2 core (NOM-413) — the personal agent, its memory, the one MCP backend for
+  # the web, and the search/crawl pair.  No profile key: they run on every
+  # install.  Hermes' bot token is the ONLY thing that can be a placeholder.
+  # ===========================================================================
+
+  hermes:
+    <<: *hardened
+    image: ${HERMES_IMAGE:?pin missing}:${HERMES_TAG:?pin missing}@${HERMES_DIGEST:?pin missing}
+    container_name: aistack-hermes
+    # gVisor runs EVERYTHING the agent executes (its terminal tool, code
+    # execution, any skill script) in a user-space kernel (DoD section 1, "Agent
+    # sandbox").  `scripts/install-gvisor.sh` registers the runtime; `aistack
+    # doctor` fails if it is missing, because falling back to runc here would
+    # quietly drop the one control this container's compromise story rests on.
+    runtime: runsc
+    # E11 — measured by bisection (NOM-413, runsc, this digest).  The image's
+    # PID 1 is s6-overlay as ROOT: stage2 chowns /opt/data and then every
+    # service drops to uid 10000 with s6-setuidgid.  Dropping CHOWN, SETUID or
+    # SETGID stops it; dropping DAC_OVERRIDE gives 101 "permission denied"
+    # lines and no gateway; FOWNER is not needed and is not granted.
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    networks:
+      gateway: {}
+      agent: {}
+      tg-relay:
+        ipv4_address: 172.31.250.3
+    # Telegram is reached ONLY through the gate (172.31.250.2).  The name is
+    # pinned here so Hermes needs no proxy setting and its TLS verification
+    # still ends at Telegram's real certificate.
+    extra_hosts:
+      - "api.telegram.org:172.31.250.2"
+    volumes:
+      - hermes-data:/opt/data
+      # Behavioural config; the bot token and keys come from the secrets file
+      # below, never from here.
+      - ./config/hermes/config.yaml:/opt/aistack/config.yaml:ro
+      - ./config/hermes/mem0.json:/opt/aistack/mem0.json:ro
+      - ./secrets/hermes.env:/opt/aistack/hermes.env:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      # s6-overlay execs its own helpers from /run.
+      - /run:rw,exec,nosuid,size=64m
+    environment:
+      HERMES_UID: "10000"
+      HERMES_GID: "10000"
+      MEM0_TELEMETRY: "False"
+      # Hermes checks for updates and phones the Nous Portal by default.
+      HERMES_DISABLE_UPDATE_CHECK: "1"
+    depends_on:
+      litellm:
+        condition: service_healthy
+      mem0:
+        condition: service_healthy
+      telegram-gate:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 512
+    command: ["gateway", "run"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'hermes.*gateway' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  mem0:
+    <<: *hardened
+    build:
+      context: ./build/mem0
+      args:
+        BASE: ${PYBASE_IMAGE:?pin missing}:${PYBASE_TAG:?pin missing}@${PYBASE_DIGEST:?pin missing}
+    image: aistack-local/mem0:${AISTACK_BUILD_TAG:-v2}
+    pull_policy: never
+    container_name: aistack-mem0
+    networks: [agent, gateway, data]
+    volumes:
+      - mem0-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    secrets:
+      - source: mem0_api_key
+      - source: mem0_litellm_key
+      - source: mem0_db_password
+    environment:
+      AISTACK_MEM0_KEY_FILE: /run/secrets/mem0_api_key
+      AISTACK_MEM0_LITELLM_KEY_FILE: /run/secrets/mem0_litellm_key
+      AISTACK_MEM0_DB_PASSWORD_FILE: /run/secrets/mem0_db_password
+      AISTACK_LITELLM_URL: http://litellm:4000/v1
+      AISTACK_EMBED_DIMS: "1024"
+      MEM0_TELEMETRY: "False"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+    mem_limit: 768m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  mcp-web:
+    <<: *hardened
+    build:
+      context: ./build/mcp-web
+      args:
+        BASE: ${PYBASE_IMAGE:?pin missing}:${PYBASE_TAG:?pin missing}@${PYBASE_DIGEST:?pin missing}
+    image: aistack-local/mcp-web:${AISTACK_BUILD_TAG:-v2}
+    pull_policy: never
+    container_name: aistack-mcp-web
+    # E3 — it sits on two NAT'd bridges because it is the only caller of both
+    # fetchers.  See manifest.yaml trust_bridges for the controls.
+    networks: [mcp-web, untrusted-search, untrusted-crawl]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    environment:
+      SEARXNG_URL: http://searxng:8080
+      CRAWL4AI_URL: http://crawl4ai:11235
+      MCP_ALLOWED_HOSTS: "mcp-web:8900,mcp-web"
+    depends_on:
+      searxng:
+        condition: service_healthy
+      crawl4ai:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.50"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket,sys; s=socket.create_connection(('127.0.0.1',8900),3); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  searxng:
+    <<: *hardened
+    image: ${SEARXNG_IMAGE:?pin missing}:${SEARXNG_TAG:?pin missing}@${SEARXNG_DIGEST:?pin missing}
+    container_name: aistack-searxng
+    user: "977:977"
+    # E3 — nat_egress pairwise /29 with mcp-web.  It must reach search engines.
+    networks: [untrusted-search]
+    volumes:
+      - ./secrets/searxng-settings.yml:/etc/searxng/settings.yml:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /var/cache/searxng:rw,noexec,nosuid,size=64m,uid=977,gid=977
+    environment:
+      SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
+    mem_limit: 512m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  crawl4ai:
+    <<: *hardened
+    image: ${CRAWL4AI_IMAGE:?pin missing}:${CRAWL4AI_TAG:?pin missing}@${CRAWL4AI_DIGEST:?pin missing}
+    container_name: aistack-crawl4ai
+    # Chromium renders hostile pages.  gVisor is the containment here, because
+    # Chromium's own sandbox needs user namespaces that `cap_drop: ALL` removes,
+    # and this repository does not pass the flag that disables it (I6).
+    runtime: runsc
+    networks: [untrusted-crawl]
+    shm_size: 1g
+    tmpfs:
+      - /tmp:rw,nosuid,size=512m
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 1024
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11235/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  telegram-gate:
+    <<: *hardened
+    image: ${NGINX_IMAGE:?pin missing}:${NGINX_TAG:?pin missing}@${NGINX_DIGEST:?pin missing}
+    container_name: aistack-telegram-gate
+    networks:
+      tg-relay:
+        ipv4_address: 172.31.250.2
+      egress-tg: {}
+    # Non-root from the start: no CHOWN/SETUID is needed, and the privileged
+    # port is opened by a namespaced sysctl rather than by a capability.
+    user: "101:101"
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    command: ["nginx", "-g", "daemon off;", "-c", "/etc/nginx/aistack-gate.conf"]
+    volumes:
+      - ./config/telegram-gate/nginx.conf:/etc/nginx/aistack-gate.conf:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m
+      - /var/cache/nginx:rw,noexec,nosuid,size=8m
+    mem_limit: 64m
+    cpus: "0.25"
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ===========================================================================
+  # tracing — profile `tracing`, OFF BY DEFAULT.  NOM-412 measured Langfuse at
+  # 2.59 GB idle and 3.15 GB p95 under load; that does not fit Tier 1 next to
+  # the rest, so enabling it is a choice (founder risk R2), not a default.
+  # Valkey is here and nowhere else: it is the only service that needs a
+  # Redis-protocol store.
+  # ===========================================================================
+
+  langfuse-web:
+    <<: *hardened
+    image: ${LANGFUSE_WEB_IMAGE:?pin missing}:${LANGFUSE_WEB_TAG:?pin missing}@${LANGFUSE_WEB_DIGEST:?pin missing}
+    container_name: aistack-langfuse-web
+    profiles: [tracing]
+    networks: [tracing, data]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+      - /app/.next/cache:rw,noexec,nosuid,size=128m
+    # E12: no _FILE indirection upstream; a host-side env_file, like E6.
+    env_file:
+      - ./secrets/langfuse.env
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:?missing}@postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3000
+      HOSTNAME: "0.0.0.0"
+      TELEMETRY_ENABLED: "false"
+      NEXT_TELEMETRY_DISABLED: "1"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_USE_AZURE_BLOB: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      REDIS_HOST: valkey
+      REDIS_PORT: "6379"
+      REDIS_TLS_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    mem_limit: 1g
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/public/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  langfuse-worker:
+    <<: *hardened
+    image: ${LANGFUSE_WORKER_IMAGE:?pin missing}:${LANGFUSE_WORKER_TAG:?pin missing}@${LANGFUSE_WORKER_DIGEST:?pin missing}
+    container_name: aistack-langfuse-worker
+    profiles: [tracing]
+    networks: [tracing, data]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    env_file:
+      - ./secrets/langfuse.env
+    environment: *langfuse-env
+    depends_on:
+      langfuse-web:
+        condition: service_healthy
+    mem_limit: 1g
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3030/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  clickhouse:
+    <<: *hardened
+    image: ${CLICKHOUSE_IMAGE:?pin missing}:${CLICKHOUSE_TAG:?pin missing}@${CLICKHOUSE_DIGEST:?pin missing}
+    container_name: aistack-clickhouse
+    user: "101:101"
+    profiles: [tracing]
+    networks: [tracing]
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      - /var/log/clickhouse-server:rw,noexec,nosuid,size=128m,uid=101,gid=101
+    env_file:
+      - ./secrets/clickhouse.env
+    environment:
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_DB: default
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 1024
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8123/ping || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  minio:
+    <<: *hardened
+    image: ${MINIO_IMAGE:?pin missing}:${MINIO_TAG:?pin missing}@${MINIO_DIGEST:?pin missing}
+    container_name: aistack-minio
+    profiles: [tracing]
+    networks: [tracing]
+    volumes:
+      - minio-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    env_file:
+      - ./secrets/minio.env
+    command: ["server", "/data", "--address", ":9000", "--console-address", "127.0.0.1:9001"]
+    mem_limit: 256m
+    cpus: "0.50"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  valkey:
+    <<: *hardened
+    image: ${VALKEY_IMAGE:?pin missing}:${VALKEY_TAG:?pin missing}@${VALKEY_DIGEST:?pin missing}
+    container_name: aistack-valkey
+    user: "999:999"
+    profiles: [tracing]
+    networks: [tracing]
+    tmpfs:
+      - /data:rw,noexec,nosuid,size=16m,uid=999,gid=999
+    secrets:
+      - source: valkey_password
+    # Persistence is off: it holds queues and caches, and a restart losing them
+    # is fine.  The password is read from a file so it never appears in argv.
+    command:
+      - sh
+      - -c
+      - exec valkey-server --save "" --appendonly no --maxmemory 128mb --maxmemory-policy noeviction --requirepass "$$(cat /run/secrets/valkey_password)"
+    mem_limit: 192m
+    cpus: "0.50"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/valkey_password)\" valkey-cli ping | grep -q PONG"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 # ---------------------------------------------------------------------------
 # Bridges.  `internal:` is mandated by each bridge's own `zone_policy` in
 # manifest.yaml, NOT by its class — ui-comfy and ui-vpn are both class `ui` and
@@ -580,6 +960,57 @@ networks:
     ipam:
       config:
         - subnet: 172.31.244.0/29
+  # ---- v2 (NOM-413) ----
+  agent:
+    name: aistack-agent
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.252.0/29
+  mcp-web:
+    name: aistack-mcp-web
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.249.0/29
+  tg-relay:
+    name: aistack-tg-relay
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.250.0/29
+  # The two bridges below are the ONLY non-internal ones the v2 core adds, and
+  # each has exactly the members its manifest entry names.  See E3 and the
+  # trust_bridges register.
+  egress-tg:
+    name: aistack-egress-tg
+    internal: false         # zone_policy: nat_egress — telegram-gate only
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.251.0/29
+  untrusted-search:
+    name: aistack-untrusted-search
+    internal: false         # zone_policy: nat_egress — mcp-web + searxng
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.240.0/29
+  untrusted-crawl:
+    name: aistack-untrusted-crawl
+    internal: false         # zone_policy: nat_egress — mcp-web + crawl4ai
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.241.0/29
+  tracing:
+    name: aistack-tracing
+    internal: true          # zone_policy: contained
+    enable_ipv6: false
+
   # `egress` IS DELIBERATELY NOT DECLARED HERE.
   #
   # zone_policy: nat_egress.  Its only member is the short-lived model-puller.
@@ -602,6 +1033,10 @@ volumes:
   authelia-data:   { name: aistack-authelia-data }
   ollama-models:   { name: aistack-ollama-models }
   docling-models:  { name: aistack-docling-models }
+  hermes-data:     { name: aistack-hermes-data }
+  mem0-data:       { name: aistack-mem0-data }
+  clickhouse-data: { name: aistack-clickhouse-data }
+  minio-data:      { name: aistack-minio-data }
 
 # ---------------------------------------------------------------------------
 # File-based secrets at /run/secrets/<name>, for everything that supports a
@@ -628,3 +1063,12 @@ secrets:
     file: ./secrets/authelia_storage_encryption_key
   authelia_storage_password:
     file: ./secrets/authelia_storage_password
+  # ---- v2 (NOM-413) ----
+  mem0_api_key:
+    file: ./secrets/mem0_api_key
+  mem0_litellm_key:
+    file: ./secrets/mem0_litellm_key
+  mem0_db_password:
+    file: ./secrets/mem0_db_password
+  valkey_password:
+    file: ./secrets/valkey_password

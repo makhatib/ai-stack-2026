@@ -1,0 +1,22 @@
+# AI Stack 2026 — Hermes Agent behaviour (NOM-413).
+# SECRETS ARE NOT HERE.  The Telegram token, the LiteLLM key and the Mem0 key
+# live in secrets/hermes.env, which compose mounts read-only at /opt/data/.env.
+model:
+  provider: custom
+  base_url: http://litellm:4000/v1
+  default: agent
+  # Hermes refuses tool use below 64k (NOM-412 §5).  Ollama must be given the
+  # same number (OLLAMA_CONTEXT_LENGTH) because the /v1 API ignores num_ctx.
+  context_length: 65536
+
+# THE ONLY MCP SERVER IS THE GATEWAY.  Its allowlist (config/litellm/config.yaml)
+# is the one allowlist shared with n8n and Open WebUI; ci/invariants.py I17
+# fails the build if this file names any other server or any stdio command.
+mcp_servers:
+  aistack:
+    url: http://litellm:4000/mcp
+    headers:
+      Authorization: "Bearer ${OPENAI_API_KEY}"
+
+memory:
+  provider: mem0

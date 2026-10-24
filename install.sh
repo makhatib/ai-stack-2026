@@ -386,7 +386,8 @@ for line in open("secrets/app_db_passwords"):
 text = open(".env").read()
 for key, app in (("OPENWEBUI_DB_PASSWORD", "openwebui"),
                  ("LITELLM_DB_PASSWORD", "litellm"),
-                 ("N8N_DB_PASSWORD", "n8n")):
+                 ("N8N_DB_PASSWORD", "n8n"),
+                 ("LANGFUSE_DB_PASSWORD", "langfuse")):
     text = re.sub(rf"^{key}=.*$", f"{key}={pw[app]}", text, flags=re.M)
 open(".env", "w").write(text)
 PY

@@ -1,0 +1,11 @@
+{
+  "schema": "aistack.mcp-tools-lock.v1",
+  "note": "Wire name is <server>-<tool>. `arguments` are the allowed_params keys. ci/invariants.py I17 requires this to equal config/litellm/config.yaml; scripts/mcp-verify.py compares it with what the backends advertise.",
+  "tools": {
+    "web-web_search": { "arguments": ["limit", "query"] },
+    "web-fetch_page": { "arguments": ["url"] },
+    "n8n-search_workflows": { "arguments": ["limit", "query"] },
+    "n8n-get_workflow_details": { "arguments": ["workflowId"] },
+    "n8n-execute_workflow": { "arguments": ["inputs", "workflowId"] }
+  }
+}

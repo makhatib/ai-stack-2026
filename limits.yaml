@@ -28,6 +28,12 @@ ingress_services:
   - docling-serve
   - model-puller
   - backup-helper
+  # v2 (NOM-413): every service that takes bytes a user or a web page shaped.
+  - hermes
+  - mem0
+  - mcp-web
+  - searxng
+  - crawl4ai
 
 limits:
   - surface: HTTP request body, general
@@ -93,6 +99,26 @@ limits:
     owner: n8n template
     on_overflow: "fail the step; AN UNCERTAIN EXTERNAL EFFECT IS NEVER RETRIED"
     ceiling: 3
+  - surface: "Web: bytes of page returned per fetch_page call"
+    default: "20000 characters (MAX_PAGE_CHARS)"
+    owner: mcp-web
+    on_overflow: "truncate and say so (`truncated: true`)"
+    ceiling: "100000 characters"
+  - surface: "Web: search results per call"
+    default: 5
+    owner: mcp-web
+    on_overflow: "clamped to 10"
+    ceiling: 10
+  - surface: "Web: time per fetch_page call"
+    default: 90s
+    owner: mcp-web client timeout
+    on_overflow: "error to the caller"
+    ceiling: 90s
+  - surface: "Tool arguments per MCP call"
+    default: "only the keys in allowed_params"
+    owner: "litellm mcp_servers.allowed_params"
+    on_overflow: "403 before dispatch"
+    ceiling: not-overridable
   - surface: Aggregate concurrency
     default: "4 concurrent agent runs, queue depth 20; slot lease = wall clock + 60s"
     owner: >-

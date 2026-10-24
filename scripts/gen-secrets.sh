@@ -366,7 +366,7 @@ chmod 0600 "$APPPW"
 # It is a tripwire for those three shapes and NOT a proof that no literal copy
 # can exist: a list built with `printf` or spread down a heredoc would slip
 # past it.  tests/app-list-coupling.sh measures the behaviour instead.
-for app in authelia openwebui litellm n8n; do
+for app in authelia openwebui litellm n8n mem0 langfuse; do
   if grep -q "^${app}=" "$APPPW" 2>/dev/null; then
     log "  reuse   db password for $app"
   else
@@ -476,6 +476,134 @@ write_env_file "$SECRETS/litellm.env" litellm \
   "LITELLM_SALT_KEY=${LITELLM_SALT}"
 
 unset OWUI_SECRET LITELLM_MASTER LITELLM_SALT
+
+# --- v2 (NOM-413) ----------------------------------------------------------
+# Same rules as above: an existing value is reused, never rotated, and no
+# value is printed.  Free secrets are generated here; the bot token is not —
+# it belongs to the operator, arrives from a Paperclip/operator secret, and
+# until then is the placeholder `__SET_ME__`, which Hermes treats as "Telegram
+# not configured" (the rest of the stack runs).
+
+# One value, two readers: Hermes sends it, Mem0 checks it.
+gen mem0_api_key        mem0    hex32
+# Mem0's own Postgres password, derived from the one file that defines it (the
+# same single-source rule as authelia_storage_password above).
+MEM0_PW="$(sed -n 's/^mem0=//p' "$APPPW")"
+if [ ! -s "$SECRETS/mem0_db_password" ] || [ "$(cat "$SECRETS/mem0_db_password")" != "$MEM0_PW" ]; then
+  printf '%s' "$MEM0_PW" > "$SECRETS/mem0_db_password"
+  log "  sync    $SECRETS/mem0_db_password (from app_db_passwords)"
+fi
+unset MEM0_PW
+apply_mode "$SECRETS/mem0_db_password" mem0
+gen valkey_password     valkey  hex32
+
+# The per-app LiteLLM keys.  They are CHOSEN here and REGISTERED with LiteLLM
+# (budget, models, MCP servers) by scripts/litellm-keys.sh after LiteLLM is up;
+# LiteLLM accepts a caller-chosen key value, which is what lets every client's
+# secret exist before the proxy does.
+gen key_mem0     mem0     hex32
+gen key_hermes   hermes   hex32
+gen key_n8n      operator hex32
+gen key_openwebui operator hex32
+# mem0 reads its LiteLLM key as a file, as the key itself with the sk- prefix.
+if [ ! -s "$SECRETS/mem0_litellm_key" ] || [ "$(cat "$SECRETS/mem0_litellm_key")" != "sk-$(cat "$SECRETS/key_mem0")" ]; then
+  printf '%s' "sk-$(cat "$SECRETS/key_mem0")" > "$SECRETS/mem0_litellm_key"
+  log "  sync    $SECRETS/mem0_litellm_key (from key_mem0)"
+fi
+apply_mode "$SECRETS/mem0_litellm_key" mem0
+
+# SearXNG: the one secret is rendered into its settings file (a FILE, like
+# users.yml), so it never enters the container environment.
+SX="$SECRETS/searxng-settings.yml"
+if [ -s "$SX" ]; then
+  log "  reuse   $SX"
+else
+  SXSEC="$(openssl rand -hex 32)"
+  sed "s/__SEARXNG_SECRET__/${SXSEC}/" "$ROOT/config/searxng/settings.yml" > "$SX"
+  unset SXSEC
+  log "  create  $SX"
+fi
+apply_mode "$SX" searxng
+
+# Hermes' secrets FILE.  Mounted read-only at /opt/data/.env; Hermes reads its
+# own .env from there, so the token never enters the container environment.
+# Re-rendered when the keys it carries change, but the TOKEN the operator put
+# there is carried over.
+HERMES_ENV="$SECRETS/hermes.env"
+if [ -s "$HERMES_ENV" ]; then
+  log "  reuse   $HERMES_ENV"
+else
+  : > "$HERMES_ENV"; chmod 0600 "$HERMES_ENV"
+  {
+    printf 'TELEGRAM_BOT_TOKEN=%s\n' "__SET_ME__"
+    printf 'TELEGRAM_ALLOWED_USERS=%s\n' "__SET_ME__"
+    printf 'OPENAI_API_KEY=sk-%s\n' "$(cat "$SECRETS/key_hermes")"
+    printf 'MEM0_API_KEY=%s\n' "$(cat "$SECRETS/mem0_api_key")"
+    printf 'MEM0_HOST=%s\n' "http://mem0:8000"
+    printf 'MEM0_TELEMETRY=%s\n' "False"
+    printf 'HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=%s\n' "true"
+  } >> "$HERMES_ENV"
+  log "  create  $HERMES_ENV (TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS are placeholders)"
+fi
+apply_mode "$HERMES_ENV" hermes
+
+# --- tracing (profile `tracing`; generated always so enabling it is one flag) --
+# E12: Langfuse, ClickHouse and MinIO have no _FILE indirection, so these are
+# host-side env_files exactly like E6.
+LF="$SECRETS/langfuse.env"
+if [ -s "$LF" ]; then
+  log "  reuse   $LF"
+else
+  CHP="$(openssl rand -hex 24)"; S3P="$(openssl rand -hex 24)"; VKP="$(cat "$SECRETS/valkey_password")"
+  LFPUB="pk-lf-$(openssl rand -hex 12)"; LFSEC="sk-lf-$(openssl rand -hex 24)"
+  : > "$LF"; chmod 0600 "$LF"
+  {
+    printf 'SALT=%s\n' "$(openssl rand -hex 32)"
+    printf 'ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)"
+    printf 'NEXTAUTH_SECRET=%s\n' "$(openssl rand -hex 32)"
+    printf 'CLICKHOUSE_PASSWORD=%s\n' "$CHP"
+    printf 'REDIS_AUTH=%s\n' "$VKP"
+    printf 'LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID=%s\n' "langfuse"
+    printf 'LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=%s\n' "$S3P"
+    printf 'LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID=%s\n' "langfuse"
+    printf 'LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY=%s\n' "$S3P"
+    # Headless init: one org, one project, one key pair, NO web user — the UI
+    # is not published, so an account there is a credential nothing can use.
+    printf 'LANGFUSE_INIT_ORG_ID=%s\n' "aistack"
+    printf 'LANGFUSE_INIT_PROJECT_ID=%s\n' "aistack"
+    printf 'LANGFUSE_INIT_PROJECT_PUBLIC_KEY=%s\n' "$LFPUB"
+    printf 'LANGFUSE_INIT_PROJECT_SECRET_KEY=%s\n' "$LFSEC"
+  } >> "$LF"
+  printf 'CLICKHOUSE_PASSWORD=%s\n' "$CHP" > "$SECRETS/clickhouse.env"
+  printf 'MINIO_ROOT_USER=%s\nMINIO_ROOT_PASSWORD=%s\n' "langfuse" "$S3P" > "$SECRETS/minio.env"
+  unset CHP S3P VKP LFPUB LFSEC
+  log "  create  $LF  $SECRETS/clickhouse.env  $SECRETS/minio.env"
+fi
+apply_env_file_mode "$LF"
+apply_env_file_mode "$SECRETS/clickhouse.env"
+apply_env_file_mode "$SECRETS/minio.env"
+
+# --- v2: keys the MVP's env_files did not carry -----------------------------
+# The env_files above are written once and then REUSED, so an install upgraded
+# from the MVP would never get these lines.  Append-if-absent, never rewrite:
+# an existing line (including an operator-edited one) is left exactly as it is.
+ensure_env_line() {
+  local file="$1" key="$2" value="$3"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then return 0; fi
+  printf '%s=%s\n' "$key" "$value" >> "$file"
+  log "  add     $key -> $(basename "$file")"
+}
+ensure_env_line "$SECRETS/open-webui.env" OPENAI_API_KEY "sk-$(cat "$SECRETS/key_openwebui")"
+# Open WebUI's native MCP client: ONE connection, to LiteLLM's /mcp, with this
+# app's own key.  It sees only the servers that key is permitted (litellm-keys.sh).
+ensure_env_line "$SECRETS/open-webui.env" TOOL_SERVER_CONNECTIONS \
+  "[{\"type\":\"mcp\",\"url\":\"http://litellm:4000/mcp\",\"auth_type\":\"bearer\",\"key\":\"sk-$(cat "$SECRETS/key_openwebui")\",\"config\":{\"enable\":true},\"info\":{\"id\":\"aistack\",\"name\":\"aistack tools\"}}]"
+# n8n's MCP access token is minted INSIDE n8n by the owner (Settings -> MCP);
+# until `aistack mcp n8n-token` stores it here, LiteLLM serves the n8n server
+# with a token that n8n refuses, which is the safe failure.
+ensure_env_line "$SECRETS/litellm.env" N8N_MCP_TOKEN "__SET_ME__"
+apply_env_file_mode "$SECRETS/open-webui.env"
+apply_env_file_mode "$SECRETS/litellm.env"
 
 # --- config files a service must READ, under the same DAC rule --------------
 # users.yml is not a secret, but it is subject to the identical trap: Authelia
