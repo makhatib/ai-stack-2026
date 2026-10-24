@@ -20,6 +20,13 @@
 #   `authority_record` is the citation a human follows to check, and the gate
 #   asserts only that the citation is there.  Read ci/approvers.py before
 #   citing this file as more than that.
+#
+# DELIBERATE SOLE-APPROVER CHOICE.
+#   Mahmoud Alkhatib is the only approver, on purpose, not by omission.
+#   Human decision: NOM-356 (accepted human-only confirmation 7186399b).
+#   Scope remains the existing internal-infrastructure scope below.
+#   This does not renew any signature: exceptions still need review by
+#   2027-04-16, findings by 2027-04-17, by a separate human review.
 
 schema: aistack.security-approvers.v1
 version: 1
