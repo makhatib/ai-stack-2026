@@ -136,6 +136,43 @@ Drilling a **pre-NOM-378 archive** is still a valid thing to do: those record
 no database kinds and carry no `aistack` dump, so the drill says so in a note
 and asserts the four app databases as before.
 
+**A cluster-kind database is expected to carry rows, and the drill fails one
+that comes back with none.** `aistack`'s rows are seeded reference data, not
+runtime accumulation — 31 rows across 6 tables, all of them in
+`action_state_edges` and `aistack_slot` — so "tables but zero rows" means the
+load did not happen, which is the whole point of the check.
+
+The consequence, stated here rather than left to be rediscovered: **if you add
+a cluster-kind database that has tables and has not been written to yet, a
+correct restore of it will FAIL the drill** with "schema only". That is the
+accepted trade (NOM-393). Seed it, or change assertion 5 in `scripts/drill.sh`
+and record why here. The decision was deliberately not "require rows only
+where a manifest says to expect them": that adds a manifest field nothing
+produces today and weakens the assertion in the one case it was written for.
+
+Assertion 5 has unit coverage that needs no window: `tests/drill-assertion5.sh`
+extracts the shipped block out of `scripts/drill.sh` and drives it against a
+stubbed cluster, including the branches a live drill cannot reach (a database
+that is missing afterwards, a cluster that does not answer, a non-numeric
+count, a name that is not a bare identifier).
+
+### Marking a drill run that was not a real restore test
+
+`drill-log.txt` is appended by every drill: one line, `<date> PASS|FAIL
+<archive>`. A FAIL in it reads as "this archive did not restore", so a run that
+failed **on purpose** — fault injection while testing the drill itself — has to
+say so, or an operator finds unexplained failures during an incident:
+
+```sh
+AISTACK_DRILL_NOTE='NOM-392 fault injection: aistack dump not loaded' \
+  bin/aistack drill run
+```
+
+The note is appended after the archive as ` # NOTE: <text>`, newlines stripped,
+so the first three fields of every line stay what they were. Lines beginning
+with `#` in that file are operator annotations and are written by hand; nothing
+parses the file, and retention never reads it.
+
 It cannot touch your live data, and that is enforced by a lock rather than by
 convention: the drill holds an exclusive lock for its whole lifetime and the
 running stack holds a shared one, so the kernel refuses to let both exist.

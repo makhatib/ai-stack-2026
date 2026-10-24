@@ -280,10 +280,30 @@ else
   # cluster-kind half of what restore.sh's loop WALKED (read from the archive,
   # same as assertion 4's), and what is counted is whatever that database
   # turns out to hold.
-  CLUSTER_DBS="$(awk '$1 == "cluster" { print $2 }' "$RESTORED_KINDS" 2>/dev/null | sort -u)"
-  LEGACY_DBS="$(awk '$1 == "legacy"  { print $2 }' "$RESTORED_KINDS" 2>/dev/null | sort -u)"
-  if [ -n "$CLUSTER_DBS" ]; then
-    for db in $CLUSTER_DBS; do
+  #
+  # THE NAME IS READ LINE-WISE, NOT FIELD-WISE (NOM-393).  restore.sh writes
+  # `<kind> <name>` with one space, so the name is EVERYTHING after the first
+  # space, spaces included.  The first cut of this took awk's `$2` and looped
+  # with `for db in $CLUSTER_DBS`, and both halves truncate on whitespace: a
+  # kinds line `cluster my db` arrived here as `my`, the [A-Za-z0-9_] refusal
+  # below never saw a space to refuse, and the drill printed
+  #
+  #     [ ok ] cluster-kind database 'my' restored and is not empty (6 tables, 31 rows)
+  #
+  # — green, about a database that is not the one in the archive, while the
+  # one that IS in the archive went unchecked.  Assertion 4 refuses such a
+  # name loudly because it filters the whole name; assertion 5 could not see
+  # it.  Fixing only the awk is not enough, which is why the set is an ARRAY
+  # and the loop quotes it: unquoted word-splitting would put the truncation
+  # straight back.  tests/drill-assertion5.sh drives the shipped block with
+  # such a line and fails if it does not reach the refusal.
+  #
+  # `sed` rather than awk because awk's `$1`/`$2` are the field-wise reading
+  # this is getting rid of; `sort -u` keeps the dedup the old pipeline had.
+  mapfile -t CLUSTER_DBS < <(sed -n 's/^cluster //p' "$RESTORED_KINDS" 2>/dev/null | sort -u)
+  mapfile -t LEGACY_DBS  < <(sed -n 's/^legacy //p'  "$RESTORED_KINDS" 2>/dev/null | sort -u)
+  if [ "${#CLUSTER_DBS[@]}" -gt 0 ]; then
+    for db in "${CLUSTER_DBS[@]}"; do
       # Same filter and same reason as assertion 4: the name is spliced into
       # SQL below, so anything outside [A-Za-z0-9_] is refused rather than
       # quoted-and-hoped (S06).
@@ -334,12 +354,25 @@ else
       if [ "$TABLES" -eq 0 ]; then
         bad "cluster-kind database '$db' restored with NO TABLE — it exists and is empty, which is the warning this assertion exists to turn into a failure"
       elif [ "$ROWS" -eq 0 ]; then
-        bad "cluster-kind database '$db' restored $TABLES table(s) and 0 rows — schema only, so its contents did not come back"
+        # THE ROW CHECK IS KEPT DELIBERATELY, AND IT HAS A KNOWN FALSE RED
+        # (NOM-393).  A cluster-kind database in this stack carries SEEDED
+        # reference data, not runtime accumulation — `aistack` restores 6
+        # tables / 31 rows, of which 31 are seed rows in
+        # action_state_edges (7) and aistack_slot (24) — so zero rows means
+        # the load did not happen.  But a cluster-kind database an operator
+        # ADDS and has not written to yet would red here on a correct
+        # restore.  That is accepted rather than softened: the alternative
+        # (require rows only where a manifest says to expect them) adds a
+        # manifest field with no producer today and makes the assertion
+        # weaker in the only case it was written for.  Named in
+        # docs/backup-restore.md so the next operator reads it instead of
+        # rediscovering it.
+        bad "cluster-kind database '$db' restored $TABLES table(s) and 0 rows — schema only, so its contents did not come back (a cluster-kind database is expected to carry seeded rows; see docs/backup-restore.md)"
       else
         ok "cluster-kind database '$db' restored and is not empty ($TABLES tables, $ROWS rows)"
       fi
     done
-  elif [ -n "$LEGACY_DBS" ]; then
+  elif [ "${#LEGACY_DBS[@]}" -gt 0 ]; then
     # A pre-NOM-378 archive records no database kinds and carries no `aistack`
     # dump, so there is genuinely no cluster-kind database to assert over.  Say
     # so in those words rather than silently skipping: "nothing to check" and
@@ -354,15 +387,34 @@ fi
 
 echo
 DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# AISTACK_DRILL_NOTE — why this run is in the log (NOM-393).
+#
+# drill-log.txt is what an operator reads during an incident, and a FAIL line
+# in it says only "this archive did not restore".  NOM-392 proved assertion 5
+# by injecting faults into restore.sh, which appended three FAILs that mean
+# the opposite of what they look like: the drill WORKED.  The explanation
+# lived in a window log outside the repository, on a disposable VM.
+#
+# So a run that is deliberately faulted, or run for any reason other than
+# "does this archive restore", says so IN THE LOG LINE:
+#
+#   AISTACK_DRILL_NOTE='NOM-392 fault injection: aistack dump not loaded' \
+#     bin/aistack drill run
+#
+# Newlines are stripped so one run stays one line.  No note means no marker,
+# so every existing line keeps its meaning and anything reading this file
+# field-wise still finds the date, verdict and archive in fields 1-3.
+NOTE="$(printf '%s' "${AISTACK_DRILL_NOTE:-}" | tr -d '\n\r')"
 if [ "$DRILL_RC" -eq 0 ]; then
-  echo "$DATE PASS $ARCHIVE" >> "$ROOT/drill-log.txt"
+  echo "$DATE PASS $ARCHIVE${NOTE:+ # NOTE: $NOTE}" >> "$ROOT/drill-log.txt"
   echo "DRILL PASSED — recorded in drill-log.txt"
   echo
   echo "What this proves: a good backup restores."
   echo "What it does NOT prove: that a restore cannot reach the network."
   echo "That needs host firewall rules and is a later release."
 else
-  echo "$DATE FAIL $ARCHIVE" >> "$ROOT/drill-log.txt"
+  echo "$DATE FAIL $ARCHIVE${NOTE:+ # NOTE: $NOTE}" >> "$ROOT/drill-log.txt"
   echo "DRILL FAILED — recorded in drill-log.txt"
+  [ -n "$NOTE" ] && echo "  (logged with the note: $NOTE)"
 fi
 exit "$DRILL_RC"
