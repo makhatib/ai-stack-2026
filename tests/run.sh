@@ -162,6 +162,25 @@ fi
 # This is the check that stops NOM-357 happening again: a new test file that no
 # tier claims, or a registry line whose file was deleted, fails the run.
 DISAGREE=0
+# RUN.SH ITSELF MUST BE EXECUTABLE, and the loop below deliberately skips it,
+# so until now nothing asked.  `bin/aistack test` is `"$ROOT/tests/run.sh"
+# "$@"` -- a DIRECT exec, not `bash ...` -- so a dropped mode bit makes that
+# command exit 126 with a bare "Permission denied" while `bash tests/run.sh`
+# goes on working, which is how it stays unnoticed.
+#
+# MEASURED (NOM-395 round 2, 2026-10-24): 51d5c1d took this file from 100755
+# to 100644.  `git show --stat` for the path reported only "1 insertion"; the
+# mode appeared solely under `git diff --summary`, and nothing in the suite or
+# the gate looked.  `bin/aistack test` was broken for the ten minutes it took
+# the next commit to restore the bit by accident.
+if [ ! -x "$ROOT/tests/run.sh" ]; then
+  printf '  [FAIL] tests/run.sh is not executable (mode %s).\n' \
+    "$(stat -c %a "$ROOT/tests/run.sh" 2>/dev/null || echo '?')"
+  printf "         'bin/aistack test' execs it directly and would exit 126 with\n"
+  printf '         a bare "Permission denied".  Restore it:\n'
+  printf '             chmod 755 tests/run.sh\n'
+  DISAGREE=$((DISAGREE + 1))
+fi
 registered() {
   local want="$1" e
   for e in "${REGISTRY[@]}"; do
