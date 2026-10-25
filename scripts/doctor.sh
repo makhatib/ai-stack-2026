@@ -167,6 +167,8 @@ else
   UNREADABLE=""
   for f in "$ROOT"/secrets/*.env; do
     [ -e "$f" ] || continue
+    # hermes.env is bind-mounted into a uid-10000 container, not an env_file.
+    [ "$(basename "$f")" = hermes.env ] && continue
     [ -r "$f" ] || UNREADABLE="$UNREADABLE $(basename "$f")"
   done
   if [ -n "$UNREADABLE" ]; then
