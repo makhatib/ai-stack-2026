@@ -1090,8 +1090,148 @@ def i17(ctx):
     return bad
 
 
+@check("I18", "VPS mode: real ACME certificates, MFA on every route, one bypass, firewall allows only 22/80/443")
+def i18(ctx):
+    """NOM-414.  The properties DoD 2.3 names, asserted over the VPS files.
+
+    1. Caddyfile.vps: admin off, an ACME CA, and neither `local_certs` nor
+       `tls internal` (a self-made certificate on a public name is the failure).
+    2. Every site block imports `strip_identity`, and every `handle` that proxies
+       to an app imports `require_mfa`.  The only handles without it are all of
+       auth.{domain} (it IS the login) and n8n's /webhook/* (a header-token
+       machine caller, same exception as home mode).
+    3. Authelia VPS policy: default deny, no `one_factor`, a `two_factor` rule
+       on the wildcard domain, and exactly ONE bypass rule, for /webhook/.
+    4. The firewall script opens only the SSH port(s), 80 and 443.
+    5. compose actually mounts these files through the AISTACK_* knobs, so the
+       files checked here are the files that run.
+    """
+    bad = []
+    caddy = os.path.join(ctx.root, "config", "caddy")
+    main_path = os.path.join(caddy, "Caddyfile.vps")
+    sites_dir = os.path.join(caddy, "sites-vps.d")
+    if not os.path.isfile(main_path):
+        return ["config/caddy/Caddyfile.vps is missing"]
+    main = open(main_path).read()
+    code = "\n".join(l.split("#", 1)[0] for l in main.splitlines())
+    if not re.search(r"^\s*admin\s+off\s*$", code, re.M):
+        bad.append("Caddyfile.vps does not set `admin off`")
+    if re.search(r"^\s*local_certs\b", code, re.M) or re.search(r"\btls\s+internal\b", code):
+        bad.append("Caddyfile.vps uses local_certs / tls internal: VPS mode must get real ACME certificates")
+    if not re.search(r"^\s*acme_ca\s+\S+", code, re.M):
+        bad.append("Caddyfile.vps sets no acme_ca")
+    if not os.path.isdir(sites_dir) or not [f for f in os.listdir(sites_dir) if f.endswith(".caddy")]:
+        return bad + ["config/caddy/sites-vps.d/ has no *.caddy files"]
+
+    def strip(s):
+        return "\n".join(l.split("#", 1)[0].rstrip() for l in s.splitlines())
+
+    def blocks(text):
+        """[(header, body)] for each top-level `header {` ... `}`."""
+        out, depth, head, start = [], 0, None, 0
+        for m in re.finditer(r"[{}]|\n", text):
+            ch = m.group(0)
+            if ch == "{":
+                if depth == 0:
+                    head = text[text.rfind("\n", 0, m.start()) + 1:m.start()].strip()
+                    start = m.end()
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and head is not None:
+                    out.append((head, text[start:m.start()]))
+                    head = None
+        return out
+
+    sites = []
+    for f in sorted(os.listdir(sites_dir)):
+        if f.endswith(".caddy"):
+            sites += [(f, h, b) for h, b in blocks(strip(open(os.path.join(sites_dir, f)).read()))]
+    sites += [("Caddyfile.vps", h, b) for h, b in blocks(code) if not h.startswith("(") and h]
+    served = set()
+    for f, head, body in sites:
+        if head.startswith("(") or "AISTACK_DOMAIN" not in head:
+            continue
+        host = head.replace("{$AISTACK_DOMAIN}", "{domain}")
+        served.add(host)
+        if "{domain}" == host and "redir" in body and "reverse_proxy" not in body:
+            continue  # the bare domain only redirects
+        if "import strip_identity" not in body:
+            bad.append(f"{f}: site {host} does not import strip_identity")
+        for hh, hb in blocks(body):
+            if not hh.startswith("handle"):
+                continue
+            proxies = re.findall(r"reverse_proxy\s+(\S+)", hb)
+            if not proxies:
+                continue
+            gated = "import require_mfa" in hb or "forward_auth authelia" in hb
+            if host == "auth.{domain}":
+                continue
+            if host == "n8n.{domain}" and hh == "handle /webhook/*":
+                if gated:
+                    bad.append(f"{f}: n8n's webhook handle is behind forward-auth; machine callers cannot pass it")
+                continue
+            if not gated:
+                bad.append(f"{f}: `{hh}` on {host} proxies to {proxies} with NO forward-auth")
+            for target in proxies:
+                if not re.match(r"(open-webui:8080|homepage:3000|n8n:5678|authelia:9091)$", target):
+                    bad.append(f"{f}: `{hh}` on {host} proxies to unexpected target {target}")
+    for need in ("auth.{domain}", "chat.{domain}", "dash.{domain}", "n8n.{domain}"):
+        if need not in served:
+            bad.append(f"no site block for {need}")
+    if "(require_mfa)" not in code or "forward_auth authelia:9091" not in code:
+        bad.append("Caddyfile.vps does not define the require_mfa snippet over forward_auth authelia:9091")
+
+    # Authelia policy.
+    apath = os.path.join(ctx.root, "config", "authelia", "configuration.vps.yml")
+    if not os.path.isfile(apath):
+        bad.append("config/authelia/configuration.vps.yml is missing")
+    else:
+        raw = open(apath).read()
+        cfg = yaml.safe_load(raw) or {}
+        ac = cfg.get("access_control") or {}
+        rules = ac.get("rules") or []
+        if ac.get("default_policy") != "deny":
+            bad.append("configuration.vps.yml: access_control.default_policy must be deny")
+        if any(r.get("policy") == "one_factor" for r in rules):
+            bad.append("configuration.vps.yml: one_factor is used; every app route is two_factor")
+        bypass = [r for r in rules if r.get("policy") == "bypass"]
+        if len(bypass) != 1 or (bypass[0].get("resources") or []) != ["^/webhook/.*$"] \
+                or "n8n." not in str(bypass[0].get("domain")):
+            bad.append(f"configuration.vps.yml: expected exactly one bypass (n8n /webhook/), found {bypass}")
+        if not any(r.get("policy") == "two_factor" and str(r.get("domain", "")).startswith("*.") for r in rules):
+            bad.append("configuration.vps.yml: no two_factor rule on the wildcard domain")
+        ck = (cfg.get("session") or {}).get("cookies") or []
+        if not ck or "AISTACK_DOMAIN" not in str(ck[0].get("domain")) or "auth." not in str(ck[0].get("authelia_url")):
+            bad.append("configuration.vps.yml: session cookie must sit on {{ env AISTACK_DOMAIN }} with authelia_url on auth.")
+
+    # Firewall: only ssh, 80, 443.
+    hostsh = os.path.join(ctx.root, "scripts", "vps-host.sh")
+    if os.path.isfile(hostsh):
+        allows = re.findall(r"^\s*(?:for p in .*; do )?ufw allow ([^ ;]+)", open(hostsh).read(), re.M)
+        for a in allows:
+            if a not in ("80/tcp", "443/tcp", "\"$p/tcp\"", "in"):
+                bad.append(f"scripts/vps-host.sh opens {a}; VPS mode allows only ssh, 80/tcp and 443/tcp")
+        if not re.search(r"ufw default deny incoming", open(hostsh).read()):
+            bad.append("scripts/vps-host.sh does not set default deny incoming")
+    else:
+        bad.append("scripts/vps-host.sh is missing")
+
+    # compose mounts exactly these files.
+    cv = " ".join(str(v.get("source") if isinstance(v, dict) else v)
+                  for v in (ctx.services.get("caddy") or {}).get("volumes") or [])
+    for need in ("AISTACK_CADDYFILE", "AISTACK_CADDY_SITES"):
+        if need not in cv:
+            bad.append(f"compose caddy volumes do not use {need}, so the VPS Caddy files would never be mounted")
+    av = " ".join(str(v.get("source") if isinstance(v, dict) else v)
+                  for v in (ctx.services.get("authelia") or {}).get("volumes") or [])
+    if "AISTACK_AUTHELIA_CONFIG" not in av:
+        bad.append("compose authelia volumes do not use AISTACK_AUTHELIA_CONFIG")
+    return bad
+
+
 ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14,
-       i15, i16, i17]
+       i15, i16, i17, i18]
 
 
 def main():

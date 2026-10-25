@@ -1,0 +1,67 @@
+# AI Stack 2026 — Caddy, VPS MODE (NOM-414).
+#
+# Selected by `install.sh --mode vps` through AISTACK_CADDYFILE in .env; home
+# mode keeps config/caddy/Caddyfile and never reads this file.
+#
+# WHAT IS DIFFERENT FROM HOME MODE, AND WHAT IS NOT.
+#   Different: real, publicly trusted certificates (ACME), one SUBDOMAIN per app
+#   instead of one hostname with path prefixes, and the Authelia portal on its
+#   own subdomain so the login cookie can sit on the parent domain.
+#   The same: static config (nothing reads docker.sock), admin API off,
+#   inbound identity headers stripped, forward-auth in front of every app,
+#   default deny.  ci/invariants.py I18 asserts all of that over this file and
+#   config/caddy/sites-vps.d/.
+#
+# Official unmodified Caddy image, so ACME is HTTP-01 (port 80) only.  A
+# wildcard certificate would need DNS-01 and a custom build (S12); instead each
+# subdomain gets its own certificate, which is why the DNS check in install.sh
+# asks for one A record per app name.
+
+{
+	# The admin endpoint is a full configuration-rewrite API on a plain HTTP
+	# socket.  It is off.  I6 greps for its re-enablement.
+	admin off
+
+	# NOT `local_certs` and NOT `tls internal`: I18 fails if either appears.
+	# Default is Let's Encrypt production.  `install.sh --acme-ca staging|<url>`
+	# is for rehearsals and for CI against a private ACME server.
+	acme_ca {$AISTACK_ACME_CA}
+	acme_ca_root {$AISTACK_ACME_CA_ROOT}
+
+	servers {
+		max_header_size 32KB
+	}
+}
+
+# The same unconditional strip as home mode.  A client that sends Remote-User
+# gets it removed BEFORE forward-auth runs; Open WebUI trusts Remote-Email.
+(strip_identity) {
+	request_header -Remote-User
+	request_header -Remote-Groups
+	request_header -Remote-Email
+	request_header -Remote-Name
+	request_header -X-Forwarded-User
+	request_header -X-Forwarded-Email
+}
+
+# The forward-auth block every app imports.  There is exactly one definition of
+# "this request is authenticated and has a second factor"; the policy itself
+# (two_factor for *.{domain}) lives in config/authelia/configuration.vps.yml.
+(require_mfa) {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+}
+
+import sites.d/*.caddy
+
+# The bare domain: no app, a redirect to the dashboard.  It still needs its
+# own certificate, so it is a site of its own rather than a catch-all.
+{$AISTACK_DOMAIN} {
+	redir https://dash.{$AISTACK_DOMAIN}{uri} permanent
+}
+
+# No `http://` site.  Caddy's automatic HTTPS redirects :80 -> :443 for every
+# name above and answers the ACME HTTP-01 challenge itself; an unknown Host on
+# :80 gets nothing.

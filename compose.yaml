@@ -57,14 +57,27 @@ services:
     cap_add: [NET_BIND_SERVICE]
     networks: [edge, apps]
     volumes:
-      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./config/caddy/sites.d:/etc/caddy/sites.d:ro
+      # VPS MODE (NOM-414) swaps these two paths and nothing else about the
+      # service: `install.sh --mode vps` writes AISTACK_CADDYFILE / AISTACK_CADDY_SITES
+      # into .env.  Unset, the paths are the home-mode ones.
+      - ${AISTACK_CADDYFILE:-./config/caddy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - ${AISTACK_CADDY_SITES:-./config/caddy/sites.d}:/etc/caddy/sites.d:ro
+      # The ACME CA root Caddy trusts.  Home mode never reads it (local_certs).
+      # VPS mode with the real Let's Encrypt needs nothing here: the default is
+      # an empty file and the Caddyfile points acme_ca_root at the system bundle
+      # unless AISTACK_ACME_CA_ROOT says otherwise (test CAs only).
+      - ${AISTACK_ACME_ROOT_FILE:-/dev/null}:/etc/caddy/acme-ca-root.pem:ro
       - caddy-data:/data
       - caddy-config:/config
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     environment:
       AISTACK_HOSTNAME: ${AISTACK_HOSTNAME:?hostname missing}
+      # VPS mode only; harmless defaults in home mode, where Caddyfile never
+      # mentions them.
+      AISTACK_DOMAIN: ${AISTACK_DOMAIN:-aistack.localhost}
+      AISTACK_ACME_CA: ${AISTACK_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      AISTACK_ACME_CA_ROOT: ${AISTACK_ACME_CA_ROOT:-/etc/ssl/certs/ca-certificates.crt}
     depends_on:
       authelia:
         condition: service_healthy
@@ -102,7 +115,7 @@ services:
     command: ["authelia", "--config", "/config/configuration.yml"]
     networks: [edge, apps, data]
     volumes:
-      - ./config/authelia/configuration.yml:/config/configuration.yml:ro
+      - ${AISTACK_AUTHELIA_CONFIG:-./config/authelia/configuration.yml}:/config/configuration.yml:ro
       - ./config/authelia/users.yml:/config/users.yml:ro
       - authelia-data:/data
       # MEASURED: Authelia writes /app/.healthcheck.env at startup so that
@@ -144,6 +157,9 @@ services:
       # domain is empty and Authelia refuses to start with "option 'domain'
       # is required" — which does not mention the missing variable at all.
       AISTACK_HOSTNAME: ${AISTACK_HOSTNAME:?hostname missing}
+      # VPS mode (NOM-414): the cookie domain is the parent domain, so one
+      # login covers every app subdomain.  Unused by the home-mode config.
+      AISTACK_DOMAIN: ${AISTACK_DOMAIN:-aistack.localhost}
       X_AUTHELIA_CONFIG: /config/configuration.yml
       # REQUIRED for the `{{ env "..." }}` expressions in configuration.yml.
       # Authelia's config templating is OPT-IN; without this the braces are
@@ -309,7 +325,7 @@ services:
       # while leaving the directory itself writable, which is the property we
       # actually wanted: the FILES are immutable, not the inode they sit in.
       - ./config/homepage/settings.yaml:/app/config/settings.yaml:ro
-      - ./config/homepage/services.yaml:/app/config/services.yaml:ro
+      - ${AISTACK_HOMEPAGE_SERVICES:-./config/homepage/services.yaml}:/app/config/services.yaml:ro
       - ./config/homepage/widgets.yaml:/app/config/widgets.yaml:ro
       - ./config/homepage/docker.yaml:/app/config/docker.yaml:ro
       - ./config/homepage/bookmarks.yaml:/app/config/bookmarks.yaml:ro
@@ -317,7 +333,10 @@ services:
       - /app/config:rw,nosuid,size=16m
       - /tmp:rw,noexec,nosuid,size=16m
     environment:
-      HOMEPAGE_ALLOWED_HOSTS: ${AISTACK_HOSTNAME:?hostname missing}
+      HOMEPAGE_ALLOWED_HOSTS: ${AISTACK_DASH_HOST:-${AISTACK_HOSTNAME:?hostname missing}}
+      # Used only by config/homepage/services.vps.yaml.
+      HOMEPAGE_VAR_CHAT_URL: ${AISTACK_CHAT_URL:-https://${AISTACK_HOSTNAME}}
+      HOMEPAGE_VAR_N8N_URL: ${AISTACK_N8N_URL:-https://${AISTACK_HOSTNAME}/n8n}
     mem_limit: 256m
     cpus: "0.50"
     healthcheck:
@@ -363,7 +382,7 @@ services:
       ENABLE_LOGIN_FORM: "false"
       WEBUI_AUTH_TRUSTED_EMAIL_HEADER: Remote-Email
       WEBUI_AUTH_TRUSTED_NAME_HEADER: Remote-Name
-      WEBUI_URL: https://${AISTACK_HOSTNAME:?hostname missing}
+      WEBUI_URL: ${AISTACK_CHAT_URL:-https://${AISTACK_HOSTNAME:?hostname missing}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -483,9 +502,9 @@ services:
       DB_POSTGRESDB_DATABASE: n8n
       DB_POSTGRESDB_USER: n8n
       DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?missing}
-      N8N_HOST: ${AISTACK_HOSTNAME:?hostname missing}
+      N8N_HOST: ${AISTACK_N8N_HOST:-${AISTACK_HOSTNAME:?hostname missing}}
       N8N_PROTOCOL: https
-      WEBHOOK_URL: https://${AISTACK_HOSTNAME:?hostname missing}/n8n/
+      WEBHOOK_URL: ${AISTACK_N8N_WEBHOOK_URL:-https://${AISTACK_HOSTNAME:?hostname missing}/n8n/}
       N8N_PROXY_HOPS: "1"
       # v2: n8n's built-in MCP server is ON so Hermes can trigger workflows.  It
       # is reachable from `gateway` only, and LiteLLM's one allowlist

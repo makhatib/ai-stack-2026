@@ -6,8 +6,19 @@
 # failure class.  Not a TUI: a host dependency that breaks over non-TTY SSH
 # and cannot be driven in CI.
 #
-#   ./install.sh                              interactive
+#   ./install.sh                              interactive (home mode)
 #   ./install.sh --non-interactive --answers answers.conf
+#   sudo ./install.sh --mode vps --domain example.com     fresh Ubuntu 24.04 VPS
+#                                                          (same as: aistack install ...)
+#
+# VPS mode (NOM-414) prepares the host (Docker, gVisor, firewall, SSH keys only),
+# then installs the same stack behind automatic HTTPS and Authelia MFA on one
+# subdomain per app.  It asks nothing: the domain is the answer.  See
+# docs/vps-mode.md.  Extra VPS flags:
+#   --tailscale            also install Tailscale for admin access (off by default)
+#   --acme-ca staging|URL  certificate authority (default: Let's Encrypt production)
+#   --acme-ca-root FILE    PEM root to trust for a private ACME CA (rehearsals only)
+#   --skip-dns-check       do not insist the A records exist yet
 #
 # IDEMPOTENT AND THAT IS LOAD-BEARING: an existing secret is REUSED, never
 # regenerated; every write shows a diff first and leaves a timestamped .bak.
@@ -22,15 +33,36 @@ cd "$ROOT"
 NON_INTERACTIVE=0
 ANSWERS=""
 LOG="$ROOT/install.log"
+MODE=home
+DOMAIN=""
+ACME_CA=""
+ACME_CA_ROOT=""
+TAILSCALE=0
+SKIP_DNS_CHECK=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --non-interactive) NON_INTERACTIVE=1; shift ;;
     --answers) ANSWERS="${2:?--answers needs a file}"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --mode) MODE="${2:?--mode needs home or vps}"; shift 2 ;;
+    --domain) DOMAIN="${2:?--domain needs a domain name}"; shift 2 ;;
+    --acme-ca) ACME_CA="${2:?--acme-ca needs staging or a URL}"; shift 2 ;;
+    --acme-ca-root) ACME_CA_ROOT="${2:?--acme-ca-root needs a PEM file}"; shift 2 ;;
+    --tailscale) TAILSCALE=1; shift ;;
+    --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "install: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+case "$MODE" in
+  home) if [ -n "$DOMAIN$ACME_CA$ACME_CA_ROOT" ] || [ "$TAILSCALE" = 1 ] || [ "$SKIP_DNS_CHECK" = 1 ]; then
+          echo "install: --domain, --acme-ca, --acme-ca-root, --tailscale and --skip-dns-check are VPS-mode flags; add --mode vps." >&2; exit 2
+        fi ;;
+  vps)  [ -n "$DOMAIN" ] || { echo "install: --mode vps needs --domain <your-domain>." >&2; exit 2; }
+        NON_INTERACTIVE=1 ;;
+  *)    echo "install: --mode must be home or vps (got '$MODE')." >&2; exit 2 ;;
+esac
 
 exec > >(tee -a "$LOG") 2>&1
 
@@ -128,6 +160,95 @@ say ""
 # 1-7  PRE-FLIGHT.  Every failure here is a HARD STOP with the reason, not a
 #      warning the installer continues past (H1, S02, S14, H4).
 # ===========================================================================
+# ===========================================================================
+# 0   VPS HOST PREPARATION  (--mode vps only; home mode only checks gVisor)
+#     Everything that can be CHECKED is checked before anything is CHANGED:
+#     the OS, the domain, an SSH key (password login is about to be switched
+#     off), and DNS (a certificate request against a wrong record burns CA rate
+#     limit).  Then, in this order: packages, Docker, gVisor, firewall, SSH.
+# ===========================================================================
+VPS_ENV=()          # extra KEY=VALUE lines for .env, filled in below
+ACME_KIND=""
+if [ "$MODE" = vps ]; then
+  # shellcheck source=scripts/vps-host.sh
+  . "$ROOT/scripts/vps-host.sh"
+  head2 "[0/15] VPS host"
+  [ "$(id -u)" -eq 0 ] || die "VPS mode changes the firewall and SSH settings, so it must run as root:
+   sudo ./install.sh --mode vps --domain $DOMAIN"
+  vps_check_os || die "this is not Ubuntu 24.04. VPS mode is tested there and nowhere else."
+  vps_valid_domain "$DOMAIN" || die "'$DOMAIN' is not a domain name this installer accepts.
+Use a plain lowercase name such as example.com (no https://, no wildcard, no IP address)."
+  vps_have_ssh_key || { vps_ssh_key_instructions; die "no SSH key for ${SUDO_USER:-$(id -un)} — nothing was changed."; }
+  say "  SSH public key present for ${SUDO_USER:-$(id -un)}"
+  VPS_IP="$(vps_public_ip)" || true
+  [ -n "${VPS_IP:-}" ] || die "could not find this machine's IPv4 address (ip route get 1.1.1.1)."
+  if vps_is_private_ip "$VPS_IP" && [ "${AISTACK_ALLOW_PRIVATE_IP:-0}" != 1 ]; then
+    die "this machine's address is $VPS_IP, which is not a public address. A certificate authority cannot reach it.
+VPS mode is for a server with a public IPv4 address."
+  fi
+  say "  public address: $VPS_IP"
+  if [ "$SKIP_DNS_CHECK" = 1 ]; then
+    warn "DNS check skipped: certificates are requested as soon as the stack starts and fail until the A records exist."
+  else
+    vps_check_dns "$DOMAIN" "$VPS_IP" || { vps_dns_instructions "$DOMAIN" "$VPS_IP"; die "DNS does not point at this machine yet — nothing was changed."; }
+  fi
+  case "$ACME_CA" in
+    "") ACME_CA="https://acme-v02.api.letsencrypt.org/directory"; ACME_KIND="Let's Encrypt (production)" ;;
+    staging) ACME_CA="https://acme-staging-v02.api.letsencrypt.org/directory"; ACME_KIND="Let's Encrypt STAGING (browsers do not trust these)" ;;
+    https://*) ACME_KIND="custom ACME CA $ACME_CA" ;;
+    *) die "--acme-ca must be 'staging' or an https:// URL." ;;
+  esac
+  if [ -n "$ACME_CA_ROOT" ]; then
+    [ -s "$ACME_CA_ROOT" ] || die "--acme-ca-root: no such file: $ACME_CA_ROOT"
+  fi
+  say "  certificates: $ACME_KIND"
+
+  vps_install_packages || die "could not install the base packages with apt."
+  vps_install_docker   || die "could not install Docker."
+  bash scripts/install-gvisor.sh || die "could not install gVisor."
+  vps_firewall         || die "could not configure the firewall."
+  if [ "$TAILSCALE" = 1 ]; then VPS_TAILSCALE=1 vps_tailscale || die "could not install Tailscale."; fi
+  vps_ssh_keyonly      || die "could not switch SSH to key-only login."
+
+  if [ -n "$ACME_CA_ROOT" ]; then
+    mkdir -p .runtime && cp "$ACME_CA_ROOT" .runtime/acme-ca-root.pem && chmod 0644 .runtime/acme-ca-root.pem
+  fi
+  # Forced answers: the domain is the hostname, Caddy binds to the public
+  # address (never a wildcard, I2).  An answer file cannot change either.
+  ANS[AISTACK_HOSTNAME]="$DOMAIN"
+  ANS[AISTACK_BIND_ADDR]="$VPS_IP"
+  VPS_ENV=(
+    "AISTACK_MODE=vps"
+    "AISTACK_DOMAIN=$DOMAIN"
+    "AISTACK_CADDYFILE=./config/caddy/Caddyfile.vps"
+    "AISTACK_CADDY_SITES=./config/caddy/sites-vps.d"
+    "AISTACK_AUTHELIA_CONFIG=./config/authelia/configuration.vps.yml"
+    "AISTACK_HOMEPAGE_SERVICES=./config/homepage/services.vps.yaml"
+    "AISTACK_DASH_HOST=dash.$DOMAIN"
+    "AISTACK_CHAT_URL=https://chat.$DOMAIN"
+    "AISTACK_N8N_URL=https://n8n.$DOMAIN"
+    "AISTACK_N8N_HOST=n8n.$DOMAIN"
+    "AISTACK_N8N_WEBHOOK_URL=https://n8n.$DOMAIN/"
+    "AISTACK_ACME_CA=$ACME_CA"
+  )
+  if [ -n "$ACME_CA_ROOT" ]; then
+    VPS_ENV+=("AISTACK_ACME_ROOT_FILE=./.runtime/acme-ca-root.pem" "AISTACK_ACME_CA_ROOT=/etc/caddy/acme-ca-root.pem")
+  fi
+else
+  # Home mode needs the gVisor runtime too (Hermes, Crawl4AI).  Installing it
+  # restarts Docker and writes /etc/docker/daemon.json, so only root does it.
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && ! bash scripts/install-gvisor.sh --check; then
+    if [ "$(id -u)" -eq 0 ]; then
+      bash scripts/install-gvisor.sh || die "could not install gVisor."
+    else
+      die "the gVisor runtime (runsc) is not registered with Docker, and Hermes needs it.
+Install it once, as root, then re-run this installer:
+
+    sudo scripts/install-gvisor.sh"
+    fi
+  fi
+fi
+
 head2 "[1/15] Host tools"
 # THE TOOLS THIS INSTALLER ACTUALLY INVOKES, CHECKED BEFORE IT INVOKES THEM.
 #
@@ -223,8 +344,15 @@ EOF
 # 8   ANSWERS
 # ===========================================================================
 head2 "[8/15] Configuration"
-ask AISTACK_HOSTNAME    "Hostname to serve"        "aistack.localhost" valid_hostname
-ask AISTACK_BIND_ADDR   "Address to bind to"       "127.0.0.1"         valid_bind_addr
+if [ "$MODE" = vps ]; then
+  # Forced in step 0; still run through the same validators as any other answer.
+  valid_hostname "${ANS[AISTACK_HOSTNAME]}" || die "invalid hostname ${ANS[AISTACK_HOSTNAME]}"
+  valid_bind_addr "${ANS[AISTACK_BIND_ADDR]}" || die "invalid bind address ${ANS[AISTACK_BIND_ADDR]}"
+  say "  VPS mode: serving ${ANS[AISTACK_HOSTNAME]} on ${ANS[AISTACK_BIND_ADDR]}"
+else
+  ask AISTACK_HOSTNAME    "Hostname to serve"        "aistack.localhost" valid_hostname
+  ask AISTACK_BIND_ADDR   "Address to bind to"       "127.0.0.1"         valid_bind_addr
+fi
 ask AISTACK_ADMIN_EMAIL "Admin email (no mail is ever sent)" "admin@localhost"
 ask AISTACK_TZ          "Timezone"                 "UTC"
 
@@ -350,6 +478,21 @@ open(path, "w").write(text)
 PY
 done
 
+# VPS keys.  In home mode they are REMOVED, so re-running as home on a machine
+# that was once VPS goes back to the home configuration.
+VPS_KEYS="AISTACK_MODE AISTACK_DOMAIN AISTACK_CADDYFILE AISTACK_CADDY_SITES AISTACK_AUTHELIA_CONFIG AISTACK_HOMEPAGE_SERVICES AISTACK_DASH_HOST AISTACK_CHAT_URL AISTACK_N8N_URL AISTACK_N8N_HOST AISTACK_N8N_WEBHOOK_URL AISTACK_ACME_CA AISTACK_ACME_ROOT_FILE AISTACK_ACME_CA_ROOT"
+python3 - "$NEW_ENV" "$VPS_KEYS" "${VPS_ENV[@]+"${VPS_ENV[@]}"}" <<'PY'
+import re, sys
+path, keys, pairs = sys.argv[1], sys.argv[2].split(), sys.argv[3:]
+text = open(path).read()
+text = re.sub(r"\n*# VPS mode \(written by install\.sh.*\n", "\n", text)
+for k in keys:
+    text = re.sub(rf"^{k}=.*\n?", "", text, flags=re.M)
+if pairs:
+    text = text.rstrip("\n") + "\n\n# VPS mode (written by install.sh --mode vps; removed by a home-mode re-run)\n" + "\n".join(pairs) + "\n"
+open(path, "w").write(text)
+PY
+
 if [ -f .env ]; then
   if diff -u .env "$NEW_ENV" > /tmp/env.diff 2>&1; then
     say "  .env is unchanged."
@@ -454,13 +597,46 @@ head2 "[13/15] Rendering pins"
 bin/aistack pin
 
 head2 "[14/15] Pulling images by digest"
-say "  Nine images. This is the slow part."
-docker compose pull --quiet
+say "  This is the slow part."
+docker compose pull --quiet --ignore-buildable
+head2 "[14b/15] Building the two local images (mem0, mcp-web)"
+docker compose build --quiet
 
 head2 "[15/15] Starting"
 bin/aistack up || die "the stack did not become healthy. The failing service and its
 last 50 redacted lines are above. 'bin/aistack support-bundle' collects a
 shareable artefact; 'bin/aistack logs <service>' shows more."
+
+if [ "$MODE" = vps ]; then
+  bash scripts/vps-verify.sh --local || warn "scripts/vps-verify.sh reported problems (above)."
+  cat <<EOF
+
+────────────────────────────────────────────────────────────────────────────
+ Installed (VPS mode).
+
+   https://dash.${DOMAIN}/    dashboard        https://chat.${DOMAIN}/   Open WebUI
+   https://n8n.${DOMAIN}/     n8n              https://auth.${DOMAIN}/   login
+
+ Certificates: ${ACME_KIND}.
+ Caddy requests them on first contact; allow a minute before the first visit.
+
+ NOBODY CAN LOG IN UNTIL YOU DO THIS (the same two steps as home mode):
+
+   bin/aistack user reset owner      # set your own password, at a prompt
+   bin/aistack user code             # the one-time code enrolment asks for
+
+ Run the first, open https://auth.${DOMAIN}/, log in, enrol a second factor,
+ run the second when it asks.  Every app asks for that second factor.
+
+ Then:  bin/aistack models pull llama3.2:3b ; bin/aistack status ; bin/aistack doctor
+        sudo scripts/vps-verify.sh      (firewall, SSH, and what answers without a login)
+
+ Secrets are in ./secrets — paths only were printed, never values.
+ COPY secrets/backup.key AND secrets/backup.hmac OFF THIS MACHINE.
+────────────────────────────────────────────────────────────────────────────
+EOF
+  exit 0
+fi
 
 cat <<EOF
 

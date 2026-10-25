@@ -1,0 +1,12 @@
+# Homepage — https://dash.{domain}, the front door.  Behind forward-auth.
+dash.{$AISTACK_DOMAIN} {
+	import strip_identity
+
+	handle {
+		import require_mfa
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy homepage:3000
+	}
+}

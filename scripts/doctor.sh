@@ -329,11 +329,29 @@ hdr "Exposure"
 sed -n '/AISTACK-LOCAL-MODE:BEGIN/,/AISTACK-LOCAL-MODE:END/p' .env 2>/dev/null \
   | grep -v 'AISTACK-LOCAL-MODE' | sed 's/^# \?/  /'
 BIND="$(grep -E '^AISTACK_BIND_ADDR=' .env | cut -d= -f2-)"
+MODE="$(grep -E '^AISTACK_MODE=' .env | cut -d= -f2-)"
+if [ "$MODE" = vps ]; then
+  # VPS mode (NOM-414): the stack is on the internet ON PURPOSE.  Loopback-only
+  # would be a false requirement; what must hold instead is that the bind is one
+  # specific address (never a wildcard) and that scripts/vps-verify.sh passes.
+  case "$BIND" in
+    0.0.0.0|::|"") bad "VPS mode, but caddy is bound to a wildcard address ($BIND)" ;;
+    *) ok "VPS mode: caddy is bound to $BIND, one specific address" ;;
+  esac
+  if [ "$(id -u)" -eq 0 ]; then
+    if bash scripts/vps-verify.sh --local >/tmp/vps-verify.$$ 2>&1; then ok "scripts/vps-verify.sh --local: all checks passed"
+    else bad "scripts/vps-verify.sh --local found a problem:"; grep -E '^\s+\[(FAIL|skip)\]' /tmp/vps-verify.$$ | sed 's/^/       /'; fi
+    rm -f /tmp/vps-verify.$$
+  else
+    warn "VPS mode: run 'sudo bin/aistack doctor' to include the firewall and SSH checks"
+  fi
+else
 case "$BIND" in
   127.0.0.1|::1) ok "bound to loopback only ($BIND)" ;;
   0.0.0.0|::)    bad "BOUND TO A WILDCARD ADDRESS ($BIND) — every interface on this machine" ;;
   *)             warn "bound to $BIND. Other devices on that network may reach it; untested." ;;
 esac
+fi
 for p in $(docker compose ps --format json 2>/dev/null | python3 -c '
 import json,sys
 for l in sys.stdin:

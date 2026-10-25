@@ -1,0 +1,17 @@
+# AI Stack 2026 — Homepage services, VPS MODE (NOM-414).
+#
+# Same two surfaces as services.yaml; the links are absolute because each app
+# has its own subdomain.  Homepage substitutes {{HOMEPAGE_VAR_*}} from the
+# environment compose sets (AISTACK_CHAT_URL / AISTACK_N8N_URL).
+
+- Chat and documents:
+    - Open WebUI:
+        href: "{{HOMEPAGE_VAR_CHAT_URL}}"
+        description: Chat, RAG and the document pipeline
+        icon: mdi-chat
+
+- Automation:
+    - n8n:
+        href: "{{HOMEPAGE_VAR_N8N_URL}}"
+        description: Workflows. The only place a mutating action can run.
+        icon: mdi-sitemap

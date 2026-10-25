@@ -1,0 +1,158 @@
+# AI Stack 2026 — Authelia, VPS MODE (NOM-414).  The one locked door.
+#
+# Selected by `install.sh --mode vps` through AISTACK_AUTHELIA_CONFIG.  Identical to
+# configuration.yml except the three blocks marked VPS below: one login on
+# auth.{domain} covers every app subdomain, and the policy is two_factor for
+# EVERY name under the domain, with n8n's webhook path as the single bypass.
+#
+#
+# FILE BACKEND = NO SELF-REGISTRATION SURFACE, which is what makes the
+# two-phase owner bootstrap possible (S05): phase 1 writes a user with a random
+# password nobody has seen and NO second factor; phase 2 is the owner setting
+# their own password with `aistack user reset owner` and then enrolling a
+# second factor at their first login.  There is no window in which an account
+# exists that can open a service with a password the installer printed —
+# because the installer never prints one.
+#
+# PHASE 2 IS NOT SOMETHING AUTHELIA FORCES, and this comment used to say it
+# was.  MEASURED (NOM-402): the file backend has no must-change-password flag,
+# so nothing here compels a password change — the installer's password is
+# simply unusable because nobody knows it, and `aistack user reset` is the
+# whole of how a usable one comes to exist.  The second factor IS compelled:
+# every route below is `two_factor`, so an account with none enrolled gets a
+# redirect and no protected content, which was measured end to end.
+#
+# Forward-auth is PRIMARY.  Authelia's OIDC provider is open beta with no
+# single-logout [V-252]; OIDC is configured for the apps that speak it, but no
+# route depends on it alone.
+
+theme: light
+
+server:
+  address: "tcp://0.0.0.0:9091"
+  endpoints:
+    authz:
+      forward-auth:
+        implementation: ForwardAuth
+  buffers:
+    read: 4096
+    write: 4096
+
+log:
+  level: info
+  format: json
+  # Never a file inside the container: logs go to stderr so the json-file
+  # driver's 10m/3 rotation is the only retention knob.
+
+totp:
+  # ENROLLING A FACTOR NEEDS A ONE-TIME CODE, AND THE NOTIFIER BELOW IS WHERE
+  # IT GOES.  MEASURED (NOM-402): `PUT /api/secondfactor/totp/register`
+  # answers {"elevation":true} until the session is elevated, and elevation
+  # consumes a code Authelia hands to the notifier.  The pinned binary's keys
+  # are identity_validation.elevated_session.{characters,code_lifespan,
+  # elevation_lifespan,skip_second_factor,require_second_factor} and none of
+  # them waives the code.  With no SMTP that code is only ever in
+  # /data/notification.txt inside this container, so `aistack user code` reads
+  # it out -- without that command the enrolment has no way to complete.
+  issuer: aistack
+  algorithm: sha1
+  digits: 6
+  period: 30
+  skew: 1
+
+authentication_backend:
+  # No self-registration surface.  `aistack user add` and `aistack user reset`
+  # are the only things that write this file; see scripts/user.sh.
+  file:
+    path: /config/users.yml
+    # `watch: false`, AND THAT IS A MEASUREMENT, NOT A PREFERENCE.
+    #
+    # This was `watch: true` and the watcher never fired.  compose bind-mounts
+    # users.yml as a SINGLE FILE, so Authelia watches a path whose directory is
+    # inside the container and never sees a host-side write to it.  MEASURED
+    # (NOM-402, 2026-10-24) both ways a writer could plausibly behave: an
+    # in-place truncate-write, and an atomic rename into place.  Two minutes
+    # after each, a login as the newly added user still failed with `user not
+    # found`; a container restart picked the change up at once.  `docker kill
+    # -s HUP` is not a reload either -- it kills the process (exit 129).
+    #
+    # So the reload is the restart `aistack user` performs, and `true` here
+    # described a mechanism that did not exist.  Before setting it back,
+    # measure it: if a future version watches the file's directory, this can
+    # become `true` again AND `aistack user` can stop restarting -- but a
+    # watcher that reloads on every write also means a half-written users.yml
+    # gets loaded, which is why the writer renames rather than truncates.
+    watch: false
+    password:
+      algorithm: argon2
+      argon2:
+        variant: argon2id
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        key_length: 32
+        salt_length: 16
+  password_reset:
+    # No SMTP in the MVP, so a self-service reset would be a dead end that
+    # looks like a feature.  `aistack user reset <name>` is the supported path
+    # and it is implemented in scripts/user.sh -- for a whole release this
+    # comment named a command that did not exist (NOM-402), which is why
+    # tests/owner-bootstrap.sh now checks that every `aistack user` command
+    # named in this file, in install.sh and in docs/install.md dispatches.
+    disable: true
+
+access_control:
+  # DEFAULT DENY.  A host that is not named below does not resolve to a policy
+  # other than this one, which is the half of the rule a bypass has to defeat.
+  default_policy: deny
+  rules:
+    # VPS: n8n webhooks are machine callers with a header token, not browser
+    # sessions.  Bounded in Caddy to 1 MB before they reach n8n.  This is the
+    # ONLY bypass; I18 counts the bypass rules in this file.
+    - domain: 'n8n.{{ env "AISTACK_DOMAIN" }}'
+      resources:
+        - "^/webhook/.*$"
+      policy: bypass
+
+    # VPS: every app under the domain needs the second factor.  `one_factor`
+    # is not used anywhere.  The wildcard also covers any app added later, so a
+    # new subdomain is protected by default rather than by remembering to.
+    - domain: '*.{{ env "AISTACK_DOMAIN" }}'
+      policy: two_factor
+
+session:
+  name: aistack_session
+  same_site: lax
+  # A1-* exercises these: session expiry, inactivity, and the IdP-outage path.
+  expiration: 8h
+  inactivity: 1h
+  remember_me: 1M
+  cookies:
+    # VPS: the cookie sits on the parent domain so a login at auth.{domain}
+    # is seen by chat., n8n. and dash.  same_site stays lax: the redirect back
+    # from the portal is a top-level navigation.
+    - domain: '{{ env "AISTACK_DOMAIN" }}'
+      authelia_url: 'https://auth.{{ env "AISTACK_DOMAIN" }}'
+      default_redirection_url: 'https://dash.{{ env "AISTACK_DOMAIN" }}'
+
+regulation:
+  # Bounded brute-force response.  Not a rate limit on the proxy — this one
+  # counts failures per user, which is the thing being attacked.
+  max_retries: 3
+  find_time: 2m
+  ban_time: 5m
+
+storage:
+  postgres:
+    address: "tcp://postgres:5432"
+    database: authelia
+    username: authelia
+    # password and encryption key arrive by _FILE indirection; see compose.
+
+notifier:
+  # No SMTP in the MVP.  The filesystem notifier writes to a path the operator
+  # reads with `aistack logs authelia` — it is NOT a mail server and the docs
+  # do not imply one.
+  disable_startup_check: true
+  filesystem:
+    filename: /data/notification.txt
