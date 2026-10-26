@@ -117,7 +117,10 @@ ollama_up() {   # $1 = model; starts a fresh container on the volume that holds 
     -e OLLAMA_NOPRUNE=1 -e OLLAMA_MAX_LOADED_MODELS=1 -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_KEEP_ALIVE=30m \
     -v "$vol:/root/.ollama" "$OLLAMA_REF" >/dev/null
   for _ in $(seq 60); do curl -sf -m2 "127.0.0.1:$PORT_OLLAMA/api/version" >/dev/null && break; sleep 1; done
-  docker exec n418-eval-ollama ollama list | grep -q "^$1 " || docker exec n418-eval-ollama ollama pull "$1"
+  # pull only if the manifest is absent (checking `ollama list` raced the server start
+  # and re-pulled a model that was already there)
+  docker exec n418-eval-ollama test -f "/root/.ollama/models/manifests/registry.ollama.ai/library/${1%%:*}/${1#*:}" \
+    || docker exec n418-eval-ollama ollama pull "$1"
   local want got
   want=$(awk -v m="$1" '$1==m {print $2}' "$HERE/chat/models.lock")
   [ -n "$want" ] || { echo "$1 is not in chat/models.lock"; exit 1; }
