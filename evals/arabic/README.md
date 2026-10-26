@@ -7,15 +7,16 @@ conclusions is the `arabic-tests` document on NOM-418.
 ## Run it
 
 ```sh
-evals/arabic/run.sh all        # env → stt → ocr → chat → score   (about 2–3 h on a 4-vCPU CPU box)
+evals/arabic/run.sh all        # env → stt → ocr → chat → score   (about 2–2.5 h on a 4-vCPU CPU box)
 evals/arabic/run.sh score      # re-score existing raw results only (seconds, no models needed)
 ```
 
 You need Docker, `python3` (standard library only), and the `voice-arabic` and `docs-arabic` profile images
 built from this repo. The first run downloads the human-speech control clips (FLEURS, ~243 MB streamed,
 20 clips kept), the base Whisper model (1.6 GB) and the Ollama models (2.7–6.6 GB each). Every download is
-checked against a pinned hash, and the run stops if one does not match. Test containers run with
-`--network none`, except the downloaders and Ollama when it pulls a model. Ports are bound to 127.0.0.1 only.
+checked against a pinned hash, and the run stops if one does not match. The STT and TTS containers run
+with `--network none`. Docling and Ollama use Docker's default network, because the test calls their HTTP API.
+Their ports are bound to 127.0.0.1 only.
 
 | Step | What it does |
 |---|---|
