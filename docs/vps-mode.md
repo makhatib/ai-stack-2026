@@ -93,4 +93,81 @@ Docker and gVisor stay installed (they are held with `apt-mark hold`; `apt-mark 
 
 Safe. Existing secrets are reused; every `.env` change shows a diff and leaves a `.bak`.
 
-@@TESTED@@
+## What was tested, and what was not
+
+**Tested (NOM-414, 2026-10-26), by us, on the dev sandbox.** The target is a fresh
+`ubuntu:24.04` systemd container with its own Docker daemon and a real network
+address (172.31.200.10), not a bare VM: the sandbox has no KVM. It is limited to 4 CPUs
+and about 4 GB of free disk. Certificates came from a **private ACME CA (Pebble)**,
+not Let's Encrypt, because the sandbox has no public port 80/443.
+
+| Check | Result |
+|---|---|
+| `install.sh --mode vps --domain nom414.test ...` on the clean target: the one command, no prompts | exit 0, all 15 steps |
+| `scripts/vps-verify.sh` (output below) | **26 passed, 0 failed, 0 not measured** |
+| `scripts/vps-verify.sh --remote <ip>` from another machine, all 65535 ports | open: 22 80 443, nothing else |
+| Every app route without a session | 302 to the login portal; only `n8n.<domain>/webhook/*` is open (documented) |
+| Caddy issued a certificate for all 5 names through ACME (HTTP-01) | yes, 5 of 5 |
+| Re-run as a home to VPS switch on the same machine | works; found and fixed a silent exit at step 10 (a `head` SIGPIPE under `pipefail`) |
+| **Home-mode regression**: `./install.sh --non-interactive --answers ...` on the same target | installs, "All services healthy", bound to 127.0.0.1:80/443 only, unauthenticated request gets 302 to the login portal, no VPS keys left in `.env` |
+| `ci/invariants.py` incl. I18 | all pass except I6 on an export without `.git` (known artifact, passes in the repo) |
+
+**Not tested by us. Please read this list:**
+
+- **A real Hostinger VPS.** The founder tests that live. KVM2 sizing (2 vCPU, 8 GB) was not
+  reproduced: the sandbox is shared and its disk is full, so no second, KVM4-sized target
+  was built. The installer's 40 GB disk check was lowered to 3 GB for this rehearsal only
+  (a scratch copy of `install.sh`; the shipped file is unchanged).
+- **Let's Encrypt** (production or staging). We proved the ACME flow against Pebble. The
+  Let's Encrypt rate limits (5 certificates per exact name set per week) are why a failed
+  attempt on a real server must not be retried in a loop: use `--acme-ca staging` first.
+- **Real DNS.** The rehearsal pinned names to the target with `--skip-dns-check` and
+  `AISTACK_ALLOW_PRIVATE_IP=1` (rehearsal-only override of the public-address check).
+- **Tailscale.** The `--tailscale` flag is coded and off by default; it was not run (no
+  tailnet in the sandbox, and the founder has not said yes).
+- **A real second-factor enrolment in a browser.** Verified by policy and by the 302s,
+  not by logging in. `scripts/security-check.sh` was not run (needs PyYAML on the target).
+- `bin/aistack doctor` reports FAIL on disk (4 GB free) on this target; that is the sandbox.
+
+### `scripts/vps-verify.sh` output
+
+```
+Firewall
+  [ ok ] ufw is active
+  [ ok ] default incoming: deny
+  [ ok ] ufw allows only 22, 80, 443
+
+SSH
+  [ ok ] sshd: PasswordAuthentication no
+  [ ok ] sshd: KbdInteractiveAuthentication no
+  [ ok ] sshd: PubkeyAuthentication yes
+
+Published ports and listeners
+  [ ok ] Docker publishes only 80 and 443 (1 containers with a published port)
+  [ ok ] no published port is bound to a wildcard address
+  [ ok ] no TCP listener on a non-loopback address other than 22/80/443
+
+What answers without a login (https, name pinned to 172.31.200.10)
+  [ ok ] chat.nom414.test / -> 302 to auth.nom414.test
+  [ ok ] dash.nom414.test / -> 302 to auth.nom414.test
+  [ ok ] n8n.nom414.test / -> 302 to auth.nom414.test
+  [ ok ] chat.nom414.test/api/v1/auths/ -> 302
+  [ ok ] chat.nom414.test/api/config -> 302
+  [ ok ] n8n.nom414.test/rest/settings -> 302
+  [ ok ] n8n.nom414.test/webhook-test/x -> 302
+  [ ok ] dash.nom414.test/api/services -> 302
+  [ ok ] auth.nom414.test / -> 200 (the login portal)
+  [ ok ] auth.nom414.test/api/authz/forward-auth -> 404 (not exposed)
+  [ ok ] n8n.nom414.test/webhook/* reaches n8n without a session (documented exception; n8n answers 404 for an unknown path)
+  [ ok ] https://172.31.200.10/ (no server name) gives no content
+
+Certificates
+  [ ok ] nom414.test: issuer=CN = Pebble Intermediate CA 3211ab notAfter=Jan 24 22:26:17 2027 GMT 
+  [ ok ] dash.nom414.test: issuer=CN = Pebble Intermediate CA 3211ab notAfter=Jan 24 22:26:16 2027 GMT 
+  [ ok ] chat.nom414.test: issuer=CN = Pebble Intermediate CA 3211ab notAfter=Jan 24 22:26:17 2027 GMT 
+  [ ok ] n8n.nom414.test: issuer=CN = Pebble Intermediate CA 3211ab notAfter=Jan 24 22:26:18 2027 GMT 
+  [ ok ] auth.nom414.test: issuer=CN = Pebble Intermediate CA 3211ab notAfter=Jan 24 22:26:17 2027 GMT 
+
+vps-verify: 26 passed, 0 failed, 0 not measured.
+```
+

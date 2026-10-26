@@ -498,7 +498,9 @@ if [ -f .env ]; then
     say "  .env is unchanged."
   else
     say "  .env would change:"
-    grep -E '^[+-]' /tmp/env.diff | grep -vE '^[+-]{3}' | grep -viE 'password|secret|key' | sed 's/^/    /' | head -20
+    # `head` closing the pipe SIGPIPEs grep; under pipefail that killed the installer
+    # silently on any diff longer than 20 lines (home -> VPS re-run).  Display only.
+    { grep -E '^[+-]' /tmp/env.diff | grep -vE '^[+-]{3}' | grep -viE 'password|secret|key' | sed 's/^/    /' | head -20; } || true
     cp .env ".env.$(date -u +%Y%m%dT%H%M%SZ).bak"
     say "  (previous .env backed up)"
     cp "$NEW_ENV" .env
