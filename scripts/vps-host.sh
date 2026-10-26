@@ -1,6 +1,5 @@
 # AI Stack 2026 — VPS host preparation (NOM-414).  SOURCED by install.sh, never
-# executed; tests/vps-mode.sh sources it too, with stubs, so every function here
-# can be driven without root and without touching a real firewall.
+# executed.  Paths that a test would need to redirect are variables.
 #
 # Each function does ONE thing to the host, prints what it did, and returns
 # non-zero (never exits) when it cannot.  install.sh decides what a failure

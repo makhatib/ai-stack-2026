@@ -35,25 +35,34 @@ remote_scan() {
   hdr "Port scan of $host (TCP connect, ports 1-65535)"
   local out
   out="$(python3 - "$host" "${AISTACK_SCAN_TIMEOUT:-1.5}" <<'PY'
-import asyncio, sys
+import asyncio, resource, sys
 host, timeout = sys.argv[1], float(sys.argv[2])
 open_ports = []
-sem = asyncio.Semaphore(1500)
+errors = [0]
+# Stay under the fd limit: a probe that dies of EMFILE looks exactly like a closed port.
+soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+sem = asyncio.Semaphore(max(50, min(1500, soft - 100)))
 async def probe(p):
     async with sem:
         try:
             r, w = await asyncio.wait_for(asyncio.open_connection(host, p), timeout)
             w.close()
             open_ports.append(p)
-        except Exception:
+        except (asyncio.TimeoutError, ConnectionRefusedError, ConnectionResetError):
             pass
+        except OSError as e:
+            if e.errno in (24, 23, 105):   # EMFILE, ENFILE, ENOBUFS: the probe did not run
+                errors[0] += 1
 async def main():
     await asyncio.gather(*(probe(p) for p in range(1, 65536)))
 asyncio.run(main())
+if errors[0]:
+    sys.stderr.write("%d probes could not run (local resource limit)\n" % errors[0]); sys.exit(3)
 print(" ".join(map(str, sorted(open_ports))))
 PY
 )" || { skip "port scan could not run"; return; }
   printf '  open: %s\n' "${out:-(none)}"
+  [ -n "$out" ] || { skip "scan saw NO open port on $host: it is down, filtered from here, or the scan was blind"; return; }
   local extra="" p
   for p in $out; do case " $ALLOWED_PORTS " in *" $p "*) ;; *) extra="$extra $p" ;; esac; done
   [ -z "$extra" ] && ok "only ${out:-nothing} answered; nothing outside 22/80/443" || bad "unexpected open ports:$extra"
@@ -106,7 +115,7 @@ local_checks() {
 
   hdr "What answers without a login (https, name pinned to $ip)"
   if ! command -v curl >/dev/null 2>&1; then skip "curl missing"; return; fi
-  local cacert_args=() cafile; cafile="$(envval AISTACK_ACME_ROOT_FILE)"
+  local cacert_args=() cafile; cafile="${AISTACK_VERIFY_CACERT:-$(envval AISTACK_ACME_ROOT_FILE)}"   # a private CA's ISSUING root, if it differs from its directory root
   if [ -n "$cafile" ]; then cacert_args=(--cacert "$cafile"); fi
   local name url code loc
   for name in chat dash n8n; do
