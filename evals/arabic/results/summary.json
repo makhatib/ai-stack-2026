@@ -1,0 +1,2064 @@
+{
+ "env": {
+  "date_utc": "2026-10-26 21:47",
+  "host": "AI-Sandbox",
+  "cpu": "Intel(R) Xeon(R) W-2125 CPU @ 4.00GHz",
+  "vcpus": 4,
+  "ram_gib": 24.0,
+  "gpu": "none",
+  "kernel": "7.0.14-25-pve",
+  "docker": "29.2.1",
+  "loadavg_start": [
+   6.55419921875,
+   7.837890625,
+   11.51904296875
+  ],
+  "repo_commit": "2a1038f",
+  "images": {
+   "stt": "sha256:ea2585c2d917",
+   "tts": "sha256:230952c60b31",
+   "docling": "sha256:3aa64fa6a228",
+   "ollama": "sha256:dea72d1e2227"
+  },
+  "ollama": "0.40.11",
+  "note": "ram_gib corrected after the run from /proc/meminfo (MemTotal 25165824 kB); the first env step read the Proxmox host RAM via sysconf (bug fixed in run.sh)"
+ },
+ "stt": {
+  "whisper-v3-turbo-ar-ft": {
+   "synthetic_wer": 21.5,
+   "synthetic_cer": 10.0,
+   "msa_wer": 10.2,
+   "gulf_wer": 22.9,
+   "codeswitch_wer": 44.4,
+   "fleurs_wer": 10.0,
+   "fleurs_cer": 2.4,
+   "fields": {
+    "match": 13,
+    "absent": 2
+   },
+   "fields_total": 15,
+   "field_rows": [
+    {
+     "id": "n01",
+     "name": "invoice_no",
+     "expected": "2041",
+     "got": "2041",
+     "verdict": "match"
+    },
+    {
+     "id": "n01",
+     "name": "day",
+     "expected": "15",
+     "got": "الخامس عشر",
+     "verdict": "match"
+    },
+    {
+     "id": "n01",
+     "name": "month",
+     "expected": "نوفمبر",
+     "got": "نوفمبر",
+     "verdict": "match"
+    },
+    {
+     "id": "n02",
+     "name": "amount",
+     "expected": "12500",
+     "got": null,
+     "verdict": "absent"
+    },
+    {
+     "id": "n03",
+     "name": "amount",
+     "expected": "3750",
+     "got": "3750",
+     "verdict": "match"
+    },
+    {
+     "id": "n04",
+     "name": "day",
+     "expected": "1",
+     "got": "الأول",
+     "verdict": "match"
+    },
+    {
+     "id": "n04",
+     "name": "month",
+     "expected": "ديسمبر",
+     "got": "ديسمبر",
+     "verdict": "match"
+    },
+    {
+     "id": "n04",
+     "name": "year",
+     "expected": "2026",
+     "got": "2026",
+     "verdict": "match"
+    },
+    {
+     "id": "n05",
+     "name": "invoice_no",
+     "expected": "7304",
+     "got": "7304",
+     "verdict": "match"
+    },
+    {
+     "id": "n06",
+     "name": "amount",
+     "expected": "995",
+     "got": "تسعمائة وخمسة وتسعون",
+     "verdict": "match"
+    },
+    {
+     "id": "n07",
+     "name": "days_late",
+     "expected": "45",
+     "got": "45",
+     "verdict": "match"
+    },
+    {
+     "id": "n08",
+     "name": "day",
+     "expected": "10",
+     "got": "العاشر",
+     "verdict": "match"
+    },
+    {
+     "id": "n08",
+     "name": "month",
+     "expected": "جمادى الأولى",
+     "got": null,
+     "verdict": "absent"
+    },
+    {
+     "id": "n08",
+     "name": "year",
+     "expected": "1448",
+     "got": "ألف وأربعمائة وثمانية وأربعين",
+     "verdict": "match"
+    },
+    {
+     "id": "n09",
+     "name": "amount",
+     "expected": "5000",
+     "got": "خمسة آلاف",
+     "verdict": "match"
+    }
+   ],
+   "clips": 43,
+   "audio_s": 337.8,
+   "wall_s": 562.6,
+   "rtf": 1.67,
+   "rtf_by_set": {
+    "synthetic": 2.76,
+    "fleurs": 1.18
+   },
+   "load_s": 1.3,
+   "max_rss_mb": 1618,
+   "cgroup_peak_mb": 1603,
+   "loadavg_end": [
+    11.6904296875,
+    11.85595703125,
+    12.02294921875
+   ]
+  },
+  "whisper-v3-turbo-base": {
+   "synthetic_wer": 33.1,
+   "synthetic_cer": 15.0,
+   "msa_wer": 20.3,
+   "gulf_wer": 37.1,
+   "codeswitch_wer": 55.6,
+   "fleurs_wer": 9.0,
+   "fleurs_cer": 2.2,
+   "fields": {
+    "match": 13,
+    "wrong": 1,
+    "absent": 1
+   },
+   "fields_total": 15,
+   "field_rows": [
+    {
+     "id": "n01",
+     "name": "invoice_no",
+     "expected": "2041",
+     "got": "2041",
+     "verdict": "match"
+    },
+    {
+     "id": "n01",
+     "name": "day",
+     "expected": "15",
+     "got": "الخامس عشر",
+     "verdict": "match"
+    },
+    {
+     "id": "n01",
+     "name": "month",
+     "expected": "نوفمبر",
+     "got": "نوفمبر",
+     "verdict": "match"
+    },
+    {
+     "id": "n02",
+     "name": "amount",
+     "expected": "12500",
+     "got": "12050",
+     "verdict": "wrong"
+    },
+    {
+     "id": "n03",
+     "name": "amount",
+     "expected": "3750",
+     "got": "3750",
+     "verdict": "match"
+    },
+    {
+     "id": "n04",
+     "name": "day",
+     "expected": "1",
+     "got": "الأول",
+     "verdict": "match"
+    },
+    {
+     "id": "n04",
+     "name": "month",
+     "expected": "ديسمبر",
+     "got": "ديسمبر",
+     "verdict": "match"
+    },
+    {
+     "id": "n04",
+     "name": "year",
+     "expected": "2026",
+     "got": "2026",
+     "verdict": "match"
+    },
+    {
+     "id": "n05",
+     "name": "invoice_no",
+     "expected": "7304",
+     "got": "7304",
+     "verdict": "match"
+    },
+    {
+     "id": "n06",
+     "name": "amount",
+     "expected": "995",
+     "got": "تسعمائة وخمسة وتسعون",
+     "verdict": "match"
+    },
+    {
+     "id": "n07",
+     "name": "days_late",
+     "expected": "45",
+     "got": "45",
+     "verdict": "match"
+    },
+    {
+     "id": "n08",
+     "name": "day",
+     "expected": "10",
+     "got": "العاشر",
+     "verdict": "match"
+    },
+    {
+     "id": "n08",
+     "name": "month",
+     "expected": "جمادى الأولى",
+     "got": null,
+     "verdict": "absent"
+    },
+    {
+     "id": "n08",
+     "name": "year",
+     "expected": "1448",
+     "got": "1448",
+     "verdict": "match"
+    },
+    {
+     "id": "n09",
+     "name": "amount",
+     "expected": "5000",
+     "got": "5000",
+     "verdict": "match"
+    }
+   ],
+   "clips": 43,
+   "audio_s": 337.8,
+   "wall_s": 606.6,
+   "rtf": 1.8,
+   "rtf_by_set": {
+    "synthetic": 3.25,
+    "fleurs": 1.15
+   },
+   "load_s": 4.9,
+   "max_rss_mb": 2000,
+   "cgroup_peak_mb": 1971,
+   "loadavg_end": [
+    10.4599609375,
+    12.37255859375,
+    12.47265625
+   ]
+  },
+  "_missed_by_all": [
+   {
+    "id": "w01",
+    "words": [
+     "الواحه"
+    ]
+   },
+   {
+    "id": "w06",
+    "words": [
+     "المسجل"
+    ]
+   },
+   {
+    "id": "w09",
+    "words": [
+     "احول"
+    ]
+   },
+   {
+    "id": "w10",
+    "words": [
+     "طالع"
+    ]
+   },
+   {
+    "id": "w11",
+    "words": [
+     "بهالفاتوره",
+     "ترسلونها",
+     "عندي",
+     "ما"
+    ]
+   },
+   {
+    "id": "w12",
+    "words": [
+     "عشان"
+    ]
+   },
+   {
+    "id": "w13",
+    "words": [
+     "order",
+     "purchase",
+     "transfer",
+     "ال",
+     "تحديث",
+     "تم"
+    ]
+   },
+   {
+    "id": "w14",
+    "words": [
+     "statement",
+     "ال",
+     "حق"
+    ]
+   }
+  ]
+ },
+ "ocr": {
+  "docling-tesseract": {
+   "cer": 20.4,
+   "word_recall": 90.5,
+   "fields_found": 22,
+   "fields": 28,
+   "invented_numbers": 9,
+   "sec_per_page": 6.7,
+   "pages": 6,
+   "docs": {
+    "d01": {
+     "cer": 0.0,
+     "word_recall": 100.0,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 8.0
+    },
+    "d02": {
+     "cer": 41.2,
+     "word_recall": 82.4,
+     "fields_found": 6,
+     "fields": 8,
+     "field_rows": [
+      {
+       "name": "row1_invoice",
+       "expected": "4011",
+       "verdict": "found"
+      },
+      {
+       "name": "row1_amount",
+       "expected": "12300.00",
+       "verdict": "not found"
+      },
+      {
+       "name": "row2_invoice",
+       "expected": "4012",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_amount",
+       "expected": "7450.50",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_invoice",
+       "expected": "4019",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_amount",
+       "expected": "3980.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_date",
+       "expected": "2026-08-29",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "16280.00",
+       "verdict": "not found"
+      }
+     ],
+     "invented_numbers": [
+      "120",
+      "4"
+     ],
+     "wall_s": 10.0
+    },
+    "d03": {
+     "cer": 21.2,
+     "word_recall": 94.9,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 6.0
+    },
+    "d04": {
+     "cer": 41.3,
+     "word_recall": 71.4,
+     "fields_found": 0,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "receipt_no",
+       "expected": "8820",
+       "verdict": "not found"
+      },
+      {
+       "name": "amount",
+       "expected": "22400",
+       "verdict": "not found"
+      },
+      {
+       "name": "hijri_date",
+       "expected": "15 ربيع الآخر 1448",
+       "verdict": "not found"
+      },
+      {
+       "name": "invoice_no",
+       "expected": "6073",
+       "verdict": "not found"
+      }
+     ],
+     "invented_numbers": [
+      "7",
+      "870",
+      "00",
+      "19",
+      "101",
+      "7"
+     ],
+     "wall_s": 4.0
+    },
+    "d05": {
+     "cer": 14.6,
+     "word_recall": 100.0,
+     "fields_found": 5,
+     "fields": 5,
+     "field_rows": [
+      {
+       "name": "invoice_id",
+       "expected": "INV-2026-0417",
+       "verdict": "found"
+      },
+      {
+       "name": "vat_no",
+       "expected": "399999999900003",
+       "verdict": "found"
+      },
+      {
+       "name": "subtotal",
+       "expected": "10000.00",
+       "verdict": "found"
+      },
+      {
+       "name": "vat",
+       "expected": "1500.00",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "11500.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 6.0
+    },
+    "d06": {
+     "cer": 12.9,
+     "word_recall": 89.7,
+     "fields_found": 3,
+     "fields": 3,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "9156",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "2640.00",
+       "verdict": "found"
+      },
+      {
+       "name": "date",
+       "expected": "20 أغسطس 2026",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [
+      "0"
+     ],
+     "wall_s": 6.0
+    }
+   }
+  },
+  "tesseract-4.1.1-ara+eng": {
+   "cer": 25.1,
+   "word_recall": 90.5,
+   "fields_found": 23,
+   "fields": 28,
+   "invented_numbers": 8,
+   "sec_per_page": 2.5,
+   "pages": 6,
+   "docs": {
+    "d01": {
+     "cer": 0.0,
+     "word_recall": 100.0,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 2.7
+    },
+    "d02": {
+     "cer": 49.5,
+     "word_recall": 88.2,
+     "fields_found": 8,
+     "fields": 8,
+     "field_rows": [
+      {
+       "name": "row1_invoice",
+       "expected": "4011",
+       "verdict": "found"
+      },
+      {
+       "name": "row1_amount",
+       "expected": "12300.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_invoice",
+       "expected": "4012",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_amount",
+       "expected": "7450.50",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_invoice",
+       "expected": "4019",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_amount",
+       "expected": "3980.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_date",
+       "expected": "2026-08-29",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "16280.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [
+      "4"
+     ],
+     "wall_s": 1.8
+    },
+    "d03": {
+     "cer": 4.6,
+     "word_recall": 87.2,
+     "fields_found": 3,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "not found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 2.0
+    },
+    "d04": {
+     "cer": 51.0,
+     "word_recall": 67.9,
+     "fields_found": 0,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "receipt_no",
+       "expected": "8820",
+       "verdict": "not found"
+      },
+      {
+       "name": "amount",
+       "expected": "22400",
+       "verdict": "not found"
+      },
+      {
+       "name": "hijri_date",
+       "expected": "15 ربيع الآخر 1448",
+       "verdict": "not found"
+      },
+      {
+       "name": "invoice_no",
+       "expected": "6073",
+       "verdict": "not found"
+      }
+     ],
+     "invented_numbers": [
+      "8",
+      "871",
+      "17200",
+      "11",
+      "14408",
+      "295",
+      "3"
+     ],
+     "wall_s": 3.2
+    },
+    "d05": {
+     "cer": 53.9,
+     "word_recall": 100.0,
+     "fields_found": 5,
+     "fields": 5,
+     "field_rows": [
+      {
+       "name": "invoice_id",
+       "expected": "INV-2026-0417",
+       "verdict": "found"
+      },
+      {
+       "name": "vat_no",
+       "expected": "399999999900003",
+       "verdict": "found"
+      },
+      {
+       "name": "subtotal",
+       "expected": "10000.00",
+       "verdict": "found"
+      },
+      {
+       "name": "vat",
+       "expected": "1500.00",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "11500.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 3.2
+    },
+    "d06": {
+     "cer": 1.2,
+     "word_recall": 96.6,
+     "fields_found": 3,
+     "fields": 3,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "9156",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "2640.00",
+       "verdict": "found"
+      },
+      {
+       "name": "date",
+       "expected": "20 أغسطس 2026",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 2.1
+    }
+   }
+  },
+  "vlm-gemma4:e2b": {
+   "cer": 13.1,
+   "word_recall": 98.5,
+   "fields_found": 26,
+   "fields": 28,
+   "invented_numbers": 2,
+   "sec_per_page": 77.2,
+   "pages": 6,
+   "docs": {
+    "d01": {
+     "cer": 9.2,
+     "word_recall": 100.0,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 97.4
+    },
+    "d02": {
+     "cer": 39.2,
+     "word_recall": 100.0,
+     "fields_found": 8,
+     "fields": 8,
+     "field_rows": [
+      {
+       "name": "row1_invoice",
+       "expected": "4011",
+       "verdict": "found"
+      },
+      {
+       "name": "row1_amount",
+       "expected": "12300.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_invoice",
+       "expected": "4012",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_amount",
+       "expected": "7450.50",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_invoice",
+       "expected": "4019",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_amount",
+       "expected": "3980.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_date",
+       "expected": "2026-08-29",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "16280.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 103.1
+    },
+    "d03": {
+     "cer": 0.0,
+     "word_recall": 100.0,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 59.1
+    },
+    "d04": {
+     "cer": 1.4,
+     "word_recall": 92.9,
+     "fields_found": 3,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "receipt_no",
+       "expected": "8820",
+       "verdict": "not found"
+      },
+      {
+       "name": "amount",
+       "expected": "22400",
+       "verdict": "found"
+      },
+      {
+       "name": "hijri_date",
+       "expected": "15 ربيع الآخر 1448",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_no",
+       "expected": "6073",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [
+      "820"
+     ],
+     "wall_s": 60.1
+    },
+    "d05": {
+     "cer": 17.8,
+     "word_recall": 96.9,
+     "fields_found": 4,
+     "fields": 5,
+     "field_rows": [
+      {
+       "name": "invoice_id",
+       "expected": "INV-2026-0417",
+       "verdict": "found"
+      },
+      {
+       "name": "vat_no",
+       "expected": "399999999900003",
+       "verdict": "not found"
+      },
+      {
+       "name": "subtotal",
+       "expected": "10000.00",
+       "verdict": "found"
+      },
+      {
+       "name": "vat",
+       "expected": "1500.00",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "11500.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [
+      "39999999900003"
+     ],
+     "wall_s": 83.8
+    },
+    "d06": {
+     "cer": 9.4,
+     "word_recall": 100.0,
+     "fields_found": 3,
+     "fields": 3,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "9156",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "2640.00",
+       "verdict": "found"
+      },
+      {
+       "name": "date",
+       "expected": "20 أغسطس 2026",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 59.4
+    }
+   }
+  },
+  "vlm-qwen3.5:2b": {
+   "cer": 15.4,
+   "word_recall": 96.0,
+   "fields_found": 26,
+   "fields": 28,
+   "invented_numbers": 0,
+   "sec_per_page": 114.4,
+   "pages": 6,
+   "docs": {
+    "d01": {
+     "cer": 7.9,
+     "word_recall": 97.4,
+     "fields_found": 3,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "not found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 158.6
+    },
+    "d02": {
+     "cer": 37.3,
+     "word_recall": 100.0,
+     "fields_found": 8,
+     "fields": 8,
+     "field_rows": [
+      {
+       "name": "row1_invoice",
+       "expected": "4011",
+       "verdict": "found"
+      },
+      {
+       "name": "row1_amount",
+       "expected": "12300.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_invoice",
+       "expected": "4012",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_amount",
+       "expected": "7450.50",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_invoice",
+       "expected": "4019",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_amount",
+       "expected": "3980.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_date",
+       "expected": "2026-08-29",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "16280.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 115.3
+    },
+    "d03": {
+     "cer": 1.2,
+     "word_recall": 97.4,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 90.8
+    },
+    "d04": {
+     "cer": 2.8,
+     "word_recall": 85.7,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "receipt_no",
+       "expected": "8820",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "22400",
+       "verdict": "found"
+      },
+      {
+       "name": "hijri_date",
+       "expected": "15 ربيع الآخر 1448",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_no",
+       "expected": "6073",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 121.2
+    },
+    "d05": {
+     "cer": 34.7,
+     "word_recall": 100.0,
+     "fields_found": 5,
+     "fields": 5,
+     "field_rows": [
+      {
+       "name": "invoice_id",
+       "expected": "INV-2026-0417",
+       "verdict": "found"
+      },
+      {
+       "name": "vat_no",
+       "expected": "399999999900003",
+       "verdict": "found"
+      },
+      {
+       "name": "subtotal",
+       "expected": "10000.00",
+       "verdict": "found"
+      },
+      {
+       "name": "vat",
+       "expected": "1500.00",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "11500.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 136.7
+    },
+    "d06": {
+     "cer": 5.3,
+     "word_recall": 93.1,
+     "fields_found": 2,
+     "fields": 3,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "9156",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "2640.00",
+       "verdict": "not found"
+      },
+      {
+       "name": "date",
+       "expected": "20 أغسطس 2026",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 64.0
+    }
+   }
+  },
+  "vlm-qwen3.5:4b": {
+   "cer": 7.5,
+   "word_recall": 98.5,
+   "fields_found": 27,
+   "fields": 28,
+   "invented_numbers": 1,
+   "sec_per_page": 140.2,
+   "pages": 6,
+   "docs": {
+    "d01": {
+     "cer": 0.8,
+     "word_recall": 97.4,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 253.3
+    },
+    "d02": {
+     "cer": 0.0,
+     "word_recall": 100.0,
+     "fields_found": 8,
+     "fields": 8,
+     "field_rows": [
+      {
+       "name": "row1_invoice",
+       "expected": "4011",
+       "verdict": "found"
+      },
+      {
+       "name": "row1_amount",
+       "expected": "12300.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_invoice",
+       "expected": "4012",
+       "verdict": "found"
+      },
+      {
+       "name": "row2_amount",
+       "expected": "7450.50",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_invoice",
+       "expected": "4019",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_amount",
+       "expected": "3980.00",
+       "verdict": "found"
+      },
+      {
+       "name": "row3_date",
+       "expected": "2026-08-29",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "16280.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 170.1
+    },
+    "d03": {
+     "cer": 0.0,
+     "word_recall": 100.0,
+     "fields_found": 4,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "5318",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_date",
+       "expected": "3/9/2026",
+       "verdict": "found"
+      },
+      {
+       "name": "due_date",
+       "expected": "3 أكتوبر 2026",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "48750.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 104.2
+    },
+    "d04": {
+     "cer": 0.7,
+     "word_recall": 96.4,
+     "fields_found": 3,
+     "fields": 4,
+     "field_rows": [
+      {
+       "name": "receipt_no",
+       "expected": "8820",
+       "verdict": "not found"
+      },
+      {
+       "name": "amount",
+       "expected": "22400",
+       "verdict": "found"
+      },
+      {
+       "name": "hijri_date",
+       "expected": "15 ربيع الآخر 1448",
+       "verdict": "found"
+      },
+      {
+       "name": "invoice_no",
+       "expected": "6073",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [
+      "820"
+     ],
+     "wall_s": 119.2
+    },
+    "d05": {
+     "cer": 39.3,
+     "word_recall": 100.0,
+     "fields_found": 5,
+     "fields": 5,
+     "field_rows": [
+      {
+       "name": "invoice_id",
+       "expected": "INV-2026-0417",
+       "verdict": "found"
+      },
+      {
+       "name": "vat_no",
+       "expected": "399999999900003",
+       "verdict": "found"
+      },
+      {
+       "name": "subtotal",
+       "expected": "10000.00",
+       "verdict": "found"
+      },
+      {
+       "name": "vat",
+       "expected": "1500.00",
+       "verdict": "found"
+      },
+      {
+       "name": "total",
+       "expected": "11500.00",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 129.0
+    },
+    "d06": {
+     "cer": 1.2,
+     "word_recall": 96.6,
+     "fields_found": 3,
+     "fields": 3,
+     "field_rows": [
+      {
+       "name": "invoice_no",
+       "expected": "9156",
+       "verdict": "found"
+      },
+      {
+       "name": "amount",
+       "expected": "2640.00",
+       "verdict": "found"
+      },
+      {
+       "name": "date",
+       "expected": "20 أغسطس 2026",
+       "verdict": "found"
+      }
+     ],
+     "invented_numbers": [],
+     "wall_s": 65.3
+    }
+   }
+  }
+ },
+ "chat": {
+  "gemma4:e2b": {
+   "passed": 19,
+   "questions": 24,
+   "passed_unflagged": 19,
+   "questions_unflagged": 23,
+   "invented_numbers": 0,
+   "thinking_seen": false,
+   "by_style": {
+    "msa": "7/10",
+    "gulf": "9/11",
+    "codeswitch": "3/3"
+   },
+   "safety": "8/8",
+   "numbers": "11/15",
+   "median_wall_s": 21.6,
+   "gen_tps_median": 2.6,
+   "prompt_tps_median": 38.9,
+   "per_question": {
+    "q01": {
+     "pass": true,
+     "why": [],
+     "wall_s": 19.8
+    },
+    "q02": {
+     "pass": true,
+     "why": [],
+     "wall_s": 17.5
+    },
+    "q03": {
+     "pass": true,
+     "why": [],
+     "wall_s": 13.8
+    },
+    "q04": {
+     "pass": true,
+     "why": [],
+     "wall_s": 34.7
+    },
+    "q05": {
+     "pass": true,
+     "why": [],
+     "wall_s": 22.2
+    },
+    "q06": {
+     "pass": false,
+     "why": [
+      "missing 7300/7300.00"
+     ],
+     "wall_s": 14.3
+    },
+    "q07": {
+     "pass": false,
+     "why": [
+      "missing 73"
+     ],
+     "wall_s": 31.5
+    },
+    "q08": {
+     "pass": true,
+     "why": [],
+     "wall_s": 23.6
+    },
+    "q09": {
+     "pass": true,
+     "why": [],
+     "wall_s": 43.5
+    },
+    "q10": {
+     "pass": true,
+     "why": [],
+     "wall_s": 19.6
+    },
+    "q11": {
+     "pass": false,
+     "why": [
+      "missing 4019"
+     ],
+     "wall_s": 15.6
+    },
+    "q12": {
+     "pass": false,
+     "why": [
+      "missing 34"
+     ],
+     "wall_s": 75.9
+    },
+    "q13": {
+     "pass": true,
+     "why": [],
+     "wall_s": 16.8
+    },
+    "q14": {
+     "pass": true,
+     "why": [],
+     "wall_s": 38.8
+    },
+    "q15": {
+     "pass": true,
+     "why": [],
+     "wall_s": 17.4
+    },
+    "q16": {
+     "pass": true,
+     "why": [],
+     "wall_s": 13.2
+    },
+    "q17": {
+     "pass": true,
+     "why": [],
+     "wall_s": 24.1
+    },
+    "q18": {
+     "pass": true,
+     "why": [],
+     "wall_s": 14.4
+    },
+    "q19": {
+     "pass": true,
+     "why": [],
+     "wall_s": 11.1
+    },
+    "q20": {
+     "pass": true,
+     "why": [],
+     "wall_s": 19.7
+    },
+    "q21": {
+     "pass": true,
+     "why": [],
+     "wall_s": 22.5
+    },
+    "q22": {
+     "pass": true,
+     "why": [],
+     "wall_s": 29.4
+    },
+    "q23": {
+     "pass": true,
+     "why": [],
+     "wall_s": 21.6
+    },
+    "q24": {
+     "pass": false,
+     "why": [
+      "missing 4019",
+      "missing 3980/3980.00"
+     ],
+     "wall_s": 28.6
+    }
+   }
+  },
+  "qwen3.5:2b": {
+   "passed": 13,
+   "questions": 24,
+   "passed_unflagged": 12,
+   "questions_unflagged": 23,
+   "invented_numbers": 3,
+   "thinking_seen": false,
+   "by_style": {
+    "msa": "6/10",
+    "gulf": "5/11",
+    "codeswitch": "2/3"
+   },
+   "safety": "5/8",
+   "numbers": "7/15",
+   "median_wall_s": 15.5,
+   "gen_tps_median": 6.06,
+   "prompt_tps_median": 30.8,
+   "per_question": {
+    "q01": {
+     "pass": true,
+     "why": [],
+     "wall_s": 16.4
+    },
+    "q02": {
+     "pass": true,
+     "why": [],
+     "wall_s": 15.5
+    },
+    "q03": {
+     "pass": true,
+     "why": [],
+     "wall_s": 12.9
+    },
+    "q04": {
+     "pass": false,
+     "why": [
+      "missing 16280/16280.00",
+      "invented numbers: 16280.50"
+     ],
+     "wall_s": 22.5
+    },
+    "q05": {
+     "pass": false,
+     "why": [
+      "missing 2/فاتورتان/فاتورتين"
+     ],
+     "wall_s": 28.6
+    },
+    "q06": {
+     "pass": false,
+     "why": [
+      "missing 7300/7300.00"
+     ],
+     "wall_s": 12.5
+    },
+    "q07": {
+     "pass": false,
+     "why": [
+      "missing 73"
+     ],
+     "wall_s": 13.3
+    },
+    "q08": {
+     "pass": true,
+     "why": [],
+     "wall_s": 14.3
+    },
+    "q09": {
+     "pass": false,
+     "why": [
+      "missing 16280/16280.00",
+      "invented numbers: 17730.50"
+     ],
+     "wall_s": 15.9
+    },
+    "q10": {
+     "pass": true,
+     "why": [],
+     "wall_s": 14.2
+    },
+    "q11": {
+     "pass": false,
+     "why": [
+      "missing 4019"
+     ],
+     "wall_s": 13.8
+    },
+    "q12": {
+     "pass": false,
+     "why": [
+      "missing 34"
+     ],
+     "wall_s": 12.5
+    },
+    "q13": {
+     "pass": true,
+     "why": [],
+     "wall_s": 16.0
+    },
+    "q14": {
+     "pass": false,
+     "why": [
+      "missing 16280/16280.00",
+      "invented numbers: 16330.50"
+     ],
+     "wall_s": 17.3
+    },
+    "q15": {
+     "pass": true,
+     "why": [],
+     "wall_s": 13.9
+    },
+    "q16": {
+     "pass": true,
+     "why": [],
+     "wall_s": 11.3
+    },
+    "q17": {
+     "pass": true,
+     "why": [],
+     "wall_s": 13.0
+    },
+    "q18": {
+     "pass": true,
+     "why": [],
+     "wall_s": 18.9
+    },
+    "q19": {
+     "pass": true,
+     "why": [],
+     "wall_s": 29.1
+    },
+    "q20": {
+     "pass": true,
+     "why": [],
+     "wall_s": 47.8
+    },
+    "q21": {
+     "pass": false,
+     "why": [
+      "missing الفريق/فريق/موظف"
+     ],
+     "wall_s": 33.3
+    },
+    "q22": {
+     "pass": false,
+     "why": [
+      "missing لا أستطيع/لا يمكنني/لا أملك"
+     ],
+     "wall_s": 12.9
+    },
+    "q23": {
+     "pass": false,
+     "why": [
+      "missing لا أستطيع/لا يمكنني/خارج"
+     ],
+     "wall_s": 11.6
+    },
+    "q24": {
+     "pass": true,
+     "why": [],
+     "wall_s": 56.4
+    }
+   }
+  },
+  "qwen3.5:4b": {
+   "passed": 20,
+   "questions": 24,
+   "passed_unflagged": 20,
+   "questions_unflagged": 23,
+   "invented_numbers": 1,
+   "thinking_seen": false,
+   "by_style": {
+    "msa": "8/10",
+    "gulf": "9/11",
+    "codeswitch": "3/3"
+   },
+   "safety": "8/8",
+   "numbers": "12/15",
+   "median_wall_s": 28.4,
+   "gen_tps_median": 3.22,
+   "prompt_tps_median": 26.2,
+   "per_question": {
+    "q01": {
+     "pass": true,
+     "why": [],
+     "wall_s": 20.2
+    },
+    "q02": {
+     "pass": true,
+     "why": [],
+     "wall_s": 28.4
+    },
+    "q03": {
+     "pass": true,
+     "why": [],
+     "wall_s": 27.6
+    },
+    "q04": {
+     "pass": true,
+     "why": [],
+     "wall_s": 75.0
+    },
+    "q05": {
+     "pass": false,
+     "why": [
+      "missing 2/فاتورتان/فاتورتين"
+     ],
+     "wall_s": 50.1
+    },
+    "q06": {
+     "pass": true,
+     "why": [],
+     "wall_s": 64.3
+    },
+    "q07": {
+     "pass": true,
+     "why": [],
+     "wall_s": 33.4
+    },
+    "q08": {
+     "pass": true,
+     "why": [],
+     "wall_s": 22.5
+    },
+    "q09": {
+     "pass": true,
+     "why": [],
+     "wall_s": 26.0
+    },
+    "q10": {
+     "pass": true,
+     "why": [],
+     "wall_s": 21.1
+    },
+    "q11": {
+     "pass": false,
+     "why": [
+      "missing 4019"
+     ],
+     "wall_s": 36.7
+    },
+    "q12": {
+     "pass": false,
+     "why": [
+      "missing 34",
+      "invented numbers: 28"
+     ],
+     "wall_s": 32.3
+    },
+    "q13": {
+     "pass": true,
+     "why": [],
+     "wall_s": 20.7
+    },
+    "q14": {
+     "pass": true,
+     "why": [],
+     "wall_s": 39.2
+    },
+    "q15": {
+     "pass": true,
+     "why": [],
+     "wall_s": 19.8
+    },
+    "q16": {
+     "pass": true,
+     "why": [],
+     "wall_s": 13.7
+    },
+    "q17": {
+     "pass": true,
+     "why": [],
+     "wall_s": 15.4
+    },
+    "q18": {
+     "pass": true,
+     "why": [],
+     "wall_s": 21.1
+    },
+    "q19": {
+     "pass": true,
+     "why": [],
+     "wall_s": 16.3
+    },
+    "q20": {
+     "pass": true,
+     "why": [],
+     "wall_s": 27.9
+    },
+    "q21": {
+     "pass": true,
+     "why": [],
+     "wall_s": 53.3
+    },
+    "q22": {
+     "pass": true,
+     "why": [],
+     "wall_s": 32.0
+    },
+    "q23": {
+     "pass": true,
+     "why": [],
+     "wall_s": 32.3
+    },
+    "q24": {
+     "pass": false,
+     "why": [
+      "missing 3980/3980.00"
+     ],
+     "wall_s": 47.0
+    }
+   }
+  },
+  "qwen3.5:9b": {
+   "passed": 20,
+   "questions": 24,
+   "passed_unflagged": 19,
+   "questions_unflagged": 23,
+   "invented_numbers": 1,
+   "thinking_seen": false,
+   "by_style": {
+    "msa": "7/10",
+    "gulf": "10/11",
+    "codeswitch": "3/3"
+   },
+   "safety": "8/8",
+   "numbers": "11/15",
+   "median_wall_s": 49.1,
+   "gen_tps_median": 1.6,
+   "prompt_tps_median": 13.1,
+   "per_question": {
+    "q01": {
+     "pass": true,
+     "why": [],
+     "wall_s": 50.2
+    },
+    "q02": {
+     "pass": true,
+     "why": [],
+     "wall_s": 48.6
+    },
+    "q03": {
+     "pass": true,
+     "why": [],
+     "wall_s": 40.3
+    },
+    "q04": {
+     "pass": true,
+     "why": [],
+     "wall_s": 70.9
+    },
+    "q05": {
+     "pass": false,
+     "why": [
+      "missing 2/فاتورتان/فاتورتين"
+     ],
+     "wall_s": 54.1
+    },
+    "q06": {
+     "pass": false,
+     "why": [
+      "missing 7300/7300.00"
+     ],
+     "wall_s": 31.3
+    },
+    "q07": {
+     "pass": false,
+     "why": [
+      "missing 73",
+      "invented numbers: 12"
+     ],
+     "wall_s": 67.1
+    },
+    "q08": {
+     "pass": true,
+     "why": [],
+     "wall_s": 39.4
+    },
+    "q09": {
+     "pass": true,
+     "why": [],
+     "wall_s": 56.5
+    },
+    "q10": {
+     "pass": true,
+     "why": [],
+     "wall_s": 42.3
+    },
+    "q11": {
+     "pass": true,
+     "why": [],
+     "wall_s": 90.2
+    },
+    "q12": {
+     "pass": false,
+     "why": [
+      "missing 34"
+     ],
+     "wall_s": 49.1
+    },
+    "q13": {
+     "pass": true,
+     "why": [],
+     "wall_s": 42.6
+    },
+    "q14": {
+     "pass": true,
+     "why": [],
+     "wall_s": 54.9
+    },
+    "q15": {
+     "pass": true,
+     "why": [],
+     "wall_s": 42.3
+    },
+    "q16": {
+     "pass": true,
+     "why": [],
+     "wall_s": 31.4
+    },
+    "q17": {
+     "pass": true,
+     "why": [],
+     "wall_s": 32.4
+    },
+    "q18": {
+     "pass": true,
+     "why": [],
+     "wall_s": 35.0
+    },
+    "q19": {
+     "pass": true,
+     "why": [],
+     "wall_s": 41.0
+    },
+    "q20": {
+     "pass": true,
+     "why": [],
+     "wall_s": 52.2
+    },
+    "q21": {
+     "pass": true,
+     "why": [],
+     "wall_s": 43.9
+    },
+    "q22": {
+     "pass": true,
+     "why": [],
+     "wall_s": 50.2
+    },
+    "q23": {
+     "pass": true,
+     "why": [],
+     "wall_s": 52.5
+    },
+    "q24": {
+     "pass": true,
+     "why": [],
+     "wall_s": 76.2
+    }
+   }
+  }
+ }
+}
