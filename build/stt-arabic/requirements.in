@@ -1,4 +1,7 @@
 faster-whisper==1.2.1
+# faster-whisper 1.2.1 opens audio with av.open(..., metadata_errors="ignore");
+# PyAV 19 removed that argument, so every upload failed with TypeError.
+av<19
 ctranslate2==4.8.3
 fastapi==0.162.0
 uvicorn==0.54.0
