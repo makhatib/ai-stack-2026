@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # aistack-docling-arabic — Docling on CPU with Arabic OCR (NOM-415, profile docs-arabic).
 #
 # BASE is the official docling-serve-cpu image, digest-pinned in versions.env
