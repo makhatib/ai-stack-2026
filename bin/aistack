@@ -686,6 +686,74 @@ PY
   chmod 0600 "$env"
 }
 
+# --- optional-profile settings (NOM-415) ------------------------------------
+
+render_profile_env() {
+  # Derive the settings that DEPEND ON WHICH PROFILES ARE ON into one delimited
+  # block in .env, from COMPOSE_PROFILES and nothing else.  compose.yaml reads
+  # them with `${AISTACK_*:-}` defaults, so with no optional profile the block
+  # is empty and Open WebUI behaves exactly as the MVP did.
+  #
+  # Run by `pin` (so by the installer) AND by `up`, because COMPOSE_PROFILES is
+  # an ordinary line in .env that an owner may edit by hand: a profile turned
+  # on there must not start a service Open WebUI does not use.
+  local env="$ROOT/.env"
+  [ -f "$env" ] || die ".env not found — run 'aistack install' first"
+  python3 - "$env" "${COMPOSE_PROFILES-__from_env__}" <<'PY'
+import re, sys
+env, override = sys.argv[1], sys.argv[2]
+text = open(env).read()
+if override == "__from_env__":
+    m = re.search(r"^COMPOSE_PROFILES=(.*)$", text, re.M)
+    profiles = (m.group(1) if m else "").strip().strip("'\"")
+else:
+    profiles = override
+on = {p.strip() for p in profiles.split(",") if p.strip()}
+lines = []
+if "docs-arabic" in on:
+    lines += [
+        "AISTACK_DOCLING_URL=http://docling-arabic:5001",
+        # Tesseract with the Arabic model first, then English; OCR runs only
+        # where a page has no text layer, so a born-digital PDF is not re-read.
+        "AISTACK_DOCLING_PARAMS='{\"do_ocr\": true, \"force_ocr\": false, \"ocr_engine\": \"tesseract\", \"ocr_lang\": [\"ara\", \"eng\"]}'",
+    ]
+if "voice-arabic" in on:
+    lines += [
+        "AISTACK_STT_ENGINE=openai",
+        "AISTACK_STT_URL=http://stt-arabic:8000/v1",
+        "AISTACK_STT_MODEL=whisper-ar",
+        "AISTACK_TTS_ENGINE=openai",
+        "AISTACK_TTS_URL=http://tts-arabic:8000/v1",
+        "AISTACK_TTS_MODEL=chatterbox-ar",
+        "AISTACK_TTS_VOICE=default",
+    ]
+block = ("# AISTACK-PROFILE-ENV:BEGIN\n"
+         "# DERIVED FROM COMPOSE_PROFILES BY `aistack pin|up`.  DO NOT EDIT.\n"
+         + "".join(l + "\n" for l in lines)
+         + "# AISTACK-PROFILE-ENV:END\n")
+pat = re.compile(r"# AISTACK-PROFILE-ENV:BEGIN.*?# AISTACK-PROFILE-ENV:END\n", re.S)
+text = pat.sub(block, text) if pat.search(text) else text.rstrip("\n") + "\n\n" + block
+open(env, "w").write(text)
+print("profile settings: %s" % (", ".join(sorted(on & {"docs-arabic", "voice-arabic"})) or "none"))
+PY
+  chmod 0600 "$env"
+}
+
+cmd_openclaw() {
+  # OpenClaw has no web UI here and no published port: its gateway listens on
+  # loopback INSIDE its own container.  This is the owner's way in.
+  #   aistack openclaw agent --agent main --message "..."
+  #   aistack openclaw sandbox explain
+  docker ps --format '{{.Names}}' | grep -qx aistack-openclaw \
+    || die "openclaw is not running.  Add it to COMPOSE_PROFILES in .env, then 'aistack up'."
+  local tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-it)
+  # The CLI cannot resolve the gateway token's secret reference itself, so it
+  # is read inside the container from the gateway's private copy; it never
+  # passes through the host's argv or environment.
+  docker exec "${tty[@]}" aistack-openclaw \
+    sh -c 'OPENCLAW_GATEWAY_TOKEN="$(cat /home/node/.secrets/openclaw_gateway_token)" exec node /app/openclaw.mjs "$@"' openclaw "$@"
+}
+
 # --- commands ---------------------------------------------------------------
 
 cmd_up() {
@@ -802,6 +870,7 @@ _up() {
 Serving will not start while drill containers exist.  Run 'aistack drill clean'." || return 1
   fi
   info "Starting (profiles: ${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' "$ROOT/.env" 2>/dev/null | cut -d= -f2-)})"
+  render_profile_env || return 1
   # `compose up` CAN FAIL BEFORE THE HEALTH GATE EVER RUNS, and when it does
   # its last line names the wrong thing.
   #
@@ -1111,7 +1180,7 @@ If it will not start, 'docker logs $c | head -40' shows what first boot did."
   fi
 }
 
-cmd_pin()    { render_pins; }
+cmd_pin()    { render_pins; render_profile_env; }
 cmd_update() { "$ROOT/scripts/update.sh" "$@"; }
 cmd_rollback(){ "$ROOT/scripts/rollback.sh" "$@"; }
 cmd_backup() { with_lifecycle_lock sh with_helper_lock "$ROOT/scripts/backup.sh" "$@"; }
@@ -1225,7 +1294,8 @@ aistack — AI Stack 2026
   user code           the one-time code Authelia issued for an enrolment
                       (there is no SMTP, so this is how it reaches you)
 
-  pin                 re-render versions.env into .env
+  pin                 re-render versions.env (and the profile settings) into .env
+  openclaw ARGS...    run the OpenClaw CLI inside its container (profile openclaw)
   update              backup, pull by digest, up, bounded health gate
   rollback            return to the previous pins
 
@@ -1292,6 +1362,7 @@ case "${1:-}" in
   render-strings) shift; cmd_render_strings "$@" ;;
   test) shift; cmd_test "$@" ;;
   samples) shift; cmd_samples "$@" ;;
+  openclaw) shift; cmd_openclaw "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$1' (try: aistack help)" ;;
 esac

@@ -5,6 +5,8 @@
 # count that exists here and not there fails the PR (I1, I1b, I3, I11).
 #
 # SCOPE (v2, NOM-413): core 14 + knowledge 1 + tracing 5 = 20 containers.
+# NOM-415 adds the optional profiles: openclaw 2 + voice-arabic 2 + docs-arabic 1
+# = 25 when every profile is on.
 # The MVP was core 8 + knowledge 1 = 9.  The `agents` group is NOT here:
 # gate G-AGENTS failed on 2026-10-18 against the pinned agentgateway digest
 # (see gate/G-AGENTS-result.json), so per final-design §0.1/§2.1/F4 it leaves
@@ -332,7 +334,9 @@ services:
     image: ${OPEN_WEBUI_IMAGE:?pin missing}:${OPEN_WEBUI_TAG:?pin missing}@${OPEN_WEBUI_DIGEST:?pin missing}
     container_name: aistack-open-webui
     # No `agents` bridge: G-AGENTS failed, so there is no gateway to call.
-    networks: [apps, gateway, data, parse-owui]
+    # voice-stt, voice-tts and parse-ar are the optional profiles' pairwise
+    # bridges (NOM-415); with a profile off, its bridge has no other member.
+    networks: [apps, gateway, data, parse-owui, voice-stt, voice-tts, parse-ar]
     volumes:
       - openwebui-data:/app/backend/data
     tmpfs:
@@ -355,7 +359,24 @@ services:
       # RAG goes through Docling into pgvector over the one `parse` bridge.
       VECTOR_DB: pgvector
       CONTENT_EXTRACTION_ENGINE: docling
-      DOCLING_SERVER_URL: http://docling-serve:5001
+      # docs-arabic switches the parser to docling-arabic with Arabic OCR; the
+      # values come from the AISTACK-PROFILE-ENV block in .env, which
+      # `aistack pin` derives from COMPOSE_PROFILES (NOM-415).  Empty = MVP.
+      DOCLING_SERVER_URL: ${AISTACK_DOCLING_URL:-http://docling-serve:5001}
+      DOCLING_PARAMS: ${AISTACK_DOCLING_PARAMS:-}
+      # voice-arabic: Open WebUI's microphone and read-aloud go to stt-arabic
+      # and tts-arabic.  Same derived block; empty = Open WebUI's defaults.
+      AUDIO_STT_ENGINE: ${AISTACK_STT_ENGINE:-}
+      AUDIO_STT_OPENAI_API_BASE_URL: ${AISTACK_STT_URL:-}
+      AUDIO_STT_MODEL: ${AISTACK_STT_MODEL:-}
+      AUDIO_TTS_ENGINE: ${AISTACK_TTS_ENGINE:-}
+      AUDIO_TTS_OPENAI_API_BASE_URL: ${AISTACK_TTS_URL:-}
+      AUDIO_TTS_MODEL: ${AISTACK_TTS_MODEL:-}
+      AUDIO_TTS_VOICE: ${AISTACK_TTS_VOICE:-}
+      # NOT a secret, and that is the point: without these Open WebUI sends its
+      # own LiteLLM key as the bearer to whatever speech URL is configured.
+      AUDIO_STT_OPENAI_API_KEY: "no-key"
+      AUDIO_TTS_OPENAI_API_KEY: "no-key"
       DATABASE_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD:?missing}@postgres:5432/openwebui
       PGVECTOR_DB_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD:?missing}@postgres:5432/openwebui
       # Authelia fronts this; Open WebUI's own signup surface stays shut.
@@ -425,6 +446,10 @@ services:
       tracing: {}
       llm:
         ipv4_address: 172.31.254.2
+      # openclaw's only route to a model (NOM-415).  Fixed address for the
+      # same gVisor-DNS reason as `llm`.
+      oc-llm:
+        ipv4_address: 172.31.239.2
     volumes:
       - ./config/litellm/config.yaml:/app/config.yaml:ro
     tmpfs:
@@ -966,6 +991,204 @@ services:
       retries: 5
       start_period: 10s
 
+  # ===========================================================================
+  # Optional profiles (NOM-415, DoD 2.4).  Each is OFF unless its name is in
+  # COMPOSE_PROFILES; the installer asks.  None publishes a port, none has a
+  # route off the host, and each sits on pairwise /29s with its one caller.
+  # `gpu` is NOT here: no 24 GB GPU test machine (input I5), so it is Later.
+  # ===========================================================================
+
+  # --- openclaw -------------------------------------------------------------
+  openclaw:
+    <<: *hardened
+    image: ${OPENCLAW_IMAGE:?pin missing}:${OPENCLAW_TAG:?pin missing}@${OPENCLAW_DIGEST:?pin missing}
+    container_name: aistack-openclaw
+    profiles: [openclaw]
+    # The gateway itself also runs under gVisor: plugins run in its process.
+    # gVisor cannot use Docker's DNS (NOM-413), so its two peers are pinned.
+    runtime: runsc
+    user: "1000:1000"
+    networks:
+      oc-llm:
+        ipv4_address: 172.31.239.3
+      oc-sandbox:
+        ipv4_address: 172.31.238.3
+    extra_hosts:
+      - "litellm:172.31.239.2"
+      - "openclaw-sandbox:172.31.238.2"
+    volumes:
+      - openclaw-data:/home/node/.openclaw
+      # The repo's config is the source of truth.  OpenClaw rewrites its own
+      # config file (doctor migrations, .bak, last-good), so it is copied into
+      # the state volume at EVERY start: a change made at run time does not
+      # survive a restart, and the file in git is what runs.
+      - ./config/openclaw/openclaw.json:/opt/aistack/openclaw.json:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      # OpenClaw refuses a temp dir it does not own 0700 and falls back here;
+      # with a read-only root this has to exist or the gateway will not start.
+      - /home/node/.cache:rw,noexec,nosuid,size=64m,uid=1000,gid=1000,mode=0700
+      # OpenClaw refuses a secret file that is group-readable or not its own
+      # ("insecure-permissions"), and so does ssh for its key.  The stack's
+      # secrets are root:<gid> 0640, so they are copied at every start into
+      # this private tmpfs as 0600 owned by the gateway user.  RAM only.
+      - /home/node/.secrets:rw,noexec,nosuid,size=1m,uid=1000,gid=1000,mode=0700
+    entrypoint: ["tini", "-s", "--"]
+    command:
+      - sh
+      - -c
+      - >-
+        umask 077 &&
+        for s in openclaw_gateway_token openclaw_litellm_key openclaw_sandbox_key openclaw_sandbox_known_hosts;
+        do cat /run/secrets/$$s > /home/node/.secrets/$$s || exit 1; done &&
+        cp /opt/aistack/openclaw.json /home/node/.openclaw/openclaw.json &&
+        exec node /app/openclaw.mjs gateway
+    environment:
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      NODE_ENV: production
+    secrets:
+      - source: openclaw_gateway_token
+      - source: openclaw_litellm_key
+      - source: openclaw_sandbox_key
+      - source: openclaw_sandbox_known_hosts
+    depends_on:
+      litellm:
+        condition: service_healthy
+      openclaw-sandbox:
+        condition: service_healthy
+    # Measured: OOM-killed at 2g during one agent turn (gVisor counts its own
+    # sentry in the cgroup).  Peak in the NOM-415 profiles doc.
+    mem_limit: 3g
+    cpus: "2.0"
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD", "node", "/app/dist/docker-healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  openclaw-sandbox:
+    <<: *hardened
+    build:
+      context: ./build/openclaw-sandbox
+      args:
+        BASE: ${PYBASE_IMAGE:?pin missing}:${PYBASE_TAG:?pin missing}@${PYBASE_DIGEST:?pin missing}
+    image: aistack-local/openclaw-sandbox:${AISTACK_BUILD_TAG:-v2}
+    pull_policy: never
+    container_name: aistack-openclaw-sandbox
+    profiles: [openclaw]
+    # Everything the OpenClaw agent EXECUTES runs here, in a user-space kernel.
+    runtime: runsc
+    networks:
+      oc-sandbox:
+        ipv4_address: 172.31.238.2
+    tmpfs:
+      - /tmp:rw,nosuid,size=128m
+      # The agent's workspace.  exec is allowed: running code is the point.
+      # It is a tmpfs, so a restart starts clean.
+      - /workspace:rw,nosuid,size=512m,uid=10002,gid=10002
+      - /home/sandbox:rw,nosuid,size=16m,uid=10002,gid=10002
+    secrets:
+      - source: openclaw_sandbox_hostkey
+      - source: openclaw_sandbox_authorized_keys
+    mem_limit: 1g
+    cpus: "1.0"
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket,sys; s=socket.create_connection(('127.0.0.1',2222),3); sys.exit(0 if s.recv(4)==b'SSH-' else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # --- voice-arabic ---------------------------------------------------------
+  stt-arabic:
+    <<: *hardened
+    build:
+      context: ./build/stt-arabic
+      args:
+        BASE: ${PYBASE_IMAGE:?pin missing}:${PYBASE_TAG:?pin missing}@${PYBASE_DIGEST:?pin missing}
+    image: aistack-local/stt-arabic:${AISTACK_BUILD_TAG:-v2}
+    pull_policy: never
+    container_name: aistack-stt-arabic
+    profiles: [voice-arabic]
+    networks: [voice-stt]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    environment:
+      STT_THREADS: "4"
+      STT_LANGUAGE: ar
+    mem_limit: 3g
+    cpus: "4.0"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  tts-arabic:
+    <<: *hardened
+    build:
+      context: ./build/tts-arabic
+      args:
+        BASE: ${PYBASE_IMAGE:?pin missing}:${PYBASE_TAG:?pin missing}@${PYBASE_DIGEST:?pin missing}
+    image: aistack-local/tts-arabic:${AISTACK_BUILD_TAG:-v2}
+    pull_policy: never
+    container_name: aistack-tts-arabic
+    profiles: [voice-arabic]
+    networks: [voice-tts]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    environment:
+      TTS_THREADS: "4"
+      TTS_LANGUAGE: ar
+    mem_limit: 6g
+    cpus: "4.0"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  # --- docs-arabic ----------------------------------------------------------
+  docling-arabic:
+    <<: *hardened
+    build:
+      context: ./build/docling-arabic
+      args:
+        BASE: ${DOCLING_CPU_IMAGE:?pin missing}:${DOCLING_CPU_TAG:?pin missing}@${DOCLING_CPU_DIGEST:?pin missing}
+    image: aistack-local/docling-arabic:${AISTACK_BUILD_TAG:-v2}
+    pull_policy: never
+    container_name: aistack-docling-arabic
+    profiles: [docs-arabic]
+    # Same shape as docling-serve: one pairwise /29 with Open WebUI, bytes in,
+    # text out, no egress.  When this profile is on, Open WebUI's parser IS
+    # this service (see the AISTACK-PROFILE-ENV block `aistack pin` writes).
+    networks: [parse-ar]
+    volumes:
+      - docling-arabic-models:/opt/app-root/src/.cache
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "false"
+      DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS: "false"
+      DOCLING_SERVE_MAX_SYNC_WAIT: "300"
+      UVICORN_HOST: "0.0.0.0"
+      UVICORN_PORT: "5001"
+      OMP_NUM_THREADS: "4"
+    mem_limit: 4g
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
 # ---------------------------------------------------------------------------
 # Bridges.  `internal:` is mandated by each bridge's own `zone_policy` in
 # manifest.yaml, NOT by its class — ui-comfy and ui-vpn are both class `ui` and
@@ -1062,6 +1285,45 @@ networks:
     name: aistack-tracing
     internal: true          # zone_policy: contained
     enable_ipv6: false
+  # ---- optional profiles (NOM-415) ----
+  # Pairwise and internal, like parse-owui.  Open WebUI and LiteLLM are attached
+  # whether or not the profile is on, so a bridge can exist with one member and
+  # nothing to talk to; that is the same as parse-owui without `knowledge`.
+  oc-llm:
+    name: aistack-oc-llm
+    internal: true          # zone_policy: contained — openclaw + litellm
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.239.0/29
+  oc-sandbox:
+    name: aistack-oc-sandbox
+    internal: true          # zone_policy: contained — openclaw + openclaw-sandbox
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.238.0/29
+  voice-stt:
+    name: aistack-voice-stt
+    internal: true          # zone_policy: contained — open-webui + stt-arabic
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.237.0/29
+  voice-tts:
+    name: aistack-voice-tts
+    internal: true          # zone_policy: contained — open-webui + tts-arabic
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.236.0/29
+  parse-ar:
+    name: aistack-parse-ar
+    internal: true          # zone_policy: contained — open-webui + docling-arabic
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.235.0/29
 
   # `egress` IS DELIBERATELY NOT DECLARED HERE.
   #
@@ -1089,6 +1351,8 @@ volumes:
   mem0-data:       { name: aistack-mem0-data }
   clickhouse-data: { name: aistack-clickhouse-data }
   minio-data:      { name: aistack-minio-data }
+  openclaw-data:   { name: aistack-openclaw-data }
+  docling-arabic-models: { name: aistack-docling-arabic-models }
 
 # ---------------------------------------------------------------------------
 # File-based secrets at /run/secrets/<name>, for everything that supports a
@@ -1128,3 +1392,16 @@ secrets:
     file: ./secrets/crawl4ai_api_token
   mcp_crawl4ai_token:
     file: ./secrets/mcp_crawl4ai_token
+  # ---- optional profiles (NOM-415) ----
+  openclaw_gateway_token:
+    file: ./secrets/openclaw_gateway_token
+  openclaw_litellm_key:
+    file: ./secrets/openclaw_litellm_key
+  openclaw_sandbox_key:
+    file: ./secrets/openclaw_sandbox_key
+  openclaw_sandbox_known_hosts:
+    file: ./secrets/openclaw_sandbox_known_hosts
+  openclaw_sandbox_hostkey:
+    file: ./secrets/openclaw_sandbox_hostkey
+  openclaw_sandbox_authorized_keys:
+    file: ./secrets/openclaw_sandbox_authorized_keys

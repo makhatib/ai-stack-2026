@@ -555,6 +555,39 @@ else
 fi
 apply_mode "$HERMES_ENV" hermes
 
+# --- openclaw (profile `openclaw`, NOM-415; generated always, like tracing) ---
+# Same rules: reused, never rotated, never printed.
+gen openclaw_gateway_token openclaw hex32
+gen key_openclaw          operator hex32
+if [ ! -s "$SECRETS/openclaw_litellm_key" ] || [ "$(cat "$SECRETS/openclaw_litellm_key")" != "sk-$(cat "$SECRETS/key_openclaw")" ]; then
+  printf '%s' "sk-$(cat "$SECRETS/key_openclaw")" > "$SECRETS/openclaw_litellm_key"
+  log "  sync    $SECRETS/openclaw_litellm_key (from key_openclaw)"
+fi
+apply_mode "$SECRETS/openclaw_litellm_key" openclaw
+# Two ed25519 pairs: the gateway's client key (the sandbox authorises its
+# public half) and the sandbox's host key (the gateway pins its public half in
+# known_hosts, so strictHostKeyChecking has something real to check).  Made by
+# openssl, re-encoded by scripts/ssh-keypair.py: no ssh-keygen on the host.
+ssh_pair() {
+  local priv="$SECRETS/$1" pub="$SECRETS/$1.pub"
+  if [ -s "$priv" ] && [ -s "$pub" ]; then
+    log "  reuse   $priv"
+  else
+    python3 "$ROOT/scripts/ssh-keypair.py" "$priv" "$pub" "aistack-$1"
+    log "  create  $priv (+ .pub)"
+  fi
+}
+ssh_pair openclaw_sandbox_key
+ssh_pair openclaw_sandbox_hostkey
+apply_mode "$SECRETS/openclaw_sandbox_key"     openclaw
+apply_mode "$SECRETS/openclaw_sandbox_hostkey" openclaw-sandbox
+cp "$SECRETS/openclaw_sandbox_key.pub" "$SECRETS/openclaw_sandbox_authorized_keys"
+apply_mode "$SECRETS/openclaw_sandbox_authorized_keys" openclaw-sandbox
+printf '[openclaw-sandbox]:2222 %s\n' "$(cut -d' ' -f1-2 "$SECRETS/openclaw_sandbox_hostkey.pub")" > "$SECRETS/openclaw_sandbox_known_hosts"
+apply_mode "$SECRETS/openclaw_sandbox_known_hosts" openclaw
+claim_for_operator "$SECRETS/openclaw_sandbox_key.pub" 0600
+claim_for_operator "$SECRETS/openclaw_sandbox_hostkey.pub" 0600
+
 # --- tracing (profile `tracing`; generated always so enabling it is one flag) --
 # E12: Langfuse, ClickHouse and MinIO have no _FILE indirection, so these are
 # host-side env_files exactly like E6.

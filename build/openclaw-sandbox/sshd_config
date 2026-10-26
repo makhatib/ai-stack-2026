@@ -1,0 +1,28 @@
+# sshd for the OpenClaw sandbox (NOM-415).  Runs as uid 10002, not root.
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /run/secrets/openclaw_sandbox_hostkey
+AuthorizedKeysFile /run/secrets/openclaw_sandbox_authorized_keys
+PidFile /tmp/sshd.pid
+AllowUsers sandbox
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+UsePAM no
+# A key-only login for one fixed client.  No forwarding of any kind: the agent
+# gets a shell here, not a tunnel to somewhere else.
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+GatewayPorts no
+PermitUserEnvironment no
+PermitUserRC no
+PrintMotd no
+# The secret files are root-owned 0640 with the sandbox group; StrictModes
+# accepts root ownership.
+StrictModes yes
+LogLevel INFO
+Subsystem sftp internal-sftp

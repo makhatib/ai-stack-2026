@@ -1,0 +1,5 @@
+# Arabic OCR model for Tesseract, pinned to one commit (NOM-415).
+# repo  revision  file  sha256  licence — the Dockerfile's ADD --checksum must
+# name the same sha256 (I19).  tessdata_best is Apache-2.0 (repo LICENSE,
+# re-read 2026-10-26).
+tesseract-ocr/tessdata_best e12c65a915945e4c28e237a9b52bc4a8f39a0cec ara.traineddata ab9d157d8e38ca00e7e39c7d5363a5239e053f5b0dbdb3167dde9d8124335896 Apache-2.0

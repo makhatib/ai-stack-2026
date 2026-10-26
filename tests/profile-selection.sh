@@ -30,7 +30,7 @@ cd "$ROOT"
 RC=0
 TOTAL=0
 MISSING_MARK=__NOT_SET__
-MIN_ASSERTIONS=13
+MIN_ASSERTIONS=24
 
 TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
 
@@ -47,6 +47,7 @@ refuse() {
 KEYS="$TMPD/keys.sh"
 FN="$TMPD/parse_answers.sh"
 BLOCK="$TMPD/block.sh"
+OPT="$TMPD/optional.sh"
 
 grep -n '^VALID_KEYS=' install.sh > "$TMPD/keys.hits" || true
 [ "$(wc -l < "$TMPD/keys.hits")" = 1 ] \
@@ -64,8 +65,22 @@ sed -n '/^if \[ -z "${ANS\[COMPOSE_PROFILES\]/,/^fi$/p' install.sh > "$BLOCK"
 grep -q 'NON_INTERACTIVE' "$BLOCK" \
   || refuse "the extracted selection block does not mention NON_INTERACTIVE"
 
-printf 'profile selection (extracted from install.sh: %s-line key list, %s-line parser, %s-line selection block)\n' \
-  "$(wc -l < "$KEYS")" "$(wc -l < "$FN")" "$(wc -l < "$BLOCK")"
+# NOM-415: the optional-profile questions (asked inside the block) and the
+# name check (run on every path after it).  Both are extracted, not retyped.
+{
+  grep '^KNOWN_PROFILES=' install.sh
+  sed -n '/^ask_optional_profiles() {$/,/^}$/p' install.sh
+  sed -n '/^check_profiles() {$/,/^}$/p' install.sh
+} > "$OPT"
+[ "$(grep -c '^KNOWN_PROFILES=' install.sh)" = 1 ] || refuse "install.sh does not have exactly one KNOWN_PROFILES line"
+grep -q '^ask_optional_profiles() {$' "$OPT" || refuse "ask_optional_profiles() could not be extracted from install.sh"
+grep -q '^check_profiles() {$' "$OPT" || refuse "check_profiles() could not be extracted from install.sh"
+grep -q '^check_profiles "${ANS\[COMPOSE_PROFILES\]}"$' install.sh \
+  || refuse "install.sh no longer calls check_profiles on the selected profiles"
+grep -q 'ask_optional_profiles' "$BLOCK" || refuse "the selection block no longer asks the optional profiles"
+
+printf 'profile selection (extracted from install.sh: %s-line key list, %s-line parser, %s-line selection block, %s-line optional profiles)\n' \
+  "$(wc -l < "$KEYS")" "$(wc -l < "$FN")" "$(wc -l < "$BLOCK")" "$(wc -l < "$OPT")"
 
 # ---------------------------------------------------------------------------
 # The harness.  install.sh's own `set -euo pipefail` is reproduced, because
@@ -82,8 +97,10 @@ build_runner() {  # $1 = block file, $2 = runner path
     printf '%s\n' 'declare -A ANS=()'
     cat "$KEYS"
     cat "$FN"
+    cat "$OPT"
     printf '%s\n' 'if [ -n "${ANSWERS:-}" ]; then parse_answers "$ANSWERS"; fi'
     cat "$1"
+    printf '%s\n' 'check_profiles "${ANS[COMPOSE_PROFILES]}"'
     printf '%s\n' 'printf "%s\n" "${ANS[COMPOSE_PROFILES]-'"$MISSING_MARK"'}"'
   } > "$2"
 }
@@ -158,15 +175,27 @@ printf '\n  B. interactive screen\n'
 
 case_ "choice 1 selects Starter" \
       tty - "1
+n
+n
+n
 " STARTER
 case_ "choice 2 selects AI Automation" \
       tty - "2
+n
+n
+n
 " knowledge
 case_ "bare Enter takes the [2] default" \
       tty - "
+n
+n
+n
 " knowledge
 case_ "an unrecognised choice takes the [2] default" \
       tty - "9
+n
+n
+n
 " knowledge
 
 # An answered key must not be re-asked.  Each of these feeds the keystroke
@@ -184,6 +213,63 @@ case_ "answer file COMPOSE_PROFILES=knowledge is not re-asked" \
 # No stdin and no --non-interactive must stop, not pick something.
 case_ "interactive with stdin closed refuses" \
       tty - - REFUSED
+
+# ---------------------------------------------------------------------------
+# D  The optional profiles (NOM-415).  Each is its own yes/no, default no,
+#    asked only on the interactive path; docs-arabic replaces `knowledge`'s
+#    English-only parser; every name, from either path, must be known.
+# ---------------------------------------------------------------------------
+printf '\n  D. optional profiles (NOM-415)\n'
+
+case_ "Starter + openclaw" \
+      tty - "1
+y
+n
+n
+" openclaw
+case_ "AI Automation + voice-arabic" \
+      tty - "2
+n
+y
+n
+" knowledge,voice-arabic
+case_ "docs-arabic replaces knowledge" \
+      tty - "2
+n
+n
+y
+" docs-arabic
+case_ "all three on Starter" \
+      tty - "1
+yes
+Y
+y
+" openclaw,voice-arabic,docs-arabic
+case_ "anything but y/yes is no" \
+      tty - "2
+sure
+1
+N
+" knowledge
+case_ "stdin ends during the optional questions: refuse" \
+      tty - "2
+y
+" REFUSED
+case_ "answer file with every optional profile" \
+      ni "COMPOSE_PROFILES=knowledge,tracing,openclaw,voice-arabic,docs-arabic
+" - knowledge,tracing,openclaw,voice-arabic,docs-arabic
+case_ "answer file naming gpu is refused (Later)" \
+      ni "COMPOSE_PROFILES=knowledge,gpu
+" - REFUSED
+case_ "answer file with a typo is refused" \
+      ni "COMPOSE_PROFILES=voice-arabc
+" - REFUSED
+case_ "answer file profiles are not re-asked" \
+      tty "COMPOSE_PROFILES=openclaw
+" "y
+y
+y
+" openclaw
 
 # ---------------------------------------------------------------------------
 # C  The drill.  Rebuild the pre-NOM-398 form of the SHIPPED block and

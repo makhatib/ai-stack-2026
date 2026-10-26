@@ -20,10 +20,14 @@ COMPOSE=(docker compose)
 [ -n "${AISTACK_COMPOSE_PROJECT:-}" ] && COMPOSE+=(-p "$AISTACK_COMPOSE_PROJECT")
 
 # app : models : mcp servers : requests/min : tokens/day
+# openclaw (NOM-415) gets the `agent` model and NO MCP servers: its tools are
+# its own sandboxed exec/file tools, and the DoD's one MCP allowlist is shared by
+# Hermes, n8n and Open WebUI.  Its key exists whether or not the profile is on.
 SPEC='mem0:agent,embed::60:200000
 hermes:agent:web,n8n:60:200000
 n8n:agent,local-chat,local-chat-large,embed,local-embed:web:60:200000
-openwebui:agent,local-chat,local-chat-large,embed,local-embed:web,n8n:60:200000'
+openwebui:agent,local-chat,local-chat-large,embed,local-embed:web,n8n:60:200000
+openclaw:agent::60:200000'
 
 JSON="["; sep=""
 while IFS=: read -r app models mcp rpm tokens; do

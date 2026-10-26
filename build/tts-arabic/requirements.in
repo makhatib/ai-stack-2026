@@ -1,0 +1,25 @@
+# aistack-tts-arabic — what chatterbox-tts 0.1.7 imports at run time, pinned as
+# its own METADATA pins them, MINUS gradio (its demo UI, ~100 MB and a web
+# server we do not run), spacy-pkuseg (Chinese) and pykakasi (Japanese).
+# chatterbox-tts itself is installed --no-deps and is appended to the lock by
+# hand with its PyPI sha256, because compiling it here would pull gradio back.
+torch==2.6.0+cpu
+torchaudio==2.6.0+cpu
+transformers==5.2.0
+diffusers==0.29.0
+librosa==0.11.0
+s3tokenizer==0.3.0
+conformer==0.3.2
+safetensors==0.5.3
+resemble-perth==1.0.1
+# resemble-perth 1.0.1 imports pkg_resources, which setuptools removed in 81.
+# Without it the audio watermarker silently becomes None and the model refuses
+# to load (measured, NOM-415).  The watermark marks the speech as synthetic,
+# which we want, so setuptools is held below 81 rather than the mark dropped.
+setuptools<81
+numpy<2.0.0
+pyloudnorm
+omegaconf
+fastapi==0.162.0
+uvicorn==0.54.0
+huggingface-hub

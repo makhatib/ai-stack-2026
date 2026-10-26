@@ -1,0 +1,12 @@
+# Arabic speech-to-text weights, pinned to one Hugging Face commit (NOM-415).
+# repo  revision  file  sha256  licence — the build refuses any mismatch, and any licence
+# not on the commercial-safe list in ci/invariants.py (I19).
+# Omar10lfc/whisper-large-v3-turbo-arabic-ct2-int8: the same author's CT2 INT8
+# conversion of Omar10lfc/whisper-large-v3-turbo-arabic (NOM-412 pins §2).  Both
+# cards say apache-2.0 and both list only Common Voice 17 (CC0) as training data
+# (re-read 2026-10-26 at the revision below).
+Omar10lfc/whisper-large-v3-turbo-arabic-ct2-int8 873028c03839f1a84a883a1e7e536f0041873154 config.json b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e Apache-2.0
+Omar10lfc/whisper-large-v3-turbo-arabic-ct2-int8 873028c03839f1a84a883a1e7e536f0041873154 model.bin efa94de178f110f53be1c951f6cfdd81b6aab2681adbbee1f18b77ca2e47f248 Apache-2.0
+Omar10lfc/whisper-large-v3-turbo-arabic-ct2-int8 873028c03839f1a84a883a1e7e536f0041873154 tokenizer.json 5c1bf30c9e716e1477bedef846b01be0013daecb89e9e3ef7ab89b23c178df1b Apache-2.0
+Omar10lfc/whisper-large-v3-turbo-arabic-ct2-int8 873028c03839f1a84a883a1e7e536f0041873154 vocabulary.json c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1 Apache-2.0
+Omar10lfc/whisper-large-v3-turbo-arabic-ct2-int8 873028c03839f1a84a883a1e7e536f0041873154 processor_config.json 8efb801da889b24fc64a28d0af16d376852508aefb97d497a4c6d2200b114a33 Apache-2.0

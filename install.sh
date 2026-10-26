@@ -117,6 +117,47 @@ valid_bind_addr() {
   [[ "$1" =~ ^[0-9.]+$ || "$1" =~ ^[0-9a-fA-F:]+$ ]] || return 1
 }
 
+# OPTIONAL PROFILES (NOM-415, DoD 2.4).  Each is a yes/no, default NO, and each
+# adds containers only when it is answered yes.  RAM figures are MEASURED on
+# the sandbox (NOM-415 `profiles` doc), idle + while working; they are not a
+# promise for another machine.  An answer file sets COMPOSE_PROFILES directly
+# and is never asked these.
+KNOWN_PROFILES="knowledge tracing openclaw voice-arabic docs-arabic"
+ask_optional_profiles() {
+  local a
+  say ""
+  say "  Optional profiles (each one is off unless you say yes):"
+  say "    openclaw      OpenClaw agent, tools in a gVisor sandbox, no internet.  ~1.2 GB idle, 1.8 GB working"
+  say "    voice-arabic  Arabic speech-to-text and text-to-speech in Open WebUI.  ~__RAM_VOICE__"
+  say "    docs-arabic   Arabic OCR for scanned documents (replaces the English-only parser).  ~1.1 GB idle, 2.1 GB working"
+  say "    gpu           NOT OFFERED: no 24 GB GPU test machine, so no GPU path is tested."
+  for p in openclaw voice-arabic docs-arabic; do
+    read -r -p "  Add $p? [y/N]: " a
+    case "$a" in
+      y|Y|yes|YES) ANS[COMPOSE_PROFILES]="${ANS[COMPOSE_PROFILES]:+${ANS[COMPOSE_PROFILES]},}$p" ;;
+    esac
+  done
+  # docs-arabic's parser reads English as well, and Open WebUI uses ONE parser,
+  # so the English-only one would sit idle on ~0.9 GB.  It is dropped here.
+  case ",${ANS[COMPOSE_PROFILES]}," in
+    *,docs-arabic,*)
+      ANS[COMPOSE_PROFILES]="$(printf '%s' "${ANS[COMPOSE_PROFILES]}" | tr ',' '\n' | grep -vx knowledge | paste -sd, -)" ;;
+  esac
+}
+check_profiles() {
+  local p
+  for p in $(printf '%s' "$1" | tr ',' ' '); do
+    case " $KNOWN_PROFILES " in
+      *" $p "*) ;;
+      *) if [ "$p" = gpu ]; then
+           die "the gpu profile is not part of this release: there was no 24 GB GPU
+machine to test it on (founder input I5), so it is on the Later list."
+         fi
+         die "unknown profile '$p' in COMPOSE_PROFILES.  Known: $KNOWN_PROFILES" ;;
+    esac
+  done
+}
+
 [ -n "$ANSWERS" ] && parse_answers "$ANSWERS"
 
 say ""
@@ -262,8 +303,13 @@ if [ -z "${ANS[COMPOSE_PROFILES]+set}" ]; then
       1) ANS[COMPOSE_PROFILES]="" ;;
       *) ANS[COMPOSE_PROFILES]="knowledge" ;;
     esac
+    ask_optional_profiles
   fi
 fi
+# Every name is checked, whichever path set it: compose ignores an unknown
+# profile name, so a typo in an answer file would install less than asked and
+# say nothing.  [NOM-415]
+check_profiles "${ANS[COMPOSE_PROFILES]}"
 # SAY WHICH GROUP WAS SELECTED.  Starter is the empty profile list, so without
 # this line a Starter install reports nothing at all about its own selection,
 # which is how NOM-398 reached QA as "exit 0, wrong 9 services".

@@ -318,7 +318,13 @@ def i4(ctx):
                     bad.append(f"{name}: build BASE does not resolve to a sha256: {rb}")
             ctxdir = b.get("context") if isinstance(b, dict) else b
             lock = os.path.join(ctx.root, ctxdir or "", "requirements.lock")
-            if not os.path.isfile(lock):
+            # A build that installs nothing with pip has no wheels to hash
+            # (build/docling-arabic adds one checksummed file; I19 checks it).
+            dfile = os.path.join(ctx.root, ctxdir or "", "Dockerfile")
+            uses_pip = os.path.isfile(dfile) and "pip install" in open(dfile).read()
+            if not uses_pip:
+                pass
+            elif not os.path.isfile(lock):
                 bad.append(f"{name}: {ctxdir}/requirements.lock is missing")
             else:
                 text = open(lock).read()
@@ -1084,14 +1090,145 @@ def i17(ctx):
     if "TOOL_SERVER_CONNECTIONS" in ow:
         bad.append("open-webui declares TOOL_SERVER_CONNECTIONS in compose; it is generated into secrets/open-webui.env with the app's own key")
 
-    for name in ("hermes", "crawl4ai"):
+    for name in ("hermes", "crawl4ai", "openclaw", "openclaw-sandbox"):
+        if name not in ctx.services and name.startswith("openclaw"):
+            bad.append(f"{name} is missing from the rendered compose, so its runtime cannot be checked")
+            continue
         if (ctx.services.get(name) or {}).get("runtime") != "runsc":
             bad.append(f"{name} must declare runtime: runsc (gVisor); a missing runtime falls back to runc silently")
     return bad
 
 
+# Licences rule 5 of the DoD accepts for model weights and voices.  Anything
+# else — CC-BY-NC, "research only", a custom licence nobody has read — fails.
+COMMERCIAL_SAFE_LICENCES = {"Apache-2.0", "MIT", "CC0-1.0", "BSD-3-Clause"}
+OPENCLAW_MIN = (2026, 4, 22)
+
+
+@check("I19", "optional profiles: OpenClaw locked down, pinned commercial-safe weights, no GPU path")
+def i19(ctx):
+    """What DoD 2.4 asks of each optional profile, as properties of the repo.
+
+    openclaw — OpenClaw >= 2026.4.22; sandbox ON for every session (`mode: all`)
+    on the SSH backend, which needs no Docker socket; ClawHub and every other
+    skill/plugin install FAIL CLOSED (`security.installPolicy` enabled with no
+    `exec` command — OpenClaw's documented fail-closed state — for skills and
+    plugins; no bundled skills; skill-workshop learning off); gateway on loopback inside its container with the Control UI off;
+    elevated tools off; private network only (its bridges are checked by I7,
+    I8, I11 like every other).
+    voice-arabic / docs-arabic — every weight file a build fetches is pinned by
+    sha256 in that build's models.lock WITH a licence from the commercial-safe
+    list; a Dockerfile `ADD --checksum` must name a row of its models.lock; the
+    TTS server offers no voice cloning.
+    gpu — Later (no 24 GB GPU test machine): nothing may request a GPU.
+    """
+    bad = []
+    # --- openclaw: version ---------------------------------------------------
+    pins = {}
+    for line in open(os.path.join(ctx.root, "versions.env")):
+        m = re.match(r"^([A-Z0-9_]+)=(.*)$", line.strip())
+        if m:
+            pins[m.group(1)] = m.group(2)
+    tag = pins.get("OPENCLAW_TAG", "")
+    m = re.match(r"^v?(\d{4})\.(\d+)\.(\d+)", tag)
+    if not m:
+        bad.append(f"OPENCLAW_TAG {tag!r} is not a YYYY.M.D release tag")
+    elif tuple(int(x) for x in m.groups()) < OPENCLAW_MIN:
+        bad.append(f"OPENCLAW_TAG {tag} is older than 2026.4.22 (DoD section 1)")
+    # --- openclaw: config ----------------------------------------------------
+    cp = os.path.join(ctx.root, "config", "openclaw", "openclaw.json")
+    if not os.path.isfile(cp):
+        bad.append("config/openclaw/openclaw.json is missing")
+    else:
+        oc = json.load(open(cp))
+        g = lambda *ks: _dig(oc, ks)
+        want = [
+            (("agents", "defaults", "sandbox", "mode"), "all", "sandbox must be on for every session"),
+            (("agents", "defaults", "sandbox", "backend"), "ssh", "the only backend that needs no Docker socket"),
+            (("agents", "defaults", "sandbox", "ssh", "strictHostKeyChecking"), True, "the sandbox host key must be pinned"),
+            (("gateway", "bind"), "loopback", "the gateway must not listen on a bridge"),
+            (("gateway", "controlUi", "enabled"), False, "no web UI is routed to it"),
+            (("tools", "elevated", "enabled"), False, "elevated exec escapes the sandbox"),
+            (("security", "installPolicy", "enabled"), True, "installs must go through the policy"),
+            # An EMPTY list is read by OpenClaw as "no allowlist" -- measured on
+            # 2026.10.7: 13 bundled skills stayed eligible.  One name that
+            # matches no skill blocks all 49 (NOM-415 profiles doc).
+            (("skills", "allowBundled"), ["__none__"], "no bundled skills"),
+            (("skills", "workshop", "autonomous", "mode"), "off", "the agent must not write its own skills"),
+            (("security", "installPolicy", "targets"), ["skill", "plugin"], "the policy must cover plugins as well as skills"),
+            (("skills", "install", "allowUploadedArchives"), False, "no uploaded skill archives"),
+            (("browser", "enabled"), False, "no browser"),
+            (("update", "auto", "enabled"), False, "no self-update (pin every version)"),
+        ]
+        for path, value, why in want:
+            if g(*path) != value:
+                bad.append(f"openclaw.json {'.'.join(path)} is {g(*path)!r}, must be {value!r}: {why}")
+        if g("security", "installPolicy", "exec") is not None:
+            bad.append("openclaw.json security.installPolicy.exec is set: with a command the policy can ALLOW "
+                       "installs; with none, every ClawHub/skill/plugin install fails closed, which is the requirement")
+        for name, ent in (g("agents", "entries") or {}).items():
+            if _dig(ent, ("sandbox", "mode")) not in (None, "all"):
+                bad.append(f"openclaw.json agents.entries.{name} overrides sandbox.mode")
+        if g("channels"):
+            bad.append("openclaw.json configures channels; a channel is an inbound path this profile does not ship")
+    # --- weights: pinned, hashed, licensed ------------------------------------
+    bdir = os.path.join(ctx.root, "build")
+    n_rows = 0
+    for d in sorted(os.listdir(bdir)) if os.path.isdir(bdir) else []:
+        lockp = os.path.join(bdir, d, "models.lock")
+        dfile = os.path.join(bdir, d, "Dockerfile")
+        shas = set()
+        if os.path.isfile(lockp):
+            for ln in open(lockp):
+                ln = ln.strip()
+                if not ln or ln.startswith("#"):
+                    continue
+                f = ln.split()
+                if len(f) != 5:
+                    bad.append(f"build/{d}/models.lock row has {len(f)} fields, needs repo revision file sha256 licence: {ln[:80]}")
+                    continue
+                n_rows += 1
+                repo, rev, fname, sha, lic = f
+                if not re.fullmatch(r"[0-9a-f]{40}", rev):
+                    bad.append(f"build/{d}/models.lock {fname}: revision {rev!r} is not a commit hash")
+                if not re.fullmatch(r"[0-9a-f]{64}", sha):
+                    bad.append(f"build/{d}/models.lock {fname}: {sha!r} is not a sha256")
+                if lic not in COMMERCIAL_SAFE_LICENCES:
+                    bad.append(f"build/{d}/models.lock {repo}/{fname}: licence {lic} is not commercial-safe")
+                shas.add(sha)
+        if os.path.isfile(dfile):
+            text = open(dfile).read()
+            for sha in re.findall(r"ADD\s+--checksum=sha256:([0-9a-f]{64})", text):
+                if sha not in shas:
+                    bad.append(f"build/{d}/Dockerfile ADDs sha256:{sha[:12]}… which build/{d}/models.lock does not list")
+            if "fetch_models.py" in text and not shas:
+                bad.append(f"build/{d}/Dockerfile fetches models but build/{d}/models.lock lists none")
+    for d in ("stt-arabic", "tts-arabic", "docling-arabic"):
+        if not os.path.isfile(os.path.join(bdir, d, "models.lock")):
+            bad.append(f"build/{d}/models.lock is missing")
+    if n_rows == 0:
+        bad.append("no models.lock rows were read at all; this check would be vacuous")
+    tts = os.path.join(bdir, "tts-arabic", "server.py")
+    if os.path.isfile(tts) and re.search(r"audio_prompt|prepare_conditionals", open(tts).read()):
+        bad.append("build/tts-arabic/server.py references a voice-cloning input; only the built-in voice ships")
+    # --- gpu is Later ----------------------------------------------------------
+    for name, svc in ctx.services.items():
+        devs = (((svc.get("deploy") or {}).get("resources") or {}).get("reservations") or {}).get("devices")
+        if svc.get("gpus") or devs:
+            bad.append(f"{name} requests a GPU; the gpu profile is Later (no 24 GB GPU test machine)")
+    return bad
+
+
+def _dig(obj, keys):
+    for k in keys:
+        if not isinstance(obj, dict) or k not in obj:
+            return None
+        obj = obj[k]
+    return obj
+
+
 ALL = [i1, i1b, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i12e, i13, i14,
-       i15, i16, i17]
+       i15, i16, i17, i19]
 
 
 def main():

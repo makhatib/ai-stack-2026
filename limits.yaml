@@ -34,6 +34,11 @@ ingress_services:
   - mcp-web
   - searxng
   - crawl4ai
+  # NOM-415 optional profiles (only present when the profile is selected).
+  - openclaw
+  - openclaw-sandbox
+  - stt-arabic
+  - docling-arabic
 
 limits:
   - surface: HTTP request body, general
@@ -150,10 +155,22 @@ limits:
     default: "5GB or 50000 chunks"
     owner: doctor
     on_overflow: "warn; NO automatic deletion"
+  # NOM-415 (profile voice-arabic).  Enforced by the services themselves, which
+  # are reachable only from Open WebUI.
+  - surface: "Audio: bytes per transcription request"
+    default: 25MB
+    owner: "stt-arabic (STT_MAX_BYTES)"
+    on_overflow: "413, nothing decoded"
+    ceiling: 100MB
+  - surface: "Speech: characters per synthesis request"
+    default: 600
+    owner: "tts-arabic (TTS_MAX_CHARS); Open WebUI splits answers on punctuation first"
+    on_overflow: "413, nothing synthesised"
+    ceiling: 2000
 
 # Deferred with their groups (rev 10).  Values kept; not exercised by L1.
 deferred_rows:
   - "Crawl: pages per call / bytes per page / total time / redirect depth (crawl4ai)"
   - "Browser: session duration / navigations / downloads (playwright-mcp)"
-  - "Audio: duration and bytes per request (whisper-cpp, 1.0)"
+  - "Audio: duration and bytes per request (whisper-cpp, 1.0; the v2 voice-arabic row is live above)"
   - "Tool response size, 1MB per call (agentgateway — G-AGENTS failed)"

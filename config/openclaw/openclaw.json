@@ -1,0 +1,70 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "port": 18789,
+    "auth": { "mode": "token", "token": { "source": "file", "provider": "gateway_token", "id": "value" } },
+    "controlUi": { "enabled": false }
+  },
+  "secrets": {
+    "providers": {
+      "gateway_token": { "source": "file", "path": "/home/node/.secrets/openclaw_gateway_token", "mode": "singleValue" },
+      "litellm_key":   { "source": "file", "path": "/home/node/.secrets/openclaw_litellm_key", "mode": "singleValue" }
+    }
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "litellm": {
+        "baseUrl": "http://litellm:4000",
+        "api": "openai-completions",
+        "apiKey": { "source": "file", "provider": "litellm_key", "id": "value" },
+        "request": { "allowPrivateNetwork": true },
+        "timeoutSeconds": 900,
+        "models": [
+          { "id": "agent", "name": "agent (via LiteLLM)", "reasoning": false, "input": ["text"],
+            "contextWindow": 65536, "maxTokens": 4096 }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "litellm/agent" },
+      "skipBootstrap": true,
+      "timeoutSeconds": 1800,
+      "sandbox": {
+        "mode": "all",
+        "backend": "ssh",
+        "scope": "agent",
+        "workspaceAccess": "rw",
+        "ssh": {
+          "target": "sandbox@openclaw-sandbox:2222",
+          "workspaceRoot": "/workspace",
+          "strictHostKeyChecking": true,
+          "updateHostKeys": false,
+          "identityFile": "/home/node/.secrets/openclaw_sandbox_key",
+          "knownHostsFile": "/home/node/.secrets/openclaw_sandbox_known_hosts"
+        }
+      }
+    }
+  },
+  "tools": {
+    "elevated": { "enabled": false },
+    "toolSearch": false,
+    "web": { "search": { "enabled": false } }
+  },
+  "skills": {
+    "allowBundled": ["__none__"],
+    "install": { "allowUploadedArchives": false },
+    "workshop": { "autonomous": { "mode": "off" } },
+    "entries": { "browser-automation": { "enabled": false }, "canvas": { "enabled": false } }
+  },
+  "security": {
+    "installPolicy": { "enabled": true, "targets": ["skill", "plugin"] }
+  },
+  "browser": { "enabled": false },
+  "discovery": { "mdns": { "mode": "off" } },
+  "update": { "checkOnStart": false, "auto": { "enabled": false } },
+  "telemetry": { "enabled": false }
+}
