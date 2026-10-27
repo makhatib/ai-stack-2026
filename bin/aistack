@@ -15,6 +15,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 
+# `aistack install` is the installer under its other name (NOM-414), handled
+# before anything below touches Docker or the lock directories: on a fresh VPS
+# neither exists yet.
+if [ "${1:-}" = install ]; then shift; exec "$ROOT/install.sh" "$@"; fi
+
 # Where the two locks live.  NOT unconditionally /run/aistack: that needs root
 # to create, and asking for sudo to take a lock would make `aistack up` a
 # privileged operation on a stack whose whole point is that it is not one.  It
@@ -1273,6 +1278,11 @@ cmd_samples() {
 usage() {
   cat <<'EOF'
 aistack — AI Stack 2026
+
+  install             the installer (same as ./install.sh).
+                      aistack install --mode vps --domain example.com  prepares a
+                      fresh Ubuntu 24.04 server and installs behind HTTPS + MFA;
+                      see docs/vps-mode.md
 
   up                  start the stack and wait for health (bounded, 300s)
   down                stop and remove containers

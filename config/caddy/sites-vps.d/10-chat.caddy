@@ -1,0 +1,24 @@
+# Open WebUI — https://chat.{domain}.  Everything, including the websocket and
+# the static assets, is behind forward-auth.  There is no unauthenticated path.
+chat.{$AISTACK_DOMAIN} {
+	import strip_identity
+
+	# limits.yaml v1 — HTTP request body, upload route: 50 MB.
+	@owui_upload path /api/v1/files /api/v1/files/*
+	handle @owui_upload {
+		import require_mfa
+		request_body {
+			max_size 50MB
+		}
+		reverse_proxy open-webui:8080
+	}
+
+	# limits.yaml v1 — HTTP request body, general: 1 MB.
+	handle {
+		import require_mfa
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy open-webui:8080
+	}
+}

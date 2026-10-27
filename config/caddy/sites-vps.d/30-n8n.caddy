@@ -1,0 +1,32 @@
+# n8n — https://n8n.{domain}.
+#
+# THE EDITOR AND ITS REST API ARE PUBLISHED HERE, behind forward-auth and
+# therefore behind the second factor.  Home mode refuses them (they are in
+# manifest.yaml publish.never) because there a single hostname and a path
+# prefix made the editor both unusable and one trailing-path trick from the
+# open.  On a subdomain the editor works at `/`, and "an editor you cannot reach
+# is not an editor" is the case for publishing it; the MFA gate is the case
+# that it is safe to.  This is a decision for the reviewer — see docs/vps-mode.md.
+#
+# THE ONE ROUTE WITHOUT A SESSION is /webhook/*: a webhook caller is a machine
+# with a header token, not a browser.  It is the same exception home mode has,
+# it is matched by exact prefix, and the body is bounded before n8n sees it.
+# `/webhook-test/*` is NOT in that exception: it is for the logged-in editor.
+n8n.{$AISTACK_DOMAIN} {
+	import strip_identity
+
+	handle /webhook/* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy n8n:5678
+	}
+
+	handle {
+		import require_mfa
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy n8n:5678
+	}
+}

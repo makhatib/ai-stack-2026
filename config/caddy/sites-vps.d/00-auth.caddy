@@ -1,0 +1,21 @@
+# Authelia — the login portal, https://auth.{domain}.  This is the ONE host that
+# is reachable without a session, because it is where a session starts.
+#
+# Only the portal and the login API are proxied.  `/api/authz/*` is the
+# forward-auth endpoint Caddy calls over the internal network; nothing outside
+# has a reason to call it, so it is refused here rather than left as an oracle.
+auth.{$AISTACK_DOMAIN} {
+	import strip_identity
+
+	@authz path /api/authz /api/authz/*
+	handle @authz {
+		respond "Not found" 404
+	}
+
+	handle {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy authelia:9091
+	}
+}
