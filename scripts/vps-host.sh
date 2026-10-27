@@ -69,6 +69,34 @@ sys.exit(0 if (a.is_private or a.is_loopback or a.is_link_local or a in ipaddres
 PY
 }
 
+# The public-address gate.  0 = go on, 1 = private address refused,
+# 2 = test override on without a private ACME CA.
+#
+# AISTACK_ALLOW_PRIVATE_IP=1 is a TEST-ONLY override (NOM-426): it lets the
+# sandbox QA rig install on a private address against a private ACME CA
+# (Pebble).  It is off unless the value is exactly "1", it is not in the
+# quick-start or --help, and it shouts every time it is on.  No public CA can
+# reach a private address, so the override also demands --acme-ca <https-url>
+# that is not Let's Encrypt: a forgotten override then cannot burn the
+# Let's Encrypt rate limit on a real server.
+vps_address_gate() {
+  local ip="$1" acme_ca="$2"
+  if [ "${AISTACK_ALLOW_PRIVATE_IP:-0}" = 1 ]; then
+    printf '\n  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n' >&2
+    printf '  !! TEST-ONLY OVERRIDE: AISTACK_ALLOW_PRIVATE_IP=1                      !!\n' >&2
+    printf '  !! The public-address check is OFF.  This is for the QA rig only.     !!\n' >&2
+    printf '  !! Never use it on a real server: unset it and run the command again. !!\n' >&2
+    printf '  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n' >&2
+    case "$acme_ca" in
+      https://*letsencrypt.org*) return 2 ;;
+      https://*) return 0 ;;
+      *) return 2 ;;
+    esac
+  fi
+  vps_is_private_ip "$ip" && return 1
+  return 0
+}
+
 # Every app name must resolve to THIS machine before Caddy asks for a
 # certificate.  A wrong record costs a failed HTTP-01 attempt each time and the
 # CA rate-limits repeated failures, so this is checked first and stops the

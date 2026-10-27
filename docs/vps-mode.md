@@ -123,6 +123,8 @@ not Let's Encrypt, because the sandbox has no public port 80/443.
   attempt on a real server must not be retried in a loop: use `--acme-ca staging` first.
 - **Real DNS.** The rehearsal pinned names to the target with `--skip-dns-check` and
   `AISTACK_ALLOW_PRIVATE_IP=1` (rehearsal-only override of the public-address check).
+  Since NOM-426 the override prints a warning banner and refuses to run unless
+  `--acme-ca` is a private ACME CA URL (not Let's Encrypt). Do not set it on a real server.
 - **Tailscale.** The `--tailscale` flag is coded and off by default; it was not run (no
   tailnet in the sandbox, and the founder has not said yes).
 - **A real second-factor enrolment in a browser.** Verified by policy and by the 302s,

@@ -223,10 +223,13 @@ Use a plain lowercase name such as example.com (no https://, no wildcard, no IP 
   say "  SSH public key present for ${SUDO_USER:-$(id -un)}"
   VPS_IP="$(vps_public_ip)" || true
   [ -n "${VPS_IP:-}" ] || die "could not find this machine's IPv4 address (ip route get 1.1.1.1)."
-  if vps_is_private_ip "$VPS_IP" && [ "${AISTACK_ALLOW_PRIVATE_IP:-0}" != 1 ]; then
-    die "this machine's address is $VPS_IP, which is not a public address. A certificate authority cannot reach it.
-VPS mode is for a server with a public IPv4 address."
-  fi
+  GATE=0; vps_address_gate "$VPS_IP" "$ACME_CA" || GATE=$?
+  case "$GATE" in
+    0) ;;
+    1) die "this machine's address is $VPS_IP, which is not a public address. A certificate authority cannot reach it.
+VPS mode is for a server with a public IPv4 address." ;;
+    *) die "AISTACK_ALLOW_PRIVATE_IP=1 is a test-only override and needs a private ACME CA: --acme-ca <https-url> (not Let's Encrypt)." ;;
+  esac
   say "  public address: $VPS_IP"
   if [ "$SKIP_DNS_CHECK" = 1 ]; then
     warn "DNS check skipped: certificates are requested as soon as the stack starts and fail until the A records exist."
