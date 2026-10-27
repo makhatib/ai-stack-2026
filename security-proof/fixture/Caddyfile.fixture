@@ -1,0 +1,27 @@
+# Security-proof FIXTURE Caddy (NOM-417).  Not shipped to users.
+#
+# The webhook route under test is the SHIPPED file, bind-mounted unchanged:
+# config/caddy/sites-vps.d/30-n8n.caddy.  Only the parts that need a real domain
+# or a real Authelia are replaced:
+#   - certificates: Caddy's own local CA (the fixture has no public DNS)
+#   - require_mfa:  answers 302 to a login page, as forward-auth does without a
+#                   session; the proof asserts that non-webhook paths hit it
+{
+	admin off
+	local_certs
+}
+
+(strip_identity) {
+	request_header -Remote-User
+	request_header -Remote-Groups
+	request_header -Remote-Email
+	request_header -Remote-Name
+	request_header -X-Forwarded-User
+	request_header -X-Forwarded-Email
+}
+
+(require_mfa) {
+	redir https://auth.{$AISTACK_DOMAIN}/ 302
+}
+
+import /shipped/30-n8n.caddy
