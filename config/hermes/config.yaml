@@ -4,6 +4,9 @@
 model:
   provider: custom
   base_url: http://litellm:4000/v1
+  # Hermes sends the placeholder `no-key-required` to a custom endpoint unless
+  # the key is named here; LiteLLM then answers 401 (found by NOM-416).
+  key_env: OPENAI_API_KEY
   default: agent
   # Hermes refuses tool use below 64k (NOM-412 §5).  Ollama must be given the
   # same number (OLLAMA_CONTEXT_LENGTH) because the /v1 API ignores num_ctx.
@@ -20,3 +23,28 @@ mcp_servers:
 
 memory:
   provider: mem0
+
+# WHAT THE AGENT MAY CALL (NOM-416).  Telegram and the CLI get the gateway's
+# tools (server `aistack`: the ONE allowlist) and memory, nothing else: no built-in
+# terminal, browser, code execution or image tools.  This also keeps the tool
+# list short enough for a small local model.
+platform_toolsets:
+  telegram: [aistack, memory]
+  cli: [aistack, memory]
+
+# Tool Search puts MCP tools behind a search step (tool_search / tool_describe /
+# tool_call).  A 9B model spent four bridge calls finding a tool it could have
+# called directly (NOM-416).  `off` sends every allowed tool to the model as is
+# (checked in the request Hermes sent: both web tools present).  `defer: []`
+# does NOT do this: MCP tools are always deferred while the bridge is on.
+tools:
+  tool_search:
+    enabled: "off"
+
+# MCP DISCOVERY MUST FINISH BEFORE THE FIRST TURN (NOM-416).  The gateway's MCP
+# handshake took 8.6 s on the sandbox; Hermes' defaults snapshot the tool list
+# after 1.5 s (gateway) and 15 s (one-shot), and a turn that misses it has NO
+# tools: the model then writes a fake tool call as text and the answer is made
+# up.  A reachable server still returns as soon as its handshake is done.
+mcp_discovery_timeout: 60
+mcp_single_query_discovery_timeout: 90

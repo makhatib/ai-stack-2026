@@ -149,7 +149,7 @@ a browser does.
 ```sh
 bin/aistack user list                   # is phase 2 actually finished
 bin/aistack status                      # what is running
-bin/aistack models pull llama3.2:3b     # ~2 GB
+bin/aistack models pull qwen3.5:2b      # ~2.7 GB (see docs/install.md for the rest)
 bin/aistack doctor                      # the full check
 ```
 

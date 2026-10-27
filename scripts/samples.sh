@@ -164,16 +164,43 @@ cmd_setup() {
   info "Now run:  aistack samples run all"
 }
 
+# alias_models <alias>...: the Ollama model behind each LiteLLM alias, in order.
+# awk, not PyYAML: a fresh Ubuntu server is not guaranteed to have PyYAML.
+alias_models() {
+  local a m out=""
+  for a in "$@"; do
+    m="$(awk -v a="$a" '
+      $1 == "-" && $2 == "model_name:" { cur = ($3 == a) }
+      cur && $1 == "model:" { sub(/^[^\/]*\//, "", $2); print $2; exit }
+    ' "$ROOT/config/litellm/config.yaml")"
+    [ -n "$m" ] || return 1
+    out="$out${out:+ }$m"
+  done
+  printf '%s\n' "$out"
+}
+
+# has_model <ollama-list-output> <name>: an EXACT name match (qwen3.5:2b is not
+# qwen3.5:9b), with Ollama's implicit :latest.
+has_model() {
+  local want="$2"; [[ "$want" == *:* ]] || want="$want:latest"
+  printf '%s\n' "$1" | awk -v w="$want" '$1 == w { found = 1 } END { exit !found }'
+}
+
 setup_models() {
   step "Model weights"
   # NAMED, and checked by name.  QA found an empty `ollama list` after a
   # successful install because `models pull` was passing `sh -c` to an image
   # whose ENTRYPOINT is `ollama` — see bin/aistack.  Nothing here assumes the
   # pull worked; it re-reads the list afterwards.
-  local want="nomic-embed-text llama3.2:3b" m have
+  # WHAT THE TEMPLATES CALL, not a list kept by hand: W1/W3/W4 ask LiteLLM for
+  # `local-chat` and `local-embed`, and config/litellm/config.yaml says which
+  # Ollama model each one is.  v2 moved `local-chat` to qwen3.5:2b while this
+  # line still pulled the v1 llama3.2:3b, which no template used (NOM-416).
+  local want m have
+  want="$(alias_models local-embed local-chat)" || die "cannot read the local-embed / local-chat models from config/litellm/config.yaml"
   have="$(docker exec aistack-ollama ollama list 2>/dev/null || true)"
   for m in $want; do
-    if printf '%s' "$have" | grep -q "^${m%%:*}"; then
+    if has_model "$have" "$m"; then
       info "  present: $m"
       continue
     fi
@@ -183,7 +210,7 @@ setup_models() {
   done
   have="$(docker exec aistack-ollama ollama list 2>/dev/null || true)"
   for m in $want; do
-    printf '%s' "$have" | grep -q "^${m%%:*}" \
+    has_model "$have" "$m" \
       || die "'$m' is still not in 'ollama list' after a pull that reported success.
 That combination is the NOM-302 defect returning; do not treat the demo as runnable."
   done

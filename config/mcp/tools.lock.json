@@ -6,6 +6,6 @@
     "web-fetch_page": { "arguments": ["url"] },
     "n8n-search_workflows": { "arguments": ["limit", "query"] },
     "n8n-get_workflow_details": { "arguments": ["workflowId"] },
-    "n8n-execute_workflow": { "arguments": ["inputs", "workflowId"] }
+    "n8n-execute_workflow": { "arguments": ["executionMode", "inputs", "triggerNodeName", "workflowId"] }
   }
 }

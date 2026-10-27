@@ -41,7 +41,8 @@ bin/aistack samples setup
 
 `samples setup` is idempotent — run it twice and nothing doubles. It:
 
-1. **pulls the two named models** (`nomic-embed-text`, `llama3.2:3b`) through
+1. **pulls the two models the templates call** (`local-embed` and `local-chat` in
+   `config/litellm/config.yaml`: `nomic-embed-text` and `qwen3.5:2b`) through
    the model-puller helper, then re-reads `ollama list` and refuses to continue
    if either is still missing;
 2. **creates the `aistack_demo` database** and a role of the same name, applies

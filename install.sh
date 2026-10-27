@@ -655,6 +655,13 @@ bin/aistack up || die "the stack did not become healthy. The failing service and
 last 50 redacted lines are above. 'bin/aistack support-bundle' collects a
 shareable artefact; 'bin/aistack logs <service>' shows more."
 
+# THE PER-APP LITELLM KEYS (NOM-413) ARE CHOSEN BY gen-secrets.sh BUT LITELLM
+# ONLY LEARNS THEM HERE.  Until NOM-416 nothing called this, so on a fresh
+# install Hermes, n8n, Open WebUI and Mem0 were all refused by LiteLLM (401)
+# and no model or MCP tool answered.  Idempotent: a re-run updates in place.
+say "  Registering one LiteLLM key per app (budget, models, MCP servers)."
+bash scripts/litellm-keys.sh || die "could not register the per-app LiteLLM keys (above)."
+
 if [ "$MODE" = vps ]; then
   bash scripts/vps-verify.sh --local || warn "scripts/vps-verify.sh reported problems (above)."
   cat <<EOF
@@ -676,7 +683,8 @@ if [ "$MODE" = vps ]; then
  Run the first, open https://auth.${DOMAIN}/, log in, enrol a second factor,
  run the second when it asks.  Every app asks for that second factor.
 
- Then:  bin/aistack models pull llama3.2:3b ; bin/aistack status ; bin/aistack doctor
+ Then:  bin/aistack models pull qwen3.5:9b   (and qwen3.5:2b, bge-m3, nomic-embed-text)
+        bin/aistack status ; bin/aistack doctor
         sudo scripts/vps-verify.sh      (firewall, SSH, and what answers without a login)
 
  Secrets are in ./secrets — paths only were printed, never values.
@@ -705,7 +713,10 @@ cat <<EOF
  Run the first, log in, enrol a second factor, run the second when it asks.
 
  Then:
-   bin/aistack models pull llama3.2:3b     # ~2 GB, through the egress helper
+   bin/aistack models pull qwen3.5:9b      # the `agent` model, ~6.6 GB, egress helper
+   bin/aistack models pull qwen3.5:2b      # `local-chat`, ~2.7 GB
+   bin/aistack models pull bge-m3          # `embed` (Arabic-capable), ~1.2 GB
+   bin/aistack models pull nomic-embed-text   # `local-embed` (the samples), ~0.3 GB
    bin/aistack status
    bin/aistack doctor
 

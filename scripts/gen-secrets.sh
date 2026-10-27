@@ -480,9 +480,10 @@ unset OWUI_SECRET LITELLM_MASTER LITELLM_SALT
 # --- v2 (NOM-413) ----------------------------------------------------------
 # Same rules as above: an existing value is reused, never rotated, and no
 # value is printed.  Free secrets are generated here; the bot token is not —
-# it belongs to the operator, arrives from a Paperclip/operator secret, and
-# until then is the placeholder `__SET_ME__`, which Hermes treats as "Telegram
-# not configured" (the rest of the stack runs).
+# it belongs to the owner, who types it into `sudo bin/aistack telegram token`.
+# Until then the line is commented out and Hermes runs with no messaging
+# platform.  (A `__SET_ME__` value was NOT "not configured": Hermes sent it to
+# Telegram and its gateway exited -- measured, NOM-416.)
 
 # One value, two readers: Hermes sends it, Mem0 checks it.
 gen mem0_api_key        mem0    hex32
@@ -543,15 +544,20 @@ if [ -s "$HERMES_ENV" ]; then
 else
   : > "$HERMES_ENV"; chmod 0600 "$HERMES_ENV"
   {
-    printf 'TELEGRAM_BOT_TOKEN=%s\n' "__SET_ME__"
-    printf 'TELEGRAM_ALLOWED_USERS=%s\n' "__SET_ME__"
+    # COMMENTED OUT, NOT A PLACEHOLDER VALUE.  Hermes treats any value as a
+    # token, `__SET_ME__` is rejected by Telegram, and the gateway then EXITS --
+    # which also took the CLI down ("Gateway draining: not_ready", NOM-416).
+    # With no token Hermes runs with no messaging platform.
+    # `sudo bin/aistack telegram token` fills both lines.
+    printf '# TELEGRAM_BOT_TOKEN=\n'
+    printf '# TELEGRAM_ALLOWED_USERS=\n'
     printf 'OPENAI_API_KEY=sk-%s\n' "$(cat "$SECRETS/key_hermes")"
     printf 'MEM0_API_KEY=%s\n' "$(cat "$SECRETS/mem0_api_key")"
     printf 'MEM0_HOST=%s\n' "http://mem0:8000"
     printf 'MEM0_TELEMETRY=%s\n' "False"
     printf 'HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=%s\n' "true"
   } >> "$HERMES_ENV"
-  log "  create  $HERMES_ENV (TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS are placeholders)"
+  log "  create  $HERMES_ENV (no Telegram yet: sudo bin/aistack telegram token)"
 fi
 apply_mode "$HERMES_ENV" hermes
 

@@ -1306,6 +1306,10 @@ aistack — AI Stack 2026
 
   pin                 re-render versions.env (and the profile settings) into .env
   openclaw ARGS...    run the OpenClaw CLI inside its container (profile openclaw)
+  telegram token      (sudo) the bot token from @BotFather and your own Telegram
+                      user id, typed at a prompt that does not echo
+  mcp n8n-token       (sudo) the MCP access token from n8n Settings -> MCP, so
+                      Hermes and Open WebUI can see the workflows you allow
   update              backup, pull by digest, up, bounded health gate
   rollback            return to the previous pins
 
@@ -1373,6 +1377,7 @@ case "${1:-}" in
   test) shift; cmd_test "$@" ;;
   samples) shift; cmd_samples "$@" ;;
   openclaw) shift; cmd_openclaw "$@" ;;
+  telegram|mcp) "$ROOT/scripts/connect.sh" "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$1' (try: aistack help)" ;;
 esac

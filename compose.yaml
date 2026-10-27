@@ -536,7 +536,11 @@ services:
       # (search_workflows / get_workflow_details / execute_workflow) is the only
       # caller we configure.  Mutating workflows still run behind the approval
       # envelope, which is a property of the WORKFLOW, not of the transport.
-      N8N_MCP_SERVER_ENABLED: "true"
+      # n8n 2.44 has no N8N_MCP_SERVER_ENABLED (the name this file used until
+      # NOM-416, so the endpoint answered 404).  These two are the real switch:
+      # MCP access is ON and the n8n UI cannot turn it off behind our back.
+      N8N_MCP_MANAGED_BY_ENV: "true"
+      N8N_MCP_ACCESS_ENABLED: "true"
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
       N8N_TEMPLATES_ENABLED: "false"
@@ -797,6 +801,12 @@ services:
     secrets:
       - source: crawl4ai_api_token
         target: api_token
+    # gVisor does not see Docker's embedded DNS (127.0.0.11 is an iptables
+    # redirect outside the sandbox), so every lookup failed and Crawl4AI's SSRF
+    # guard refused every URL as "URL blocked" (found by NOM-416).  `dns:` does
+    # not help on a user-defined bridge, so the file is replaced.
+    volumes:
+      - ./config/crawl4ai/resolv.conf:/etc/resolv.conf:ro
     tmpfs:
       - /tmp:rw,nosuid,size=512m
       - /home/appuser/.crawl4ai:rw,noexec,nosuid,size=128m,uid=999,gid=999

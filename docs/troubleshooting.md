@@ -267,7 +267,7 @@ not tested that path and cannot tell you whether it should work.
 That is correct behaviour. Ollama has no route off the host. Use:
 
 ```sh
-bin/aistack models pull llama3.2:3b
+bin/aistack models pull qwen3.5:2b
 ```
 
 ## Disk is filling up

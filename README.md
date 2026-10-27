@@ -45,7 +45,7 @@ Then:
 ```sh
 bin/aistack status      # what is running, and the counts, separately
 bin/aistack doctor      # health, pins, secret readability, host listeners
-bin/aistack models pull llama3.2:3b
+bin/aistack models pull qwen3.5:2b
 ```
 
 ## Tests

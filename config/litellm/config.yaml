@@ -95,7 +95,10 @@ mcp_servers:
     allowed_params:
       search_workflows: [query, limit]
       get_workflow_details: [workflowId]
-      execute_workflow: [workflowId, inputs]
+      # n8n 2.44 REQUIRES executionMode, and needs triggerNodeName whenever
+      # inputs are given (live tools/list, NOM-416).  With only workflowId and
+      # inputs allowed, every call was refused.
+      execute_workflow: [workflowId, executionMode, triggerNodeName, inputs]
 
 litellm_settings:
   drop_params: true
