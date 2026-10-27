@@ -1,0 +1,58 @@
+{
+  "id": "aistackDemoD2001",
+  "name": "Demo 2 - add a follow-up task",
+  "description": "Adds ONE follow-up task to the demo task list and returns its task number. Call it with executionMode \"manual\", triggerNodeName \"Task request\" and inputs {\"chatInput\": \"<the task, one line>\"}. Synthetic demo data only.",
+  "settings": {
+    "executionTimeout": 120,
+    "availableInMCP": true
+  },
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "public": false,
+        "options": {}
+      },
+      "id": "d2-trigger",
+      "webhookId": "5d2a0c1e-7f3b-4e2a-9c61-aistack0d2001",
+      "name": "Task request",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.5,
+      "position": [0, 0],
+      "notes": "NOT PUBLIC and the workflow is never published: the agent runs it through n8n's MCP server in manual mode, which feeds this node directly. No chat URL exists for it, so nothing on the internet can reach it -- including through the one n8n.<domain>/webhook/* route VPS mode leaves open."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One line of text, or a refusal -- not a row of whatever arrived.\nconst raw = typeof $json.chatInput === 'string' ? $json.chatInput : '';\nconst title = raw.replace(/\\s+/g, ' ').trim();\nif (!title) {\n  throw new Error('the task text (chatInput) is empty');\n}\nif (title.length > 300) {\n  throw new Error('the task text is longer than 300 characters');\n}\nreturn [{ json: { title } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "d2-validate",
+      "name": "Validate the task",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO d2_tasks (title, source, created_at) VALUES ($1, 'n8n-mcp', now()) RETURNING task_id, title, created_at",
+        "options": {
+          "queryReplacement": "={{ [$json.title] }}"
+        }
+      },
+      "id": "d2-store",
+      "name": "Store the task",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [440, 0],
+      "credentials": {
+        "postgres": { "id": "aistackDemoPg001", "name": "Demo Postgres (aistack samples)" }
+      },
+      "notes": "Parameterised: the task text travels as $1, so nothing in it can change the statement. The table lives in the demo database that `aistack samples setup` creates; demos/setup.sh adds it."
+    }
+  ],
+  "connections": {
+    "Task request": { "main": [[{ "node": "Validate the task", "type": "main", "index": 0 }]] },
+    "Validate the task": { "main": [[{ "node": "Store the task", "type": "main", "index": 0 }]] }
+  }
+}

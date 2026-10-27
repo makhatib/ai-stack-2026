@@ -377,6 +377,14 @@ services:
       ENABLE_RAG_WEB_SEARCH: "false"
       # RAG goes through Docling into pgvector over the one `parse` bridge.
       VECTOR_DB: pgvector
+      # Documents are embedded with bge-m3 (MIT, multilingual; NOM-412's Arabic
+      # pick) through LiteLLM, not Open WebUI's built-in all-MiniLM-L6-v2, which
+      # is English-only: on the demo fixtures it found 7 of 9 passages and
+      # missed both Arabic questions about English documents; bge-m3 found 9
+      # of 9 (NOM-416).  The key is the app's own (secrets/open-webui.env).
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: embed
+      RAG_OPENAI_API_BASE_URL: http://litellm:4000/v1
       CONTENT_EXTRACTION_ENGINE: docling
       # docs-arabic switches the parser to docling-arabic with Arabic OCR; the
       # values come from the AISTACK-PROFILE-ENV block in .env, which

@@ -529,8 +529,9 @@ cmd_teardown() {
   # n8n objects first: a workflow bound to a credential that no longer exists
   # is a confusing artefact to leave behind.
   psql_admin n8n <<'SQL' >/dev/null
-DELETE FROM shared_workflow    WHERE "workflowId" IN (SELECT id FROM workflow_entity    WHERE id LIKE 'aistackDemoW%');
-DELETE FROM workflow_entity    WHERE id LIKE 'aistackDemoW%';
+-- aistackDemo% (not W%): demos/setup.sh adds aistackDemoD2001 (NOM-416)
+DELETE FROM shared_workflow    WHERE "workflowId" IN (SELECT id FROM workflow_entity    WHERE id LIKE 'aistackDemo%');
+DELETE FROM workflow_entity    WHERE id LIKE 'aistackDemo%';
 DELETE FROM shared_credentials WHERE "credentialsId" IN (SELECT id FROM credentials_entity WHERE id LIKE 'aistackDemo%');
 DELETE FROM credentials_entity WHERE id LIKE 'aistackDemo%';
 SQL

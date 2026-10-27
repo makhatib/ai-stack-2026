@@ -641,6 +641,8 @@ ensure_env_line() {
   log "  add     $key -> $(basename "$file")"
 }
 ensure_env_line "$SECRETS/open-webui.env" OPENAI_API_KEY "sk-$(cat "$SECRETS/key_openwebui")"
+# The same app key for document embeddings (RAG_EMBEDDING_ENGINE=openai -> LiteLLM `embed`).
+ensure_env_line "$SECRETS/open-webui.env" RAG_OPENAI_API_KEY "sk-$(cat "$SECRETS/key_openwebui")"
 # Open WebUI's native MCP client: ONE connection, to LiteLLM's /mcp, with this
 # app's own key.  It sees only the servers that key is permitted (litellm-keys.sh).
 ensure_env_line "$SECRETS/open-webui.env" TOOL_SERVER_CONNECTIONS \

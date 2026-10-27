@@ -25,10 +25,18 @@ model_list:
     model_info:
       input_cost_per_token: 0.000001
       output_cost_per_token: 0.000001
+  # THINKING IS OFF FOR THE CHAT ALIASES, ON FOR `agent` (NOM-416, measured on
+  # demos 1-3 and 6).  Qwen 3.5 writes 2,000-4,300 hidden reasoning tokens for
+  # a one-sentence document answer, and Open WebUI calls the model twice per
+  # question: 30-130 s per question even on a GPU, many minutes on CPU.  Off,
+  # the same answers (every scored value right) came in 2-6 s.  `agent` keeps
+  # it: with thinking off, Hermes skipped its tools and made up an answer
+  # (0 of 2 research runs grounded, against 2 of 2 with it on).
   - model_name: local-chat
     litellm_params:
       model: ollama_chat/qwen3.5:2b
       api_base: http://ollama:11434
+      think: false
     model_info:
       input_cost_per_token: 0.000001
       output_cost_per_token: 0.000001
@@ -36,6 +44,7 @@ model_list:
     litellm_params:
       model: ollama_chat/qwen3.5:9b
       api_base: http://ollama:11434
+      think: false
     model_info:
       input_cost_per_token: 0.000001
       output_cost_per_token: 0.000001

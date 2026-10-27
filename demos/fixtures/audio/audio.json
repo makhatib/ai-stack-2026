@@ -1,0 +1,14 @@
+{
+  "file": "ar-question.wav",
+  "sha256": "ad640bc2743d7c14ecaaeef3e7e7d2fc346f099e31de28b619fc0de4bc564eeb",
+  "format": "WAV, 16 kHz, mono, 16-bit, 5.32 s",
+  "text": "مرحباً، ما هي عاصمة المملكة العربية السعودية؟ أجب بجملة واحدة.",
+  "made_with": "this stack's tts-arabic service (profile voice-arabic) through Open WebUI's read-aloud API: Chatterbox Multilingual 0.1.7, built-in default speaker (conds.pt), no voice cloning",
+  "weights": "ResembleAI/chatterbox @ 5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18 (build/tts-arabic/models.lock, sha256-pinned)",
+  "licence": "MIT (commercial use allowed)",
+  "watermark": "Resemble AI's perceptual watermark is on: the audio is marked as synthetic",
+  "human_voice": "none: no person was recorded",
+  "generator": "make_question_audio.py",
+  "made_on": "2026-10-27, AI-Sandbox, 4 vCPU, no GPU (75 s wall for 5.3 s of audio)",
+  "note": "TTS is not bit-for-bit repeatable; this committed file is the fixture and the sha256 above is checked by demos/05-arabic-voice."
+}

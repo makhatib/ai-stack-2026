@@ -761,6 +761,19 @@ cmd_openclaw() {
 
 # --- commands ---------------------------------------------------------------
 
+_owui_sync() {
+  # OPEN WEBUI READS ITS SETTINGS FROM ITS OWN DATABASE AFTER THE FIRST START,
+  # so the voice / parser / embedding settings `aistack pin` derives from the
+  # profiles never reached it when a profile was switched later (NOM-416).
+  # Push them in.  Never fails `up`: the stack is serving either way.
+  dc ps --status running --services 2>/dev/null | grep -qx open-webui || return 0
+  local email
+  email="$(dc exec -T postgres psql -U aistack_admin -d openwebui -tAc \
+    "select email from \"user\" where role = 'admin' order by created_at limit 1" 2>/dev/null | tr -d '[:space:]')"
+  dc exec -T -e OWUI_SYNC_EMAIL="$email" open-webui python3 - < "$ROOT/scripts/owui-sync.py" \
+    || err "could not sync the profile settings into Open WebUI (above); voice or document parsing may use old settings" || :
+}
+
 cmd_up() {
   # THE HOLD IS TAKEN BEFORE ANYTHING STARTS AND IT OUTLIVES THIS PROCESS.
   # That is the whole fix (NOM-300): `with_lifecycle_lock sh _up` took the
@@ -796,6 +809,7 @@ cmd_up() {
     # other reason, which is the more general property and the reason this is
     # not a longer grace.
     _with_arm_lock _holder_reassert
+    _owui_sync
   else
     _with_arm_lock _holder_release_if_idle
   fi
