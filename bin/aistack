@@ -906,7 +906,29 @@ Serving will not start while drill containers exist.  Run 'aistack drill clean'.
     _explain_unhealthy
     return 1
   fi
+  _stop_disabled_profiles
   _health_gate
+}
+
+# A SERVICE WHOSE PROFILE WAS TURNED OFF IS NOT AN ORPHAN.
+#
+# MEASURED (NOM-430, 2026-10-30).  `--remove-orphans` removes containers of
+# services that are no longer in compose.yaml at all.  A service that is still
+# in the file but whose profile left COMPOSE_PROFILES is not one of those, so
+# after voice-arabic was switched off stt-arabic and tts-arabic kept running
+# (and kept their memory).  `compose ps -a` still lists them; `compose config
+# --services` is the set the current profiles enable.  The difference is
+# removed, containers only: volumes stay, so switching back on is cheap.
+_stop_disabled_profiles() {
+  local enabled present off
+  enabled="$(dc config --services 2>/dev/null)" || return 0
+  present="$(dc ps -a --format '{{.Service}}' 2>/dev/null)" || return 0
+  off="$(comm -13 <(printf '%s\n' "$enabled" | sort -u) <(printf '%s\n' "$present" | sort -u))"
+  [ -n "$off" ] || return 0
+  info "Removing the containers of services whose profile is off: $(printf '%s ' $off)"
+  # shellcheck disable=SC2086  # one word per service name
+  dc rm -s -f $off >/dev/null 2>&1 \
+    || err "could not remove: $(printf '%s ' $off)— 'docker compose rm -s -f <service>' does it by hand" || :
 }
 
 # The state of every container, as one line of `service container state health`.

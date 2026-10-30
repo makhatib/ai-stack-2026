@@ -20,6 +20,11 @@
 #   --acme-ca-root FILE    PEM root to trust for a private ACME CA (rehearsals only)
 #   --skip-dns-check       do not insist the A records exist yet
 #
+# Both modes:
+#   --profiles LIST        comma-separated, e.g. knowledge,docs-arabic,voice-arabic
+#                          (sets COMPOSE_PROFILES; the only way to choose them in
+#                          VPS mode, which asks nothing; '' is Starter)
+#
 # IDEMPOTENT AND THAT IS LOAD-BEARING: an existing secret is REUSED, never
 # regenerated; every write shows a diff first and leaves a timestamped .bak.
 # The stack this replaces rotated every password on every run against live
@@ -50,7 +55,8 @@ while [ $# -gt 0 ]; do
     --acme-ca-root) ACME_CA_ROOT="${2:?--acme-ca-root needs a PEM file}"; shift 2 ;;
     --tailscale) TAILSCALE=1; shift ;;
     --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    --profiles) PROFILES_ARG="${2-}"; PROFILES_SET=1; [ $# -ge 2 ] || { echo "install: --profiles needs a list (may be empty: --profiles '')" >&2; exit 2; }; shift 2 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "install: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -160,7 +166,7 @@ ask_optional_profiles() {
   say ""
   say "  Optional profiles (each one is off unless you say yes):"
   say "    openclaw      OpenClaw agent, tools in a gVisor sandbox, no internet.  ~1.2 GB idle, 1.8 GB working"
-  say "    voice-arabic  Arabic speech-to-text and text-to-speech in Open WebUI.  ~__RAM_VOICE__"
+  say "    voice-arabic  Arabic speech-to-text and text-to-speech in Open WebUI.  ~5.1 GB idle, 7.6 GB working (needs 16 GB)"
   say "    docs-arabic   Arabic OCR for scanned documents (replaces the English-only parser).  ~1.1 GB idle, 2.1 GB working"
   say "    gpu           NOT OFFERED: no 24 GB GPU test machine, so no GPU path is tested."
   for p in openclaw voice-arabic docs-arabic; do
@@ -169,8 +175,11 @@ ask_optional_profiles() {
       y|Y|yes|YES) ANS[COMPOSE_PROFILES]="${ANS[COMPOSE_PROFILES]:+${ANS[COMPOSE_PROFILES]},}$p" ;;
     esac
   done
-  # docs-arabic's parser reads English as well, and Open WebUI uses ONE parser,
-  # so the English-only one would sit idle on ~0.9 GB.  It is dropped here.
+  drop_knowledge_for_docs_arabic
+}
+# docs-arabic's parser reads English as well, and Open WebUI uses ONE parser,
+# so the English-only one would sit idle on ~0.9 GB.  It is dropped here.
+drop_knowledge_for_docs_arabic() {
   case ",${ANS[COMPOSE_PROFILES]}," in
     *,docs-arabic,*)
       ANS[COMPOSE_PROFILES]="$(printf '%s' "${ANS[COMPOSE_PROFILES]}" | tr ',' '\n' | grep -vx knowledge | paste -sd, -)" ;;
@@ -191,10 +200,15 @@ machine to test it on (founder input I5), so it is on the Later list."
 }
 
 [ -n "$ANSWERS" ] && parse_answers "$ANSWERS"
+# --profiles wins over an answer file: it is the more specific instruction.
+if [ "${PROFILES_SET:-0}" = 1 ]; then
+  ANS[COMPOSE_PROFILES]="$(printf '%s' "$PROFILES_ARG" | tr -d ' ')"
+  drop_knowledge_for_docs_arabic
+fi
 
 say ""
 say "AI Stack 2026 — installer"
-say "9 containers. Chat, documents, local models and workflow automation."
+say "Chat, documents, local models, an AI agent and workflow automation."
 say ""
 
 # ===========================================================================
@@ -273,6 +287,7 @@ VPS mode is for a server with a public IPv4 address." ;;
     "AISTACK_N8N_URL=https://n8n.$DOMAIN"
     "AISTACK_N8N_HOST=n8n.$DOMAIN"
     "AISTACK_N8N_WEBHOOK_URL=https://n8n.$DOMAIN/"
+    "AISTACK_N8N_PATH=/"
     "AISTACK_ACME_CA=$ACME_CA"
   )
   if [ -n "$ACME_CA_ROOT" ]; then
@@ -422,13 +437,10 @@ if [ -z "${ANS[COMPOSE_PROFILES]+set}" ]; then
   else
     say ""
     say "  Profiles:"
-    say "    1) Starter        8 containers — chat, automation, local models"
-    say "    2) AI Automation  9 containers — adds document parsing (chat with your PDF)"
+    say "    1) Starter        14 containers — chat, agent, automation, local models"
+    say "    2) AI Automation  15 containers — adds document parsing (chat with your PDF)"
     say ""
-    say "  There is no third option in this release. The agent tool gateway"
-    say "  failed its pre-build security gate and is not shipped; see"
-    say "  docs/security-faq.md. An installer screen for a deferred group is"
-    say "  how a deferred group comes back, so there is not one."
+    say "  The optional profiles below add to either one."
     read -r -p "  Choose [2]: " choice
     case "${choice:-2}" in
       1) ANS[COMPOSE_PROFILES]="" ;;
@@ -529,7 +541,7 @@ done
 
 # VPS keys.  In home mode they are REMOVED, so re-running as home on a machine
 # that was once VPS goes back to the home configuration.
-VPS_KEYS="AISTACK_MODE AISTACK_DOMAIN AISTACK_CADDYFILE AISTACK_CADDY_SITES AISTACK_AUTHELIA_CONFIG AISTACK_HOMEPAGE_SERVICES AISTACK_DASH_HOST AISTACK_CHAT_URL AISTACK_N8N_URL AISTACK_N8N_HOST AISTACK_N8N_WEBHOOK_URL AISTACK_ACME_CA AISTACK_ACME_ROOT_FILE AISTACK_ACME_CA_ROOT"
+VPS_KEYS="AISTACK_MODE AISTACK_DOMAIN AISTACK_CADDYFILE AISTACK_CADDY_SITES AISTACK_AUTHELIA_CONFIG AISTACK_HOMEPAGE_SERVICES AISTACK_DASH_HOST AISTACK_CHAT_URL AISTACK_N8N_URL AISTACK_N8N_HOST AISTACK_N8N_WEBHOOK_URL AISTACK_N8N_PATH AISTACK_ACME_CA AISTACK_ACME_ROOT_FILE AISTACK_ACME_CA_ROOT"
 python3 - "$NEW_ENV" "$VPS_KEYS" "${VPS_ENV[@]+"${VPS_ENV[@]}"}" <<'PY'
 import re, sys
 path, keys, pairs = sys.argv[1], sys.argv[2].split(), sys.argv[3:]
@@ -570,10 +582,21 @@ bash scripts/gen-secrets.sh < /dev/null
 # The database passwords are written into .env because Compose interpolates
 # connection strings at render time.  Parsed from the one file that defines
 # them, never regenerated here.
+#
+# Read THROUGH fd 3, not by path: gen-secrets.sh has just handed the file to
+# Postgres (root:999 0640), so a normal-user install reads it with `sudo -n`,
+# the same path that set the mode (NOM-430).  The value never touches argv.
+if [ -r secrets/app_db_passwords ]; then
+  exec 3< secrets/app_db_passwords
+else
+  sudo -n true </dev/null 2>/dev/null \
+    || die "cannot read secrets/app_db_passwords (no passwordless sudo)."
+  exec 3< <(sudo -n cat secrets/app_db_passwords </dev/null)
+fi
 python3 - <<'PY'
-import re
+import os, re
 pw = {}
-for line in open("secrets/app_db_passwords"):
+for line in os.fdopen(3):
     if "=" in line:
         k, v = line.strip().split("=", 1)
         pw[k] = v
@@ -585,6 +608,7 @@ for key, app in (("OPENWEBUI_DB_PASSWORD", "openwebui"),
     text = re.sub(rf"^{key}=.*$", f"{key}={pw[app]}", text, flags=re.M)
 open(".env", "w").write(text)
 PY
+exec 3<&-
 chmod 0600 .env
 
 # ===========================================================================
@@ -716,10 +740,10 @@ cat <<EOF
  Run the first, log in, enrol a second factor, run the second when it asks.
 
  Then:
-   bin/aistack models pull qwen3.5:9b      # the `agent` model, ~6.6 GB, egress helper
-   bin/aistack models pull qwen3.5:2b      # `local-chat`, ~2.7 GB
-   bin/aistack models pull bge-m3          # `embed` (Arabic-capable), ~1.2 GB
-   bin/aistack models pull nomic-embed-text   # `local-embed` (the samples), ~0.3 GB
+   bin/aistack models pull qwen3.5:9b      # model 'agent', ~6.6 GB, egress helper
+   bin/aistack models pull qwen3.5:2b      # model 'local-chat', ~2.7 GB
+   bin/aistack models pull bge-m3          # model 'embed' (Arabic-capable), ~1.2 GB
+   bin/aistack models pull nomic-embed-text   # model 'local-embed' (the samples), ~0.3 GB
    bin/aistack status
    bin/aistack doctor
 

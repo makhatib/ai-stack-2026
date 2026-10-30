@@ -17,7 +17,18 @@ handle @owui_upload {
 	reverse_proxy open-webui:8080
 }
 
-handle / {
+# THE FRONT-END: the page, its static files and its own page routes.
+#
+# MEASURED (NOM-430, 2026-10-30).  Until this matcher existed only `/` was
+# routed here, so the page loaded and its 55 /_app/immutable/… files, /static/…
+# and /assets/… hit the default deny below: the chat UI never rendered in a
+# browser.  The list is the top level of the pinned image's /app/build plus the
+# backend's /oauth and /cache, plus the SvelteKit page routes from its
+# client route table (so a reload on /c/<id> or /workspace/… still works).
+# A path Open WebUI adds in a later release is a 404 here until it is listed:
+# the default deny stays the default.
+@owui_app path / /_app/* /static/* /assets/* /audio/* /pyodide/* /wasm/* /sql.js/* /licenses/* /favicon.png /manifest.json /opensearch.xml /robots.txt /user.png /image-placeholder.png /marker-icon.png /marker-icon-2x.png /marker-shadow.png /oauth/* /cache/* /ollama/* /openai/* /admin /admin/* /auth /auth/* /automations /automations/* /calendar /calendar/* /channels/* /c/* /error /folders/* /home /home/* /notes /notes/* /playground /playground/* /s/* /watch /workspace /workspace/*
+handle @owui_app {
 	forward_auth authelia:9091 {
 		uri /api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name

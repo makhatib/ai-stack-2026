@@ -11,7 +11,7 @@
 #
 # WHAT.  Only the keys the profiles own, nothing an owner set by hand:
 #   audio      -- STT/TTS engine, URL, model, voice (and their placeholder keys)
-#   retrieval  -- content extraction engine and Docling URL
+#   retrieval  -- content extraction engine, Docling URL and Docling params
 #   embedding  -- engine, model and URL (bge-m3 through LiteLLM)
 # Run INSIDE open-webui, which has the env; called by `aistack up`:
 #   docker compose exec -T -e OWUI_SYNC_EMAIL=<admin> open-webui python3 - < scripts/owui-sync.py
@@ -37,7 +37,10 @@ def call(path, body=None, token=None, headers=None):
 
 email = E.get("OWUI_SYNC_EMAIL", "")
 if not email:
-    print("owui-sync: no Open WebUI admin yet (nobody has logged in); first start already used the env")
+    # Not "first start already used the env": that is true only if the
+    # profiles have not changed since Open WebUI first started (NOM-430).
+    print("owui-sync: no Open WebUI admin yet (nobody has logged in), so nothing was synced. "
+          "If you changed profiles since the first start, log in once, then run 'bin/aistack up' again.")
     sys.exit(0)
 tok = call("/api/v1/auths/signin", {"email": "", "password": ""},
            headers={E.get("WEBUI_AUTH_TRUSTED_EMAIL_HEADER", "Remote-Email"): email})["token"]
@@ -69,9 +72,18 @@ if diff:
     changed += [d for d in diff if "KEY" not in d]
 
 # --- document parser --------------------------------------------------------
+# DOCLING_PARAMS too (NOM-430, measured): it carries `ocr_lang: ["ara", "eng"]`.
+# Without it, docs-arabic switched on after Open WebUI's first start sent scans
+# to docling-arabic with no OCR language and read 0 of 12 Arabic words; with it,
+# 12 of 12.  Parsed the way Open WebUI parses the env: not JSON means {}.
+try:
+    params = json.loads(E.get("DOCLING_PARAMS") or "{}")
+except ValueError:
+    params = {}
 cur = call("/api/v1/retrieval/config", token=tok)
-want = {"CONTENT_EXTRACTION_ENGINE": E.get("CONTENT_EXTRACTION_ENGINE", ""), "DOCLING_SERVER_URL": E.get("DOCLING_SERVER_URL", "")}
-diff = [k for k, v in want.items() if cur.get(k, "") != v]
+want = {"CONTENT_EXTRACTION_ENGINE": E.get("CONTENT_EXTRACTION_ENGINE", ""), "DOCLING_SERVER_URL": E.get("DOCLING_SERVER_URL", ""),
+        "DOCLING_PARAMS": params if isinstance(params, dict) else {}}
+diff = [k for k, v in want.items() if (cur.get(k) or type(v)()) != v]
 if diff:
     call("/api/v1/retrieval/config/update", want, tok)
     changed += diff

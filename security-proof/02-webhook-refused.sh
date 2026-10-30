@@ -92,8 +92,17 @@ refuse "malformed JSON (valid token)                " "$(post "$W/good.hdr" "$W/
 refuse "GET instead of POST (valid token)           " "$(curl -s $INSECURE $RESOLVE -m 40 -o /dev/null -w '%{http_code}' -H @"$W/good.hdr" "$URL")"
 # The editor's test URL must not be open to the internet even though /webhook/* is.
 test_url="${URL/\/webhook\//\/webhook-test\/}"
-c="$(curl -s $INSECURE $RESOLVE -m 40 -o /dev/null -w '%{http_code}' -X POST -H @"$W/good.hdr" -H 'Content-Type: application/json' --data-binary @"$W/ok.json" "$test_url")"
-if [ "$c" = 302 ] || [ "$c" = 401 ] || [ "$c" = 403 ] || [ "$c" = 404 ]; then ok "the editor's /webhook-test/ URL is not open (HTTP $c: login page or no route)"; else bad "/webhook-test/ answered HTTP $c"; fi
+# A redirect counts as refused only when it goes to the login portal: Authelia
+# answers a POST with 303, a GET with 302 (NOM-430: 303 used to print FAIL).
+read -r c loc <<<"$(curl -s $INSECURE $RESOLVE -m 40 -o /dev/null -w '%{http_code} %{redirect_url}' -X POST -H @"$W/good.hdr" -H 'Content-Type: application/json' --data-binary @"$W/ok.json" "$test_url")"
+to_login=0
+[[ "${loc:-}" =~ ^https?://auth\. || "${loc:-}" =~ ^https?://[^/]+/authelia(/|\?|$) ]] && to_login=1
+case "$c" in
+  401|403|404) ok "the editor's /webhook-test/ URL is not open (HTTP $c: refused or no route)" ;;
+  30[1-8]) if [ $to_login = 1 ]; then ok "the editor's /webhook-test/ URL is not open (HTTP $c: redirect to the login portal)"
+           else bad "/webhook-test/ answered HTTP $c to ${loc:-nowhere}, which is not the login portal"; fi ;;
+  *) bad "/webhook-test/ answered HTTP $c" ;;
+esac
 [ "$(count)" = "$BASE" ] && ok "after all hostile requests the counter is still $BASE: no row, no model call" || bad "counter moved to $(count) during the hostile requests"
 
 verdict "malicious webhook payloads are refused and leave no trace" "a webhook payload was accepted, or a refusal left a trace, or the control failed"

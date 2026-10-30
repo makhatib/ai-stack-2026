@@ -70,11 +70,13 @@ grep -q 'NON_INTERACTIVE' "$BLOCK" \
 {
   grep '^KNOWN_PROFILES=' install.sh
   sed -n '/^ask_optional_profiles() {$/,/^}$/p' install.sh
+  sed -n '/^drop_knowledge_for_docs_arabic() {$/,/^}$/p' install.sh
   sed -n '/^check_profiles() {$/,/^}$/p' install.sh
 } > "$OPT"
 [ "$(grep -c '^KNOWN_PROFILES=' install.sh)" = 1 ] || refuse "install.sh does not have exactly one KNOWN_PROFILES line"
 grep -q '^ask_optional_profiles() {$' "$OPT" || refuse "ask_optional_profiles() could not be extracted from install.sh"
 grep -q '^check_profiles() {$' "$OPT" || refuse "check_profiles() could not be extracted from install.sh"
+grep -q '^drop_knowledge_for_docs_arabic() {$' "$OPT" || refuse "drop_knowledge_for_docs_arabic() could not be extracted from install.sh"
 grep -q '^check_profiles "${ANS\[COMPOSE_PROFILES\]}"$' install.sh \
   || refuse "install.sh no longer calls check_profiles on the selected profiles"
 grep -q 'ask_optional_profiles' "$BLOCK" || refuse "the selection block no longer asks the optional profiles"

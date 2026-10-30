@@ -9,7 +9,8 @@ git clone <repository-url> ai-stack-2026 && cd ai-stack-2026
 sudo ./install.sh --mode vps --domain example.com          # same as: sudo bin/aistack install --mode vps --domain example.com
 ```
 
-It asks nothing. The domain is the only answer.
+It asks nothing. The domain is the only required answer; `--profiles` chooses the
+optional parts (see [Profiles](#profiles)).
 
 ## Before you run it (3 things, the installer checks all three)
 
@@ -45,6 +46,40 @@ bin/aistack user code             # the one-time code enrolment asks for
 Open `https://auth.example.com/`, log in, enrol a second factor (TOTP), enter the code.
 After that `https://dash.example.com/` and `https://chat.example.com/` open.
 
+## Profiles
+
+VPS mode installs **AI Automation** (`knowledge`: chat with your documents) unless you
+say otherwise. Choose at install time with `--profiles`:
+
+```bash
+sudo ./install.sh --mode vps --domain example.com --profiles knowledge,voice-arabic
+sudo ./install.sh --mode vps --domain example.com --profiles docs-arabic      # Arabic OCR parser instead of the English one
+```
+
+| Profile | Adds | Memory (measured, NOM-415) |
+|---|---|---|
+| `knowledge` | document parser (English) | ~0.9 GB |
+| `docs-arabic` | Arabic OCR parser; **replaces** `knowledge`'s parser | ~1.1 GB idle, 2.1 GB working |
+| `voice-arabic` | Arabic speech-to-text and text-to-speech in Open WebUI | ~5.1 GB idle, 7.6 GB working — **needs 16 GB**; on 8 GB it is killed for memory |
+| `openclaw` | OpenClaw agent, tools in a gVisor sandbox | ~1.2 GB idle, 1.8 GB working |
+| `''` (empty) | Starter: no document parser | — |
+
+**Adding or removing a profile later.** Edit one line in `.env`, then start again:
+
+```bash
+cd ai-stack-2026
+nano .env                        # COMPOSE_PROFILES=knowledge,voice-arabic   (comma-separated, no spaces)
+bin/aistack up
+```
+
+`bin/aistack up` starts the new services, **removes the containers of any profile you
+took out** (their volumes stay), and copies the voice and document-parser settings
+into Open WebUI. Open WebUI only takes those settings once someone has logged in; if
+nobody has yet, log in once and run `bin/aistack up` again.
+
+If you re-run the installer later, pass the same `--profiles` again: a VPS re-run
+without it goes back to `knowledge`.
+
 ## The security promise, and how it is checked
 
 | Promise | Enforced by | Checked by |
@@ -76,6 +111,7 @@ Exit 0 = every check ran and passed. 1 = a check failed. 2 = a check could not r
 | `--acme-ca staging` | Let's Encrypt staging: for rehearsals. Browsers do not trust it. |
 | `--acme-ca <https-url>` / `--acme-ca-root <pem>` | A private ACME CA (used by the rehearsal below). |
 | `--skip-dns-check` | Install before the DNS records exist. Certificates fail until they do. |
+| `--profiles <list>` | Comma-separated optional profiles; see [Profiles](#profiles). Works in home mode too. |
 
 ## Undo / rollback
 

@@ -1,0 +1,27 @@
+# Homepage's own files at the ROOT (the dashboard itself is 20-homepage.caddy).
+#
+# THIS FILE SORTS BEFORE 10-open-webui.caddy ON PURPOSE.  Caddy keeps these
+# `handle` blocks in file order, so the `/api/*` route in 10-open-webui.caddy
+# would otherwise take /api/hash, /api/services and the rest before this block
+# saw them (measured with `caddy adapt`, NOM-430).
+#
+# HOMEPAGE HAS NO BASE PATH, so the page served at /dash asks for its own files
+# at the ROOT: /_next/…, its icons, and a few /api/… calls of its own.
+#
+# MEASURED (NOM-430, 2026-10-30) against the pinned image: those are the paths
+# below.  None of them is a path Open WebUI serves (its API is /api/v1/…,
+# /api/config exactly, /api/models, /api/chat/…), so they cannot shadow the
+# chat app (its sign-in API is /api/v1/auths/…; /api/auth/* is Homepage's
+# next-auth, which the page calls on load).  Before this block they hit the default deny and the dashboard
+# rendered without its scripts.
+@homepage_assets path /_next/* /site.webmanifest /homepage.ico /apple-touch-icon.png /favicon-16x16.png /favicon-32x32.png /safari-pinned-tab.svg /android-chrome-* /mstile-* /locales/* /images/* /api/config/* /api/hash /api/services /api/services/* /api/bookmarks /api/widgets /api/widgets/* /api/validate /api/revalidate /api/releases /api/auth/*
+handle @homepage_assets {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy homepage:3000
+}

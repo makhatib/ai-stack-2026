@@ -362,7 +362,9 @@ def i5(ctx):
         base = base.replace("n8n-editor", "n8n").replace("n8n-rest-api", "n8n")
         if re.search(rf"reverse_proxy\s+{re.escape(base)}:", blob) and base not in ("n8n",):
             bad.append(f"a sites.d/ route proxies to never-publishable service '{base}'")
-    for pattern in ("/n8n/rest/", "/n8n/webhook-test/", "/n8n/form/"):
+    # /n8n/rest/ left this list in NOM-430: the editor cannot run without it,
+    # and it is published behind forward-auth exactly as in VPS mode.
+    for pattern in ("/n8n/webhook-test/", "/n8n/form/"):
         if f"handle {pattern}" in blob:
             bad.append(f"a sites.d/ route HANDLES {pattern}, which must only ever be denied")
     if "@n8n_forbidden" not in blob:

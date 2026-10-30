@@ -10,8 +10,11 @@
 # price of 1 USD per million tokens, which makes max_budget 0.2 per day equal
 # 200000 tokens per day (limits.yaml "Model: tokens per key per day").
 #
-# Needs root (it reads the key files) and a running litellm.  The master key
-# never leaves the container: the registration runs inside it.
+# Needs a running litellm, and read access to the key files.  key_mem0 and
+# key_hermes belong to their services (root:<gid> 0640), so a normal-user
+# install reads them through `sudo -n`, the same path gen-secrets.sh used to
+# set that mode (NOM-430).  The master key never leaves the container: the
+# registration runs inside it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -32,7 +35,11 @@ openclaw:agent::60:200000'
 JSON="["; sep=""
 while IFS=: read -r app models mcp rpm tokens; do
   [ -s "$SECRETS/key_$app" ] || { echo "missing $SECRETS/key_$app (run scripts/gen-secrets.sh)" >&2; exit 1; }
-  JSON+="$sep{\"app\":\"$app\",\"key\":\"sk-$(cat "$SECRETS/key_$app")\",\"models\":\"$models\",\"mcp\":\"$mcp\",\"rpm\":$rpm,\"tokens\":$tokens}"
+  if [ -r "$SECRETS/key_$app" ]; then k="$(cat "$SECRETS/key_$app")"
+  else k="$(sudo -n cat "$SECRETS/key_$app" </dev/null)" \
+    || { echo "cannot read $SECRETS/key_$app; run: sudo bash scripts/litellm-keys.sh" >&2; exit 1; }
+  fi
+  JSON+="$sep{\"app\":\"$app\",\"key\":\"sk-$k\",\"models\":\"$models\",\"mcp\":\"$mcp\",\"rpm\":$rpm,\"tokens\":$tokens}"
   sep=","
 done <<<"$SPEC"
 JSON+="]"

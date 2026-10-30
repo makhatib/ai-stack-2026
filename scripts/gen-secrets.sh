@@ -190,9 +190,17 @@ apply_mode() {
     #
     # "Root can read anything" is false in a hardened container, and a
     # chmod-only branch here quietly relies on it.
+    # Already root's: only the mode may need setting, and a normal user
+    # cannot chmod root's file.  install.sh runs this script twice, so the
+    # second run always lands here (NOM-430).
     if [ "$(stat -c %u "$path")" = "0" ]; then
-      chmod 0600 "$path"
-      return 0
+      if [ "$(stat -c %a "$path")" = "600" ] || chmod 0600 "$path" 2>/dev/null; then
+        return 0
+      fi
+      if command -v sudo >/dev/null 2>&1 && sudo -n chmod 0600 "$path" </dev/null 2>/dev/null; then
+        return 0
+      fi
+      die_unreadable_root "$path" "$consumer"
     fi
     if chown 0:0 "$path" 2>/dev/null && chmod 0600 "$path" 2>/dev/null; then
       return 0
@@ -304,6 +312,61 @@ EOF
   exit 1
 }
 
+# READ AND REWRITE A SECRET THAT apply_mode HAS ALREADY HANDED TO ITS SERVICE.
+#
+# MEASURED (NOM-430, 2026-10-29).  The documented home install — `./install.sh`
+# as a normal user with sudo — stopped at step 11 with "Permission denied":
+# apply_mode had just made app_db_passwords root:999 0640 through `sudo -n`,
+# and the next line read it back as the installing user.  A root install never
+# sees this, which is why VPS mode passed and home mode did not.  Every read of
+# a secret after its apply_mode goes through sread, which takes the same
+# privilege path apply_mode took.
+#
+# sread FAILS LOUDLY, and its callers assign it to a variable before using it.
+# A failed read inside `[ "$(…)" != … ]` is an empty string, not an error, and
+# the branch it feeds would rewrite the secret from that empty string.
+sread() {
+  if [ -r "$1" ]; then
+    cat "$1"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n cat "$1" </dev/null 2>/dev/null; then
+    return
+  fi
+  echo "FATAL: $(id -un) cannot read $1 and passwordless sudo is not available." >&2
+  echo "Run: sudo bash scripts/gen-secrets.sh" >&2
+  return 1
+}
+
+# Writes need no privilege: secrets/ belongs to the operator, so a new file
+# renamed over a root-owned one replaces it.  Every write below is followed by
+# the apply_mode (or apply_env_file_mode) that sets its mode again.
+#   swrite PATH  (content on stdin)
+swrite() {
+  local tmp="$1.new.$$"
+  cat > "$tmp"
+  mv -f "$tmp" "$1"
+}
+
+#   ssync PATH VALUE SOURCE  — make PATH hold exactly VALUE (no newline).
+ssync() {
+  local cur=""
+  if [ -s "$1" ]; then
+    cur="$(sread "$1")"
+  fi
+  if [ "$cur" != "$2" ]; then
+    printf '%s' "$2" | swrite "$1"
+    log "  sync    $1 (from $3)"
+  fi
+}
+
+#   sappend PATH LINE
+sappend() {
+  local cur
+  cur="$(sread "$1")"
+  { [ -z "$cur" ] || printf '%s\n' "$cur"; printf '%s\n' "$2"; } | swrite "$1"
+}
+
 # Generate one secret if and only if it does not already exist.
 #   $1 name, $2 consumer service (for the measured ids), $3 generator
 #
@@ -347,8 +410,12 @@ gen backup.hmac                     operator      hex32
 # --- the per-app database passwords ----------------------------------------
 # One file, `name=value` per line, PARSED and never sourced.
 APPPW="$SECRETS/app_db_passwords"
-touch "$APPPW"
-chmod 0600 "$APPPW"
+# Create it once.  On a re-run it is root:999 0640 and `touch` would fail.
+if [ ! -e "$APPPW" ]; then
+  : > "$APPPW"
+  chmod 0600 "$APPPW"
+fi
+APPPW_NOW="$(sread "$APPPW")"
 # THE SINGLE DECLARATION OF THE APP LIST.
 #
 # This loop is the ONLY place in the repository where the set of apps that get
@@ -367,13 +434,21 @@ chmod 0600 "$APPPW"
 # can exist: a list built with `printf` or spread down a heredoc would slip
 # past it.  tests/app-list-coupling.sh measures the behaviour instead.
 for app in authelia openwebui litellm n8n mem0 langfuse; do
-  if grep -q "^${app}=" "$APPPW" 2>/dev/null; then
+  # A pattern match, not `printf | grep -q`: under pipefail an early grep exit
+  # can SIGPIPE the printf, and "not found" would append a second password.
+  if [[ $'\n'"$APPPW_NOW" == *$'\n'"${app}="* ]]; then
     log "  reuse   db password for $app"
   else
-    printf '%s=%s\n' "$app" "$(openssl rand -hex 24)" >> "$APPPW"
+    sappend "$APPPW" "${app}=$(openssl rand -hex 24)"
+    APPPW_NOW="$(sread "$APPPW")"
     log "  create  db password for $app"
   fi
 done
+# The two values derived below are taken from this read, made BEFORE
+# apply_mode hands the file to Postgres.
+AUTH_PW="$(printf '%s\n' "$APPPW_NOW" | sed -n 's/^authelia=//p')"
+MEM0_PW="$(printf '%s\n' "$APPPW_NOW" | sed -n 's/^mem0=//p')"
+unset APPPW_NOW
 # Postgres reads this one, and it does NOT run as root.
 apply_mode "$APPPW" postgres
 
@@ -391,15 +466,11 @@ apply_mode "$APPPW" postgres
 # Deriving it here, from the one file that defines it, makes the two
 # impossible to drift apart.
 AUTH_PW_FILE="$SECRETS/authelia_storage_password"
-AUTH_PW="$(sed -n 's/^authelia=//p' "$APPPW")"
 if [ -z "$AUTH_PW" ]; then
   echo "FATAL: no authelia password in $APPPW" >&2
   exit 1
 fi
-if [ ! -s "$AUTH_PW_FILE" ] || [ "$(cat "$AUTH_PW_FILE")" != "$AUTH_PW" ]; then
-  printf '%s' "$AUTH_PW" > "$AUTH_PW_FILE"
-  log "  sync    $AUTH_PW_FILE (from app_db_passwords — one password, one source)"
-fi
+ssync "$AUTH_PW_FILE" "$AUTH_PW" "app_db_passwords — one password, one source"
 unset AUTH_PW
 apply_mode "$AUTH_PW_FILE" authelia
 
@@ -489,21 +560,21 @@ unset OWUI_SECRET LITELLM_MASTER LITELLM_SALT
 gen mem0_api_key        mem0    hex32
 # Mem0's own Postgres password, derived from the one file that defines it (the
 # same single-source rule as authelia_storage_password above).
-MEM0_PW="$(sed -n 's/^mem0=//p' "$APPPW")"
-if [ ! -s "$SECRETS/mem0_db_password" ] || [ "$(cat "$SECRETS/mem0_db_password")" != "$MEM0_PW" ]; then
-  printf '%s' "$MEM0_PW" > "$SECRETS/mem0_db_password"
-  log "  sync    $SECRETS/mem0_db_password (from app_db_passwords)"
+# MEM0_PW was read from app_db_passwords before its apply_mode (above).
+if [ -z "$MEM0_PW" ]; then
+  echo "FATAL: no mem0 password in $APPPW" >&2
+  exit 1
 fi
+ssync "$SECRETS/mem0_db_password" "$MEM0_PW" "app_db_passwords"
 unset MEM0_PW
 apply_mode "$SECRETS/mem0_db_password" mem0
 gen valkey_password     valkey  hex32
 # Crawl4AI's API token, and mcp-web's copy of the SAME value (mcp-web is its only
 # caller; each file has its own consumer's mode).
 gen crawl4ai_api_token crawl4ai hex32
-if [ ! -s "$SECRETS/mcp_crawl4ai_token" ] || [ "$(cat "$SECRETS/mcp_crawl4ai_token")" != "$(cat "$SECRETS/crawl4ai_api_token")" ]; then
-  cp "$SECRETS/crawl4ai_api_token" "$SECRETS/mcp_crawl4ai_token"
-  log "  sync    $SECRETS/mcp_crawl4ai_token (from crawl4ai_api_token)"
-fi
+V="$(sread "$SECRETS/crawl4ai_api_token")"
+ssync "$SECRETS/mcp_crawl4ai_token" "$V" "crawl4ai_api_token"
+unset V
 apply_mode "$SECRETS/mcp_crawl4ai_token" mcp-web
 
 # The per-app LiteLLM keys.  They are CHOSEN here and REGISTERED with LiteLLM
@@ -515,10 +586,9 @@ gen key_hermes   hermes   hex32
 gen key_n8n      operator hex32
 gen key_openwebui operator hex32
 # mem0 reads its LiteLLM key as a file, as the key itself with the sk- prefix.
-if [ ! -s "$SECRETS/mem0_litellm_key" ] || [ "$(cat "$SECRETS/mem0_litellm_key")" != "sk-$(cat "$SECRETS/key_mem0")" ]; then
-  printf '%s' "sk-$(cat "$SECRETS/key_mem0")" > "$SECRETS/mem0_litellm_key"
-  log "  sync    $SECRETS/mem0_litellm_key (from key_mem0)"
-fi
+V="$(sread "$SECRETS/key_mem0")"
+ssync "$SECRETS/mem0_litellm_key" "sk-$V" "key_mem0"
+unset V
 apply_mode "$SECRETS/mem0_litellm_key" mem0
 
 # SearXNG: the one secret is rendered into its settings file (a FILE, like
@@ -542,6 +612,7 @@ HERMES_ENV="$SECRETS/hermes.env"
 if [ -s "$HERMES_ENV" ]; then
   log "  reuse   $HERMES_ENV"
 else
+  KH="$(sread "$SECRETS/key_hermes")"; KM="$(sread "$SECRETS/mem0_api_key")"
   : > "$HERMES_ENV"; chmod 0600 "$HERMES_ENV"
   {
     # COMMENTED OUT, NOT A PLACEHOLDER VALUE.  Hermes treats any value as a
@@ -551,12 +622,13 @@ else
     # `sudo bin/aistack telegram token` fills both lines.
     printf '# TELEGRAM_BOT_TOKEN=\n'
     printf '# TELEGRAM_ALLOWED_USERS=\n'
-    printf 'OPENAI_API_KEY=sk-%s\n' "$(cat "$SECRETS/key_hermes")"
-    printf 'MEM0_API_KEY=%s\n' "$(cat "$SECRETS/mem0_api_key")"
+    printf 'OPENAI_API_KEY=sk-%s\n' "$KH"
+    printf 'MEM0_API_KEY=%s\n' "$KM"
     printf 'MEM0_HOST=%s\n' "http://mem0:8000"
     printf 'MEM0_TELEMETRY=%s\n' "False"
     printf 'HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=%s\n' "true"
   } >> "$HERMES_ENV"
+  unset KH KM
   log "  create  $HERMES_ENV (no Telegram yet: sudo bin/aistack telegram token)"
 fi
 apply_mode "$HERMES_ENV" hermes
@@ -565,10 +637,9 @@ apply_mode "$HERMES_ENV" hermes
 # Same rules: reused, never rotated, never printed.
 gen openclaw_gateway_token openclaw hex32
 gen key_openclaw          operator hex32
-if [ ! -s "$SECRETS/openclaw_litellm_key" ] || [ "$(cat "$SECRETS/openclaw_litellm_key")" != "sk-$(cat "$SECRETS/key_openclaw")" ]; then
-  printf '%s' "sk-$(cat "$SECRETS/key_openclaw")" > "$SECRETS/openclaw_litellm_key"
-  log "  sync    $SECRETS/openclaw_litellm_key (from key_openclaw)"
-fi
+V="$(sread "$SECRETS/key_openclaw")"
+ssync "$SECRETS/openclaw_litellm_key" "sk-$V" "key_openclaw"
+unset V
 apply_mode "$SECRETS/openclaw_litellm_key" openclaw
 # Two ed25519 pairs: the gateway's client key (the sandbox authorises its
 # public half) and the sandbox's host key (the gateway pins its public half in
@@ -587,9 +658,10 @@ ssh_pair openclaw_sandbox_key
 ssh_pair openclaw_sandbox_hostkey
 apply_mode "$SECRETS/openclaw_sandbox_key"     openclaw
 apply_mode "$SECRETS/openclaw_sandbox_hostkey" openclaw-sandbox
-cp "$SECRETS/openclaw_sandbox_key.pub" "$SECRETS/openclaw_sandbox_authorized_keys"
+# By rename: on a re-run both targets are already root-owned (NOM-430).
+swrite "$SECRETS/openclaw_sandbox_authorized_keys" < "$SECRETS/openclaw_sandbox_key.pub"
 apply_mode "$SECRETS/openclaw_sandbox_authorized_keys" openclaw-sandbox
-printf '[openclaw-sandbox]:2222 %s\n' "$(cut -d' ' -f1-2 "$SECRETS/openclaw_sandbox_hostkey.pub")" > "$SECRETS/openclaw_sandbox_known_hosts"
+printf '[openclaw-sandbox]:2222 %s\n' "$(cut -d' ' -f1-2 "$SECRETS/openclaw_sandbox_hostkey.pub")" | swrite "$SECRETS/openclaw_sandbox_known_hosts"
 apply_mode "$SECRETS/openclaw_sandbox_known_hosts" openclaw
 claim_for_operator "$SECRETS/openclaw_sandbox_key.pub" 0600
 claim_for_operator "$SECRETS/openclaw_sandbox_hostkey.pub" 0600
@@ -601,7 +673,7 @@ LF="$SECRETS/langfuse.env"
 if [ -s "$LF" ]; then
   log "  reuse   $LF"
 else
-  CHP="$(openssl rand -hex 24)"; S3P="$(openssl rand -hex 24)"; VKP="$(cat "$SECRETS/valkey_password")"
+  CHP="$(openssl rand -hex 24)"; S3P="$(openssl rand -hex 24)"; VKP="$(sread "$SECRETS/valkey_password")"
   LFPUB="pk-lf-$(openssl rand -hex 12)"; LFSEC="sk-lf-$(openssl rand -hex 24)"
   : > "$LF"; chmod 0600 "$LF"
   {
@@ -637,7 +709,7 @@ apply_env_file_mode "$SECRETS/minio.env"
 ensure_env_line() {
   local file="$1" key="$2" value="$3"
   if grep -q "^${key}=" "$file" 2>/dev/null; then return 0; fi
-  printf '%s=%s\n' "$key" "$value" >> "$file"
+  sappend "$file" "${key}=${value}"
   log "  add     $key -> $(basename "$file")"
 }
 ensure_env_line "$SECRETS/open-webui.env" OPENAI_API_KEY "sk-$(cat "$SECRETS/key_openwebui")"

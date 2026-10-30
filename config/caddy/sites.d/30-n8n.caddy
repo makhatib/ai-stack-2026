@@ -1,16 +1,22 @@
-# n8n — the automation engine.
+# n8n — the automation engine, at /n8n/.
 #
-# NEVER PUBLISHABLE, enforced twice (the installer refuses to write the route;
-# I5 asserts no template exists): the EDITOR, the REST API, /webhook-test/* and
-# /form/*.  Only the paths below are ever proxied, and they are matched
-# explicitly rather than by a prefix that a trailing-path trick could widen.
+# n8n runs with N8N_PATH=/n8n/ in home mode (compose.yaml, AISTACK_N8N_PATH),
+# so the editor asks for /n8n/assets/…, /n8n/static/… and /n8n/rest/….  N8N_PATH
+# moves ONLY the editor's links: n8n itself still serves /assets, /rest and
+# /webhook at its root.  So every route below strips /n8n before proxying.
 #
-# Public webhooks are NOT IN v1 (S04).  Webhooks work normally in LOCAL MODE
-# with n8n header-token auth and bounded bodies.  The VPN path they also used is
-# deferred with `remote-access`.
+# MEASURED (NOM-430, 2026-10-30).  Before this, /n8n/webhook/* was proxied with
+# the prefix kept and n8n answered 404 to every production webhook, and the
+# editor's assets fell through to the default deny, so the editor never loaded.
+#
+# THE EDITOR AND ITS REST API ARE PUBLISHED, behind forward-auth and therefore
+# behind the second factor — the same decision as VPS mode (sites-vps.d/
+# 30-n8n.caddy): an editor you cannot reach is not an editor, and the editor
+# cannot run without /rest.  Still never published: /webhook-test/* and the
+# form routes (unauthenticated by design inside n8n) and n8n's public API.
 
 # Deny first, and by exact prefix, so a later handler cannot resurrect them.
-@n8n_forbidden path /n8n/rest/* /n8n/webhook-test/* /n8n/form/* /n8n/form-test/* /n8n/api/*
+@n8n_forbidden path /n8n/webhook-test/* /n8n/form/* /n8n/form-test/* /n8n/api/*
 handle @n8n_forbidden {
 	respond "Not available in this deployment" 404
 }
@@ -23,10 +29,13 @@ handle /n8n/webhook/* {
 	request_body {
 		max_size 1MB
 	}
+	uri strip_prefix /n8n
 	reverse_proxy n8n:5678
 }
 
-handle /n8n* {
+redir /n8n /n8n/ 308
+
+handle /n8n/* {
 	forward_auth authelia:9091 {
 		uri /api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
@@ -34,5 +43,6 @@ handle /n8n* {
 	request_body {
 		max_size 1MB
 	}
+	uri strip_prefix /n8n
 	reverse_proxy n8n:5678
 }

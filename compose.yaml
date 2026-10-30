@@ -538,6 +538,10 @@ services:
       N8N_HOST: ${AISTACK_N8N_HOST:-${AISTACK_HOSTNAME:?hostname missing}}
       N8N_PROTOCOL: https
       WEBHOOK_URL: ${AISTACK_N8N_WEBHOOK_URL:-https://${AISTACK_HOSTNAME:?hostname missing}/n8n/}
+      # Home mode serves n8n at /n8n/ (config/caddy/sites.d/30-n8n.caddy); VPS
+      # mode at the root of n8n.{domain}, and install.sh writes "/" there.
+      # N8N_PATH moves only the editor's links; Caddy strips the prefix.
+      N8N_PATH: ${AISTACK_N8N_PATH:-/n8n/}
       N8N_PROXY_HOPS: "1"
       # v2: n8n's built-in MCP server is ON so Hermes can trigger workflows.  It
       # is reachable from `gateway` only, and LiteLLM's one allowlist

@@ -141,12 +141,13 @@ container's registration makes the route live everywhere. The harness asserts
 that (W4.6) rather than the comfortable opposite, which is what it was written
 to assert before the measurement corrected it.
 
-What keeps the demo off the proxy today is **not** this harness's choice of
-container. It is that Caddy forwards `/n8n/webhook/*` without stripping the
-prefix, so n8n has no route for what arrives — a bug standing in for a control
-(measured and routed on [NOM-321](/NOM/issues/NOM-321)). W4.8 therefore asserts
-the property that does matter: once the demo is unpublished, the live instance
-answers `404` again.
+So while the demo is live, `https://<host>/n8n/webhook/w4-demo` answers
+through Caddy too. Until NOM-430 it did not, because Caddy kept the `/n8n`
+prefix and n8n had no route for it — a bug standing in for a control (measured
+on [NOM-321](/NOM/issues/NOM-321)). That bug is fixed; the control is the
+token check in the workflow, which `security-proof/02-webhook-refused.sh`
+attacks. W4.8 asserts the property that matters here: once the demo is
+unpublished, the live instance answers `404` again.
 
 **P2 — the approval envelope, on its own.** Five negative cases and one
 positive one, run directly against the shipped DDL rather than against a copy:

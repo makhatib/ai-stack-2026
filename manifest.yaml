@@ -644,7 +644,7 @@ services:
     image_var: N8N
     networks: [apps, gateway, data]        # `agents` dropped: G-AGENTS failed; no egress in the MVP
     untrusted_input: yes
-    publishable: opt_in          # app route only; editor/REST/webhook-test/form never
+    publishable: opt_in          # editor + REST behind forward-auth/MFA (NOM-430, as VPS); webhook-test/form never
     depends_on: [postgres]
     volumes: [n8n-data]
     backup: yes
@@ -1083,8 +1083,6 @@ publish:
     - docling-serve
     - agentgateway
     - comfyui
-    - n8n-editor
-    - n8n-rest-api
     - n8n-webhook-test
     - n8n-form
     - caddy-admin-endpoint
