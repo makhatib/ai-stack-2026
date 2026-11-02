@@ -1,52 +1,92 @@
 # AI Stack 2026
 
-A self-hosted AI and automation server you can install on one machine, read
-end to end, and take apart again.
+A private AI and automation server for **one owner**, installed with one
+command on a VPS or a home server. Every app sits behind one login with a
+second factor. Nothing else is published.
 
-**Nine containers.** Chat, documents, local models and workflow automation,
-behind one locked door.
+> **Single owner, not multi-user.** This release has one owner account and no
+> user roles. Do not give other people accounts on it. Multi-user is a later
+> release.
 
 ## What is in it
 
 | | |
 |---|---|
-| **Open WebUI** | chat, RAG and the document pipeline |
-| **n8n** | workflow automation — the only place a mutating action can run |
-| **Ollama** | local models, on your own hardware |
-| **LiteLLM** | the one authorised front door to every model |
-| **Docling** | "chat with your PDF" — document parsing, isolated |
+| **Hermes Agent** | your personal agent (Telegram optional) |
+| **n8n** | workflow automation, with its MCP server on |
+| **Open WebUI** | chat, and chat with your documents |
+| **Ollama** | local models, internal only (port 11434 is never published) |
+| **LiteLLM** | the one gateway to every model and the shared MCP tool allowlist, per-app keys and spend limits |
+| **gVisor** | sandbox runtime for agent code execution |
+| **Mem0** | memory for the agent |
 | **PostgreSQL + pgvector** | one datastore, one backup procedure |
-| **Authelia** | login and two-factor, in front of everything |
-| **Caddy** | TLS and routing, with a static config |
-| **Homepage** | the front door |
+| **SearXNG + Crawl4AI** | private web search and page extraction, internal only |
+| **Langfuse** | tracing (optional; needs 16 GB) |
+| **Authelia** | login and two-factor, in front of every app |
+| **Caddy** | HTTPS and routing, with a static config |
+| **Homepage** | the dashboard |
+
+Optional profiles, chosen at install: `knowledge` (document parsing),
+`docs-arabic` (Arabic OCR), `voice-arabic` (Arabic speech-to-text and
+text-to-speech, needs 16 GB), `openclaw` (OpenClaw agent in a gVisor sandbox).
+Sizes and details: [docs/vps-mode.md](docs/vps-mode.md#profiles).
+
+## Install
+
+```sh
+git clone https://github.com/makhatib/ai-stack-2026.git && cd ai-stack-2026
+```
+
+**Home server** (private, nothing published):
+
+```sh
+./install.sh
+```
+
+If gVisor is missing, the installer stops and tells you to run
+`sudo scripts/install-gvisor.sh`. Run it, then run `./install.sh` again.
+
+**VPS** (fresh Ubuntu 24.04, your domain, an SSH key that already works):
+
+```sh
+sudo ./install.sh --mode vps --domain example.com
+```
+
+VPS mode sets the firewall to 22, 80 and 443 only, turns SSH password login
+off, and gets real HTTPS certificates. Read [docs/vps-mode.md](docs/vps-mode.md)
+first: it lists the DNS records you need before you run it.
+
+**Then, in both modes, create your owner login:**
+
+```sh
+bin/aistack user reset owner      # set your password at the prompt
+bin/aistack user code             # the one-time code that two-factor enrolment asks for
+```
+
+Full steps: [docs/install.md](docs/install.md).
 
 ## Where it listens
+
+Home mode:
 
 <!-- AISTACK-LOCAL-MODE:BEGIN -->
 Not published to the internet. Reachable on this machine; reachable from other devices on your network if your network allows it — we have not tested that.
 <!-- AISTACK-LOCAL-MODE:END -->
 
-That sentence is the project's exact wording about exposure and it lives in
-exactly one file, `strings/local-mode.txt`. Everywhere it appears it is
-rendered from there, and CI checks the copy matches.
+VPS mode: only ports 80 and 443 for the apps, and 22 for SSH with a key.
 
-## Install
+## What was tested for this release
 
-```sh
-git clone <this repo> aistack && cd aistack
-./install.sh
-```
+Tested on Ubuntu 24.04, x86-64, 4 vCPU / 16 GB, on our own test machines:
 
-The installer runs pre-flight checks, generates every secret, and refuses to
-continue rather than leaving you with a stack that starts and then fails.
+- Home install, owner login with two-factor, dashboard, chat and the n8n
+  editor open.
+- The webhook refuses hostile requests and stores nothing.
 
-Then:
-
-```sh
-bin/aistack status      # what is running, and the counts, separately
-bin/aistack doctor      # health, pins, secret readability, host listeners
-bin/aistack models pull qwen3.5:2b
-```
+**Not tested for this release:** answers from local models (agent, chat,
+document chat, voice, OCR), Telegram, GPU, and a real Hostinger VPS with a
+public certificate. VPS mode was tested on an earlier commit with a private
+test CA only.
 
 ## Tests
 
@@ -98,16 +138,9 @@ keeps `tests/` from drifting back into a directory of scripts nothing calls.
 
 ## What this release does NOT do
 
-Stated here rather than discovered later:
-
-- **No internet research.** There is no web-search group and Open WebUI's web
-  search is off in every profile.
-- **No agent tool gateway.** It was planned, and its pre-build gate failed —
-  see `docs/security-faq.md` and `gate/G-AGENTS-result.json`. The honest
-  summary: the gateway enforces tool *names* and does not validate arguments
-  against the tool's declared schema, so it was not shipped.
-- **No GPU paths tested.** GPU support is a later release.
-- **No voice, no images, no code execution, no VPN, no public mode.**
+- **No multi-user.** One owner account, no roles.
+- **No GPU paths tested.** The `gpu` profile is a later release.
+- **No images or video generation, no coding agents.**
 - **No containment claim.** The stack makes no promise that a compromised
   container cannot reach your LAN or a service listening on your host. See
   the security FAQ, which says exactly what is and is not claimed.
@@ -115,6 +148,7 @@ Stated here rather than discovered later:
 ## Documentation
 
 - [Install](docs/install.md)
+- [VPS mode](docs/vps-mode.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Upgrade and rollback](docs/upgrade.md)
 - [Security FAQ](docs/security-faq.md)
