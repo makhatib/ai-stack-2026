@@ -37,13 +37,12 @@
 	#
 	# `copy_headers` is an ALLOWLIST: only these four come back from Authelia.
 	# Anything else a caller tried to inject is dropped by the strip below.
-	@authelia_api path /authelia/api/*
-	handle @authelia_api {
-		uri strip_prefix /authelia
-		reverse_proxy authelia:9091
-	}
-
-	handle_path /authelia/* {
+	# Authelia runs with base path /authelia (server.address in
+	# config/authelia/configuration.yml), so the prefix is NOT stripped: its HTML
+	# carries <base href=".../authelia/"> and asks for /authelia/static/....
+	# Stripping it made the browser ask for /static/... at the site root, which
+	# forward-auth answered 302/401, and the login page rendered blank (NOM-453).
+	handle /authelia/* {
 		reverse_proxy authelia:9091
 	}
 

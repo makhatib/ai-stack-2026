@@ -183,7 +183,7 @@ services:
       # (The binary still writes /app/.healthcheck.env for it at startup,
       # which is why the read-only bind above is needed even though nothing
       # reads the file.)  The image is busybox-based, so wget is the probe.
-      test: ["CMD-SHELL", "busybox wget -q -O /dev/null http://127.0.0.1:9091/api/health || exit 1"]
+      test: ["CMD-SHELL", "busybox wget -q -O /dev/null http://127.0.0.1:9091/authelia/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

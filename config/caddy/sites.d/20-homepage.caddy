@@ -8,7 +8,7 @@
 
 handle /dash* {
 	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
+		uri /authelia/api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 	uri strip_prefix /dash

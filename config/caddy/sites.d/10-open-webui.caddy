@@ -7,7 +7,7 @@
 @owui_upload path /api/v1/files* /api/v1/files/*
 handle @owui_upload {
 	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
+		uri /authelia/api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 	# limits.yaml v1 — HTTP request body, upload route: 50 MB.
@@ -30,7 +30,7 @@ handle @owui_upload {
 @owui_app path / /_app/* /static/* /assets/* /audio/* /pyodide/* /wasm/* /sql.js/* /licenses/* /favicon.png /manifest.json /opensearch.xml /robots.txt /user.png /image-placeholder.png /marker-icon.png /marker-icon-2x.png /marker-shadow.png /oauth/* /cache/* /ollama/* /openai/* /admin /admin/* /auth /auth/* /automations /automations/* /calendar /calendar/* /channels/* /c/* /error /folders/* /home /home/* /notes /notes/* /playground /playground/* /s/* /watch /workspace /workspace/*
 handle @owui_app {
 	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
+		uri /authelia/api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 	# limits.yaml v1 — HTTP request body, general: 1 MB.
@@ -42,7 +42,7 @@ handle @owui_app {
 
 handle /api/* {
 	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
+		uri /authelia/api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 	request_body {
@@ -53,7 +53,7 @@ handle /api/* {
 
 handle /ws/* {
 	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
+		uri /authelia/api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 	reverse_proxy open-webui:8080
