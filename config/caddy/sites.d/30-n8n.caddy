@@ -37,7 +37,7 @@ redir /n8n /n8n/ 308
 
 handle /n8n/* {
 	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
+		uri /authelia/api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 	request_body {

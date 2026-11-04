@@ -269,6 +269,9 @@ if n < 1:
     raise SystemExit("configuration.yml no longer templates the hostname; "
                      "this substitution is stale")
 out = text.replace(tmpl, "aistack.ownerboot.test")
+# The shipped home config serves under /authelia (NOM-453); this fixture talks
+# to Authelia directly with root paths, so serve it at the root.
+out = out.replace("tcp://0.0.0.0:9091/authelia", "tcp://0.0.0.0:9091")
 for probe in ("tcp://0.0.0.0:9091", "tcp://postgres:5432"):
     if probe not in out:
         raise SystemExit("the shipped config no longer contains %r, so the "

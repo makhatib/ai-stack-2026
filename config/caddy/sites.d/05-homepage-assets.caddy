@@ -17,7 +17,7 @@
 @homepage_assets path /_next/* /site.webmanifest /homepage.ico /apple-touch-icon.png /favicon-16x16.png /favicon-32x32.png /safari-pinned-tab.svg /android-chrome-* /mstile-* /locales/* /images/* /api/config/* /api/hash /api/services /api/services/* /api/bookmarks /api/widgets /api/widgets/* /api/validate /api/revalidate /api/releases /api/auth/*
 handle @homepage_assets {
 	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
+		uri /authelia/api/authz/forward-auth
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 	request_body {
